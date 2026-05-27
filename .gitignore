@@ -3,3 +3,11 @@
 node_modules/
 .env
 .env.local
+
+# Frontend build output
+dist/
+frontend/dist/
+
+# Rust / Tauri build output
+backend/target/
+backend/gen/

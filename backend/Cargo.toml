@@ -1,0 +1,13 @@
+[package]
+name = "maiestro"
+version = "0.1.0"
+description = "Menu-bar launcher for per-issue dev workspaces"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
