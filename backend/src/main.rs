@@ -1,6 +1,8 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod credentials;
+
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -35,6 +37,11 @@ fn main() {
             // Relaunch focuses the existing app instead of spawning a second.
             show_popover(app);
         }))
+        .invoke_handler(tauri::generate_handler![
+            credentials::credentials_set,
+            credentials::credentials_get,
+            credentials::credentials_delete,
+        ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
             #[cfg(target_os = "macos")]
