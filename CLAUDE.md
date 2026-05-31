@@ -1,5 +1,9 @@
 # mAIestro
 
+## Shell commands
+
+Never hardcode `/Users/<name>/` in Bash commands. Use relative paths or `~` instead (e.g. `~/src/maiestro`, `./backend`). A hook blocks any command containing a hardcoded `/Users/` path.
+
 A Tauri v2 menu-bar app on macOS that launches and manages git-worktree-per-issue development workspaces, each running its own scoped Claude Code session.
 
 Directory layout: `backend/` (Rust/Tauri) and `frontend/` (web). Not Tauri's defaults of `src-tauri/` and `src/`.

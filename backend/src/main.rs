@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod credentials;
+mod plugin;
+mod plugins;
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -12,6 +14,9 @@ use tauri::{
     Manager, WindowEvent,
 };
 use tauri_plugin_positioner::{Position, WindowExt};
+
+use plugin::{PluginRegistry, plugins_list_credential_types};
+use plugins::{AnthropicPlugin, GitHubPlugin};
 
 /// Records when the popover was auto-hidden on blur. A tray click that *caused*
 /// that blur (clicking the icon while the window is open) lands here within a few
@@ -30,8 +35,14 @@ fn show_popover(app: &tauri::AppHandle) {
 }
 
 fn main() {
+    let registry = PluginRegistry::builder()
+        .register(GitHubPlugin)
+        .register(AnthropicPlugin)
+        .build();
+
     tauri::Builder::default()
         .manage(PopoverState::default())
+        .manage(registry)
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Relaunch focuses the existing app instead of spawning a second.
@@ -41,6 +52,8 @@ fn main() {
             credentials::credentials_set,
             credentials::credentials_get,
             credentials::credentials_delete,
+            credentials::credentials_resolve,
+            plugins_list_credential_types,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
