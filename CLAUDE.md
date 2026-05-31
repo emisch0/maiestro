@@ -29,7 +29,7 @@ Reasons:
 
 ### Identity = AgentProfile, stored in Keychain
 
-The unit of identity is an `AgentProfile`: name, allowed repos, capability set, and references to credentials. The credential **values** (GitHub token, Anthropic key) live in the macOS Keychain under `com.maiestro.agent.<profile-id>.<credential-kind>`. The profile JSON in `~/Library/Application Support/com.maiestro/profiles.json` holds only the references.
+The unit of identity is an `AgentProfile`: name, allowed repos, capability set, and references to credentials. The credential **values** (GitHub token, Anthropic key) live in the macOS Keychain under `com.maiestro.agent.<profile-id>.<credential-kind>`. The profile JSON in `~/.maiestro/profiles.json` holds only the references. This path is intentionally developer-friendly (like `~/.ssh/`) so profiles can be inspected, edited by hand, and managed by dotfile tooling.
 
 Keychain is chosen because it is unlocked at user login, so credentials are available even when mAIestro launches at startup (when shell profiles are not sourced and env files are unavailable).
 
@@ -38,3 +38,27 @@ Keychain is chosen because it is unlocked at user login, so credentials are avai
 Every subprocess mAIestro spawns into a worktree — the `claude` CLI, a shell, `git` — runs with a **clean, explicitly constructed env**, not the parent's full env. Into that env we inject only what the selected profile authorizes: `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `GIT_{AUTHOR,COMMITTER}_{NAME,EMAIL}` matching the profile's GitHub identity, and a git credential helper that hands out `GITHUB_TOKEN` over HTTPS.
 
 This is what makes the multi-agent model real: two worktrees open at once can act as fully distinct GitHub identities with no cross-contamination, and a worktree never inherits ambient credentials the user happens to have in their shell.
+
+### User-facing tool launches use `open -a`, not a constructed env
+
+When the user clicks "Open in VSCode" or "Open Terminal", mAIestro delegates to macOS Launch Services via `open -a <App> <worktree-path>`. The OS launches the app exactly as a Finder double-click would — the app receives the user's full environment (Homebrew PATH, shell integrations, all installed tools) with no env construction by mAIestro.
+
+This is intentionally different from agent spawns: user-facing tools get the *user's* world; agent subprocesses get the *profile's* world.
+
+Any per-repo settings the user needs to configure (e.g. which terminal app, which editor, workspace-level env overrides) are stored in per-repo settings — see "Per-repo settings" below.
+
+### Per-repo settings
+
+Each repo tracked by mAIestro has a small settings record stored in `~/.maiestro/repos/<owner>-<name>.json`. This is the place for configuration that is specific to a repo but not a credential. The file is human-editable and dotfile-manageable.
+
+Current schema:
+
+```json
+{
+  "checkout_dir": "~/src/repo-name",
+  "env_files": ["/absolute/path/.env", "/absolute/path/.env.local"]
+}
+```
+
+- **`checkout_dir`**: absolute path to the local git checkout. Defaults to `~/src/<repo-name>` (no owner prefix). Used as the root for worktree creation and for env file scanning.
+- **`env_files`**: ordered list of `.env` files to source when launching user-facing tools (VSCode, Terminal) for this repo. Populated via a "Scan" action that walks the checkout directory (up to 4 levels, skipping `node_modules`, `.git`, `target`, etc.) looking for files whose name starts with `.env`. Users can also add or remove entries manually.

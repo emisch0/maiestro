@@ -2,8 +2,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod credentials;
+mod identities;
 mod plugin;
 mod plugins;
+mod repo_settings;
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -16,7 +18,7 @@ use tauri::{
 use tauri_plugin_positioner::{Position, WindowExt};
 
 use plugin::{PluginRegistry, plugins_list_credential_types};
-use plugins::{AnthropicPlugin, GitHubPlugin};
+use plugins::{AnthropicPlugin, GitHubPlugin, anthropic_auth_mode_get, anthropic_auth_mode_set, github_list_repos};
 
 /// Records when the popover was auto-hidden on blur. A tray click that *caused*
 /// that blur (clicking the icon while the window is open) lands here within a few
@@ -52,8 +54,15 @@ fn main() {
             credentials::credentials_set,
             credentials::credentials_get,
             credentials::credentials_delete,
-            credentials::credentials_resolve,
             plugins_list_credential_types,
+            anthropic_auth_mode_get,
+            anthropic_auth_mode_set,
+            repo_settings::repos_list,
+            repo_settings::repo_settings_get,
+            repo_settings::repo_settings_set,
+            repo_settings::repo_scan_env_files,
+            github_list_repos,
+            identities::identities_list,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
