@@ -23,7 +23,6 @@ export default function App() {
   const [repoView, setRepoView] = useState<RepoView>({ mode: "list" });
   const [credTypes, setCredTypes] = useState<CredentialTypeDto[]>([]);
   const [credStates, setCredStates] = useState<Record<string, CredState>>({});
-  const [anthropicMode, setAnthropicMode] = useState<"api_key" | "claude_session">("api_key");
   const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, env_files: [], identity_id: null });
   const [checkoutDraft, setCheckoutDraft] = useState("");
   const [addingEnvFile, setAddingEnvFile] = useState(false);
@@ -59,12 +58,11 @@ export default function App() {
       for (const id of Object.keys(next)) next[id] = { ...next[id], isSet: false };
       return next;
     });
-    setAnthropicMode("api_key");
     if (!activeScope || credTypes.length === 0) return;
     const scope = activeScope;
     const timer = setTimeout(async () => {
-      await Promise.all([
-        ...credTypes.map(async (t) => {
+      await Promise.all(
+        credTypes.map(async (t) => {
           try {
             await api.getCredential(t.type_id, scope);
             patchCred(t.type_id, { isSet: true });
@@ -72,10 +70,7 @@ export default function App() {
             patchCred(t.type_id, { isSet: false });
           }
         }),
-        api.getAnthropicAuthMode(scope).then((m) =>
-          setAnthropicMode(m === "claude_session" ? "claude_session" : "api_key")
-        ).catch(() => {}),
-      ]);
+      );
     }, 300);
     return () => clearTimeout(timer);
   }, [scopeKey]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -149,16 +144,6 @@ export default function App() {
     });
   }
 
-  async function handleAnthropicModeChange(mode: "api_key" | "claude_session") {
-    if (!activeScope) return;
-    try {
-      await api.setAnthropicAuthMode(activeScope, mode);
-      setAnthropicMode(mode);
-    } catch (e) {
-      patchCred("anthropic_key", { status: "error", error: String(e) });
-    }
-  }
-
   async function handleClear(type_id: string) {
     if (!activeScope) return;
     patchCred(type_id, { status: "clearing" });
@@ -194,67 +179,6 @@ export default function App() {
         {credTypes.map((t) => {
           const state = credStates[t.type_id] ?? { isSet: false, input: "", status: "idle" as SaveStatus };
           const isBusy = state.status === "saving" || state.status === "clearing";
-
-          if (t.type_id === "anthropic_key") {
-            const usingSession = anthropicMode === "claude_session";
-            const keyBadgeClass = usingSession ? "not-set" : state.isSet ? "is-set" : "not-set";
-            const keyBadgeLabel = usingSession ? "–" : state.isSet ? "set" : "not set";
-            return (
-              <div key={t.type_id} className="cred-row">
-                <div className="cred-header">
-                  <span className="cred-name">Claude / Anthropic</span>
-                  {!usingSession && <span className={`cred-badge ${keyBadgeClass}`}>{keyBadgeLabel}</span>}
-                </div>
-                <div className="auth-mode-toggle">
-                  <button
-                    className={`auth-mode-btn ${usingSession ? "active" : ""}`}
-                    onClick={() => handleAnthropicModeChange("claude_session")}
-                  >
-                    Claude session
-                  </button>
-                  <button
-                    className={`auth-mode-btn ${!usingSession ? "active" : ""}`}
-                    onClick={() => handleAnthropicModeChange("api_key")}
-                  >
-                    API key
-                  </button>
-                </div>
-                {usingSession ? (
-                  <p className="session-hint">
-                    Uses your existing <code>claude</code> login — no key needed.
-                  </p>
-                ) : (
-                  <div className="cred-controls">
-                    <input
-                      className="text-input secret-input"
-                      type="password"
-                      placeholder={state.isSet ? "Update value…" : "Enter value…"}
-                      value={state.input}
-                      disabled={isBusy}
-                      onChange={(e) => patchCred(t.type_id, { input: e.target.value, status: "idle" })}
-                      onKeyDown={(e) => e.key === "Enter" && handleSave(t.type_id)}
-                    />
-                    <button
-                      className="btn-save"
-                      disabled={!state.input.trim() || isBusy}
-                      onClick={() => handleSave(t.type_id)}
-                    >
-                      {state.status === "saving" ? "…" : state.status === "saved" ? "✓" : "Save"}
-                    </button>
-                    <button
-                      className={`btn-clear ${!state.isSet ? "hidden" : ""}`}
-                      disabled={!state.isSet || isBusy}
-                      onClick={() => handleClear(t.type_id)}
-                      title="Remove credential"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                )}
-                {state.status === "error" && <p className="cred-error">{state.error}</p>}
-              </div>
-            );
-          }
 
           return (
             <div key={t.type_id} className="cred-row">

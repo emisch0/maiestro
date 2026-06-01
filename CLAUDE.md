@@ -29,13 +29,15 @@ Reasons:
 
 ### Identity = AgentProfile, stored in Keychain
 
-The unit of identity is an `AgentProfile`: name, allowed repos, capability set, and references to credentials. The credential **values** (GitHub token, Anthropic key) live in the macOS Keychain under `com.maiestro.agent.<profile-id>.<credential-kind>`. The profile JSON in `~/.maiestro/profiles.json` holds only the references. This path is intentionally developer-friendly (like `~/.ssh/`) so profiles can be inspected, edited by hand, and managed by dotfile tooling.
+The unit of identity is an `AgentProfile`: name, allowed repos, capability set, and references to credentials. The credential **values** (currently the GitHub token) live in the macOS Keychain under `com.maiestro.agent.<profile-id>.<credential-kind>`. The profile JSON in `~/.maiestro/profiles.json` holds only the references. This path is intentionally developer-friendly (like `~/.ssh/`) so profiles can be inspected, edited by hand, and managed by dotfile tooling.
 
 Keychain is chosen because it is unlocked at user login, so credentials are available even when mAIestro launches at startup (when shell profiles are not sourced and env files are unavailable).
 
 ### Credential injection at spawn time
 
-Every subprocess mAIestro spawns into a worktree — the `claude` CLI, a shell, `git` — runs with a **clean, explicitly constructed env**, not the parent's full env. Into that env we inject only what the selected profile authorizes: `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `GIT_{AUTHOR,COMMITTER}_{NAME,EMAIL}` matching the profile's GitHub identity, and a git credential helper that hands out `GITHUB_TOKEN` over HTTPS.
+Every subprocess mAIestro spawns into a worktree — the `claude` CLI, a shell, `git` — runs with a **clean, explicitly constructed env**, not the parent's full env. Into that env we inject only what the selected profile authorizes: `GITHUB_TOKEN`, `GIT_{AUTHOR,COMMITTER}_{NAME,EMAIL}` matching the profile's GitHub identity, and a git credential helper that hands out `GITHUB_TOKEN` over HTTPS.
+
+We do **not** inject an `ANTHROPIC_API_KEY`. Claude authentication always comes from the `claude` CLI's own login session (read from `~/.claude/` via `$HOME`), so the spawn env must carry `$HOME` through. mAIestro does not store or manage an Anthropic credential.
 
 This is what makes the multi-agent model real: two worktrees open at once can act as fully distinct GitHub identities with no cross-contamination, and a worktree never inherits ambient credentials the user happens to have in their shell.
 

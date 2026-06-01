@@ -18,7 +18,7 @@ use tauri::{
 use tauri_plugin_positioner::{Position, WindowExt};
 
 use plugin::{PluginRegistry, plugins_list_credential_types};
-use plugins::{AnthropicPlugin, GitHubPlugin, anthropic_auth_mode_get, anthropic_auth_mode_set, github_list_repos};
+use plugins::{GitHubPlugin, github_list_repos};
 
 /// Records when the popover was auto-hidden on blur. A tray click that *caused*
 /// that blur (clicking the icon while the window is open) lands here within a few
@@ -39,7 +39,6 @@ fn show_popover(app: &tauri::AppHandle) {
 fn main() {
     let registry = PluginRegistry::builder()
         .register(GitHubPlugin)
-        .register(AnthropicPlugin)
         .build();
 
     tauri::Builder::default()
@@ -55,8 +54,6 @@ fn main() {
             credentials::credentials_get,
             credentials::credentials_delete,
             plugins_list_credential_types,
-            anthropic_auth_mode_get,
-            anthropic_auth_mode_set,
             repo_settings::repos_list,
             repo_settings::repo_settings_get,
             repo_settings::repo_settings_set,

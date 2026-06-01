@@ -466,38 +466,6 @@ body {
   user-select: text;
 }
 
-/* ── Auth mode toggle ────────────────────────────────────────────────── */
-
-.auth-mode-toggle {
-  display: flex;
-  gap: 4px;
-}
-
-.auth-mode-btn {
-  flex: 1;
-  padding: 5px 0;
-  font-size: 12px;
-  font-weight: 500;
-  font-family: var(--font);
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--muted);
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s, border-color 0.12s;
-}
-
-.auth-mode-btn:hover:not(.active) {
-  background: var(--surface-hover);
-  color: var(--text);
-}
-
-.auth-mode-btn.active {
-  background: var(--accent-bg);
-  border-color: var(--accent-border);
-  color: var(--accent);
-}
-
 .session-hint {
   font-size: 11.5px;
   color: var(--muted);

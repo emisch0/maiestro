@@ -34,12 +34,6 @@ export const api = {
   deleteCredential: (type_id: string, scope: CredentialScope) =>
     invoke<void>("credentials_delete", { typeId: type_id, scope }),
 
-  getAnthropicAuthMode: (scope: CredentialScope) =>
-    invoke<string>("anthropic_auth_mode_get", { scope }),
-
-  setAnthropicAuthMode: (scope: CredentialScope, mode: string) =>
-    invoke<void>("anthropic_auth_mode_set", { scope, mode }),
-
   listRepos: () =>
     invoke<string[]>("repos_list"),
 
