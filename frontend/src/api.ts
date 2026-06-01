@@ -49,6 +49,12 @@ export const api = {
   identitiesList: () =>
     invoke<string[]>("identities_list"),
 
+  getDefaultIdentity: () =>
+    invoke<string | null>("identities_get_default"),
+
+  setDefaultIdentity: (identityId: string) =>
+    invoke<void>("identities_set_default", { identityId }),
+
   githubListRepos: (identityId: string) =>
     invoke<GHRepo[]>("github_list_repos", { identityId }),
 };

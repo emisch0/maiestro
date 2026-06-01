@@ -19,6 +19,8 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("identity");
   const [identityId, setIdentityId] = useState("");
   const [knownIdentities, setKnownIdentities] = useState<string[]>([]);
+  const [addingIdentity, setAddingIdentity] = useState(false);
+  const [identityInput, setIdentityInput] = useState("");
   const [repos, setRepos] = useState<string[]>([]);
   const [repoView, setRepoView] = useState<RepoView>({ mode: "list" });
   const [credTypes, setCredTypes] = useState<CredentialTypeDto[]>([]);
@@ -38,6 +40,7 @@ export default function App() {
     });
     api.listRepos().then(setRepos);
     api.identitiesList().then(setKnownIdentities);
+    api.getDefaultIdentity().then((id) => { if (id) setIdentityId(id); });
   }, []);
 
   const patchCred = useCallback((type_id: string, patch: Partial<CredState>) => {
@@ -144,6 +147,20 @@ export default function App() {
     });
   }
 
+  // Adopt an identity as the active one and remember it as the default so it is
+  // restored on the next launch. Used by both the picker and the add-new flow.
+  async function commitIdentity(id: string) {
+    const trimmed = id.trim();
+    if (!trimmed) return;
+    setIdentityId(trimmed);
+    setAddingIdentity(false);
+    setIdentityInput("");
+    try {
+      await api.setDefaultIdentity(trimmed);
+      api.identitiesList().then(setKnownIdentities);
+    } catch { /* best-effort: selection still works for this session */ }
+  }
+
   async function handleClear(type_id: string) {
     if (!activeScope) return;
     patchCred(type_id, { status: "clearing" });
@@ -247,22 +264,52 @@ export default function App() {
       {tab === "identity" ? (
         <>
           <div className="context-section">
-            <label className="field-label">Identity ID</label>
-            <input
-              className="text-input"
-              type="text"
-              placeholder="e.g. default"
-              value={identityId}
-              onChange={(e) => setIdentityId(e.target.value)}
-              spellCheck={false}
-              autoCapitalize="off"
-              autoCorrect="off"
-            />
+            <label className="field-label">Identity</label>
+            {knownIdentities.length === 0 || addingIdentity ? (
+              <div className="cred-controls">
+                <input
+                  className="text-input"
+                  type="text"
+                  placeholder="e.g. default"
+                  value={identityInput}
+                  autoFocus={addingIdentity}
+                  onChange={(e) => setIdentityInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitIdentity(identityInput);
+                    if (e.key === "Escape") { setAddingIdentity(false); setIdentityInput(""); }
+                  }}
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                />
+                <button className="btn-save" disabled={!identityInput.trim()} onClick={() => commitIdentity(identityInput)}>Add</button>
+                {knownIdentities.length > 0 && (
+                  <button className="btn-clear" onClick={() => { setAddingIdentity(false); setIdentityInput(""); }}>✕</button>
+                )}
+              </div>
+            ) : (
+              <div className="cred-controls">
+                <select
+                  className="text-input profile-select"
+                  value={identityId}
+                  onChange={(e) => commitIdentity(e.target.value)}
+                >
+                  {!identityId && <option value="">Select an identity…</option>}
+                  {identityId && !knownIdentities.includes(identityId) && (
+                    <option value={identityId}>{identityId}</option>
+                  )}
+                  {knownIdentities.map((iid) => (
+                    <option key={iid} value={iid}>{iid}</option>
+                  ))}
+                </select>
+                <button className="btn-add" onClick={() => { setAddingIdentity(true); setIdentityInput(""); }}>+ New</button>
+              </div>
+            )}
           </div>
           <div className="cred-list">
             {identityId.trim() ? <CredRows /> : (
               <div className="empty-state">
-                <p className="empty-state-body">Enter an identity ID above to manage its credentials.</p>
+                <p className="empty-state-body">Select or add an identity to manage its credentials.</p>
               </div>
             )}
           </div>

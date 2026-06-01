@@ -60,6 +60,8 @@ fn main() {
             repo_settings::repo_scan_env_files,
             github_list_repos,
             identities::identities_list,
+            identities::identities_get_default,
+            identities::identities_set_default,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
