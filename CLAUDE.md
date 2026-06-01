@@ -41,6 +41,12 @@ We do **not** inject an `ANTHROPIC_API_KEY`. Claude authentication always comes 
 
 This is what makes the multi-agent model real: two worktrees open at once can act as fully distinct GitHub identities with no cross-contamination, and a worktree never inherits ambient credentials the user happens to have in their shell.
 
+### Code signing is required for releases (and for Keychain trust)
+
+Release builds must be signed with a **Developer ID Application** certificate and notarized. Beyond distribution, this is also what makes the app's Keychain access usable: macOS binds a Keychain item's "Always Allow" decision to the app's *designated requirement*. For an ad-hoc/unsigned build that requirement is the binary's cdhash, which changes on every rebuild — so the access prompt returns each launch. A stable Developer ID signature anchors the requirement to the certificate, so the grant persists.
+
+Dev builds (`tauri dev`) run the raw, ad-hoc-signed binary and will re-prompt on each rebuild — that is expected and accepted. Signing is **not** committed to `tauri.conf.json`; the signing identity and notarization secrets live in a gitignored `.env.release` (template: `.env.release.example`). Run `scripts/release.sh`, which sources that file, builds via `tauri build`, and verifies the signature/notarization.
+
 ### User-facing tool launches use `open -a`, not a constructed env
 
 When the user clicks "Open in VSCode" or "Open Terminal", mAIestro delegates to macOS Launch Services via `open -a <App> <worktree-path>`. The OS launches the app exactly as a Finder double-click would — the app receives the user's full environment (Homebrew PATH, shell integrations, all installed tools) with no env construction by mAIestro.
