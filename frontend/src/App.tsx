@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
 import { api, CredentialScope, CredentialTypeDto, GHRepo, RepoSettings } from "./api";
 
 type Tab = "identity" | "repo";
@@ -15,7 +16,7 @@ interface CredState {
   error?: string;
 }
 
-export default function App() {
+function Settings() {
   const [tab, setTab] = useState<Tab>("identity");
   const [identityId, setIdentityId] = useState("");
   const [knownIdentities, setKnownIdentities] = useState<string[]>([]);
@@ -41,6 +42,17 @@ export default function App() {
     api.listRepos().then(setRepos);
     api.identitiesList().then(setKnownIdentities);
     api.getDefaultIdentity().then((id) => { if (id) setIdentityId(id); });
+  }, []);
+
+  // Closing the Settings window hides it (keeping it alive for reuse) rather
+  // than destroying it, so the gear icon can reopen the same window.
+  useEffect(() => {
+    const win = getCurrentWindow();
+    const unlisten = win.onCloseRequested((event) => {
+      event.preventDefault();
+      win.hide();
+    });
+    return () => { unlisten.then((f) => f()); };
   }, []);
 
   const patchCred = useCallback((type_id: string, patch: Partial<CredState>) => {
@@ -240,10 +252,10 @@ export default function App() {
   }
 
   return (
-    <main className="panel">
+    <main className="panel panel--window">
       <header className="panel-header">
         <h1>m<span className="ai">AI</span>estro</h1>
-        <span className="panel-subtitle">Credentials</span>
+        <span className="panel-subtitle">Settings</span>
       </header>
 
       <div className="tabs">
@@ -567,4 +579,38 @@ export default function App() {
       )}
     </main>
   );
+}
+
+async function openSettings() {
+  const settings = (await getAllWindows()).find((w) => w.label === "settings");
+  if (settings) {
+    await settings.show();
+    await settings.setFocus();
+  }
+}
+
+function MainView() {
+  return (
+    <main className="panel">
+      <header className="panel-header">
+        <h1>m<span className="ai">AI</span>estro</h1>
+        <button className="icon-btn" onClick={openSettings} title="Settings" aria-label="Settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
+      </header>
+      <div className="main-body">
+        <div className="empty-state">
+          <p className="empty-state-title">No workspaces yet</p>
+          <p className="empty-state-body">Open Settings to configure an identity and repos, then spin up a worktree session.</p>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+export default function App() {
+  return getCurrentWindow().label === "settings" ? <Settings /> : <MainView />;
 }

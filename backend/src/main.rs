@@ -120,6 +120,11 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Only the menu-bar popover auto-hides on blur; the Settings window
+            // is a normal window and must stay open when you click elsewhere.
+            if window.label() != "main" {
+                return;
+            }
             // Hide (don't quit) when the popover loses focus, so clicking away
             // dismisses it like a normal menu-bar dropdown.
             if let WindowEvent::Focused(false) = event {

@@ -25,6 +25,17 @@
         "visible": false,
         "skipTaskbar": true,
         "shadow": true
+      },
+      {
+        "label": "settings",
+        "title": "mAIestro Settings",
+        "width": 380,
+        "height": 500,
+        "minWidth": 340,
+        "minHeight": 420,
+        "resizable": true,
+        "visible": false,
+        "center": true
       }
     ],
     "security": {
