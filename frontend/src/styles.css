@@ -195,13 +195,43 @@ body {
   overflow: hidden;
 }
 
-/* Working: green mark that gently pulses while a tool runs. */
-.claude-pill--busy .claude-pill-mark {
-  color: var(--green);
-  animation: claude-pulse 1.4s ease-in-out infinite;
+/* Working: a rotating rainbow ring traces the border — the same glow as
+   .btn-busy, but border-only (no halo) — and is the sole "busy" indicator. The
+   mark and label are plain off-white (green clashed with the rainbow, and the
+   ring already conveys activity, so the mark no longer pulses). Reuses the
+   shared --glow-angle property and glow-rotate keyframe. */
+.claude-pill--busy {
+  position: relative;
+  isolation: isolate;
 }
+.claude-pill--busy .claude-pill-mark,
 .claude-pill--busy .claude-pill-label {
-  color: var(--green);
+  color: var(--text);
+}
+
+.claude-pill--busy::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: conic-gradient(
+    from var(--glow-angle),
+    #ff2d55, #ff9500, #ffcc00, #34c759, #5ac8fa, #af52de, #ff2d55
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: glow-rotate 2.4s linear infinite;
+  pointer-events: none;
+}
+
+/* Respect reduced-motion: keep the rainbow ring, but stop it rotating. */
+@media (prefers-reduced-motion: reduce) {
+  .claude-pill--busy::before {
+    animation: none;
+  }
 }
 
 /* Needs you: amber and emphasized — the actionable state. */
@@ -218,11 +248,6 @@ body {
 .claude-pill--running .claude-pill-mark,
 .claude-pill--idle .claude-pill-mark {
   color: var(--muted);
-}
-
-@keyframes claude-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
 }
 
 /* Right-aligned segmented pill of icon actions on a session row. */
