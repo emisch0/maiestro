@@ -1116,7 +1116,7 @@ pub async fn teardown(session_id: String, confirmed: bool) -> Result<TeardownOut
                 WinProbe::Open => {
                     if waited >= 4000 {
                         return Err(
-                            "VS Code still has this worktree open — close its window, then try Clean Up again."
+                            "VS Code still has this worktree open — close its window, then try Tear Down again."
                                 .to_string(),
                         );
                     }

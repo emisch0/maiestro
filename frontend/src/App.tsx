@@ -944,8 +944,8 @@ function MainView() {
   const [prs, setPrs] = useState<Record<string, PrLink | null>>({});
   // Session id whose inline command strip is expanded (only one at a time).
   const [commandsOpen, setCommandsOpen] = useState<string | null>(null);
-  // Pending Clean Up confirmation: the session id and the warnings to show.
-  const [cleanupConfirm, setCleanupConfirm] = useState<{ id: string; warnings: string[] } | null>(null);
+  // Pending Tear Down confirmation: the session id and the warnings to show.
+  const [teardownConfirm, setTeardownConfirm] = useState<{ id: string; warnings: string[] } | null>(null);
   // Create-PR progress/error per session id: `{ creating }` while in flight,
   // `{ error }` after a failure. Absent = idle.
   const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; error?: string }>>({});
@@ -1229,30 +1229,30 @@ function MainView() {
     }
   }
 
-  // "Clean Up": tear down the worktree. Confirms first unless the backend says
+  // "Tear Down": remove the worktree. Confirms first unless the backend says
   // it's safe (PR merged, nothing new).
-  async function cleanUp(s: Session) {
-    setCleanupConfirm(null);
+  async function tearDown(s: Session) {
+    setTeardownConfirm(null);
     try {
       const res = await api.teardown(s.id);
       if (res.status === "needs_confirmation") {
-        setCleanupConfirm({ id: s.id, warnings: res.warnings });
+        setTeardownConfirm({ id: s.id, warnings: res.warnings });
       } else {
         refreshSessions();
       }
     } catch (e) {
-      setCleanupConfirm({ id: s.id, warnings: [`Teardown failed: ${String(e)}`] });
+      setTeardownConfirm({ id: s.id, warnings: [`Teardown failed: ${String(e)}`] });
     }
   }
 
-  async function confirmCleanup(id: string) {
+  async function confirmTeardown(id: string) {
     try {
       await api.teardown(id, true);
     } catch (e) {
-      setCleanupConfirm({ id, warnings: [`Teardown failed: ${String(e)}`] });
+      setTeardownConfirm({ id, warnings: [`Teardown failed: ${String(e)}`] });
       return;
     }
-    setCleanupConfirm(null);
+    setTeardownConfirm(null);
     setCommandsOpen((open) => (open === id ? null : open));
     refreshSessions();
   }
@@ -1432,7 +1432,7 @@ function MainView() {
                         ) : (
                           <button className="command-btn" onClick={() => { setCommandsOpen(null); setHideTarget({ kind: "session", session: s }); }}>Hide…</button>
                         )}
-                        <button className="command-btn" onClick={() => cleanUp(s)}>Clean Up</button>
+                        <button className="command-btn" onClick={() => tearDown(s)}>Tear Down</button>
                       </div>
                       {prc?.error && (
                         <div className="cleanup-confirm">
@@ -1445,17 +1445,17 @@ function MainView() {
                           </div>
                         </div>
                       )}
-                      {cleanupConfirm?.id === s.id && (
+                      {teardownConfirm?.id === s.id && (
                         <div className="cleanup-confirm">
                           <p className="cleanup-lead">Remove this workspace?</p>
                           <ul className="cleanup-warnings">
-                            {cleanupConfirm.warnings.map((w, i) => (
+                            {teardownConfirm.warnings.map((w, i) => (
                               <li key={i}>{w}</li>
                             ))}
                           </ul>
                           <div className="issue-actions">
-                            <button className="btn-danger" onClick={() => confirmCleanup(s.id)}>Remove anyway</button>
-                            <button className="btn-ghost" onClick={() => setCleanupConfirm(null)}>Cancel</button>
+                            <button className="btn-danger" onClick={() => confirmTeardown(s.id)}>Remove anyway</button>
+                            <button className="btn-ghost" onClick={() => setTeardownConfirm(null)}>Cancel</button>
                           </div>
                         </div>
                       )}
