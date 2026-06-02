@@ -100,6 +100,21 @@ export interface PrLink {
   state: string;
 }
 
+/** Live per-session status, written by the `maiestro hook` helper and watched
+ *  by the backend. Pushed to the UI via the `session-status` event and read in
+ *  bulk via `sessions_status_list`. */
+export interface StatusRecord {
+  /** Workspace id (= Session.id). */
+  workspace: string;
+  /** One of "running", "busy", "needs_you", "idle", "ended". */
+  state: string;
+  session_id?: string;
+  cwd?: string;
+  /** Short human detail, e.g. "permission: Bash" or a tool name. */
+  detail?: string;
+  ts: string;
+}
+
 export type CredentialScope = { kind: "identity"; identity_id: string };
 
 export interface CredentialTypeDto {
@@ -187,6 +202,9 @@ export const api = {
 
   sessionsList: () =>
     invoke<Session[]>("sessions_list"),
+
+  sessionsStatusList: () =>
+    invoke<StatusRecord[]>("sessions_status_list"),
 
   teardown: (sessionId: string, confirmed = false, force = false) =>
     invoke<TeardownOutcome>("teardown", { sessionId, confirmed, force }),

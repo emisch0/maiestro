@@ -154,6 +154,77 @@ body {
   white-space: nowrap;
 }
 
+/* Claude session pill: the Claude mark tints by live session state, with the
+   status word beside it. Sits between the title and the action pill group, and
+   clicking it opens the session's VS Code window. */
+.claude-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 3px 9px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--font);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.claude-pill:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.claude-pill-mark {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+/* Fixed width sized to the longest label ("Needs you") so the pill — and the
+   title beside it — don't shift as the state changes. */
+.claude-pill-label {
+  display: inline-block;
+  width: 56px;
+  overflow: hidden;
+}
+
+/* Working: green mark that gently pulses while a tool runs. */
+.claude-pill--busy .claude-pill-mark {
+  color: var(--green);
+  animation: claude-pulse 1.4s ease-in-out infinite;
+}
+.claude-pill--busy .claude-pill-label {
+  color: var(--green);
+}
+
+/* Needs you: amber and emphasized — the actionable state. */
+.claude-pill--needs_you {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.claude-pill--needs_you .claude-pill-mark {
+  color: var(--accent);
+}
+
+/* Ready / idle: muted mark. */
+.claude-pill--running .claude-pill-mark,
+.claude-pill--idle .claude-pill-mark {
+  color: var(--muted);
+}
+
+@keyframes claude-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 /* Right-aligned segmented pill of icon actions on a session row. */
 .session-pill {
   display: inline-flex;
