@@ -8,6 +8,7 @@ export interface HideState {
 
 export interface RepoSettings {
   checkout_dir: string | null;
+  worktree_prefix: string | null;
   env_files: string[];
   identity_id: string | null;
   hidden: HideState | null;

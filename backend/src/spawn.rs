@@ -373,11 +373,17 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         if t.is_empty() { default_short_title("") } else { t.to_string() }
     };
 
+    // Worktree location prefix: the full path is `<prefix><workspace>/<repo>`
+    // (string concat — the trailing `work-` is part of the dir name). Unset
+    // falls back to the original `~/src/work-` behavior.
+    let worktree_prefix = settings.worktree_prefix.as_deref().unwrap_or("~/src/work-").to_string();
+    let worktree_dir = |workspace: &str| expand_tilde(&format!("{worktree_prefix}{workspace}")).join(&repo_name);
+
     // Workspace name: "<n>-<slug>".
     let prefix = format!("#{issue_number} — ");
     let base_workspace = format!("{issue_number}-{}", slugify(&short_label, 25));
     let base_branch = format!("feature/{base_workspace}");
-    let base_dir = home().join(format!("src/work-{base_workspace}")).join(&repo_name);
+    let base_dir = worktree_dir(&base_workspace);
 
     // Reuse an existing workspace by default; --new forces a fresh one.
     if !force_new && base_dir.is_dir() {
@@ -400,7 +406,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     while work_dir.is_dir() || local_branch_exists(&checkout, &branch) {
         workspace = format!("{base_workspace}-{n}");
         branch = format!("{base_branch}-{n}");
-        work_dir = home().join(format!("src/work-{workspace}")).join(&repo_name);
+        work_dir = worktree_dir(&workspace);
         session_label = format!("{prefix}{short_label} ({n})");
         n += 1;
     }
@@ -1119,12 +1125,14 @@ pub async fn teardown(session_id: String, confirmed: bool) -> Result<TeardownOut
         let _ = git(&checkout, &["branch", "-D", &branch]);
     }
 
-    // 4. Remove the leftover work-* parent dir, guarding the path shape.
+    // 4. Remove the leftover wrapper dir (`<prefix><workspace>`), gating removal
+    //    on the path actually starting with the repo's configured worktree
+    //    prefix so we never remove_dir_all something outside it.
     if let Some(parent) = work_dir.parent() {
-        let src = home().join("src");
-        let under_src = parent.parent() == Some(src.as_path());
-        let is_work = parent.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("work-"));
-        if under_src && is_work && parent.exists() {
+        let prefix = settings.worktree_prefix.as_deref().unwrap_or("~/src/work-");
+        let expanded = expand_tilde(prefix);
+        let under_prefix = parent.to_string_lossy().starts_with(&*expanded.to_string_lossy());
+        if under_prefix && parent.exists() {
             let _ = std::fs::remove_dir_all(parent);
         }
     }

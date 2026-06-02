@@ -45,8 +45,9 @@ function Settings() {
   const [repoView, setRepoView] = useState<RepoView>({ mode: "list" });
   const [credTypes, setCredTypes] = useState<CredentialTypeDto[]>([]);
   const [credStates, setCredStates] = useState<Record<string, CredState>>({});
-  const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, env_files: [], identity_id: null, hidden: null });
+  const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, worktree_prefix: null, env_files: [], identity_id: null, hidden: null });
   const [checkoutDraft, setCheckoutDraft] = useState("");
+  const [worktreePrefixDraft, setWorktreePrefixDraft] = useState("");
   const [addingEnvFile, setAddingEnvFile] = useState(false);
   const [envFileInput, setEnvFileInput] = useState("");
   const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "done">("idle");
@@ -130,6 +131,7 @@ function Settings() {
     api.getRepoSettings(repo).then((s) => {
       setRepoSettings(s);
       setCheckoutDraft(s.checkout_dir ?? "");
+      setWorktreePrefixDraft(s.worktree_prefix ?? "");
     });
     setScanStatus("idle");
     setAddingEnvFile(false);
@@ -145,6 +147,11 @@ function Settings() {
   async function handleCheckoutDirCommit() {
     const dir = checkoutDraft.trim() || null;
     await saveRepoSettings({ ...repoSettings, checkout_dir: dir });
+  }
+
+  async function handleWorktreePrefixCommit() {
+    const prefix = worktreePrefixDraft.trim() || null;
+    await saveRepoSettings({ ...repoSettings, worktree_prefix: prefix });
   }
 
   async function handleScanEnvFiles() {
@@ -390,6 +397,27 @@ function Settings() {
                   onChange={(e) => setCheckoutDraft(e.target.value)}
                   onBlur={handleCheckoutDirCommit}
                   onKeyDown={(e) => e.key === "Enter" && handleCheckoutDirCommit()}
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                />
+              </div>
+            </div>
+
+            {/* ── Worktree prefix ── */}
+            <div className="settings-group">
+              <div className="settings-group-header">
+                <span className="field-label" style={{ marginBottom: 0 }}>Worktree prefix</span>
+              </div>
+              <div className="cred-controls">
+                <input
+                  className="text-input"
+                  type="text"
+                  placeholder="~/src/work-"
+                  value={worktreePrefixDraft}
+                  onChange={(e) => setWorktreePrefixDraft(e.target.value)}
+                  onBlur={handleWorktreePrefixCommit}
+                  onKeyDown={(e) => e.key === "Enter" && handleWorktreePrefixCommit()}
                   spellCheck={false}
                   autoCapitalize="off"
                   autoCorrect="off"
