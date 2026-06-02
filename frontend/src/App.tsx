@@ -1,6 +1,24 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, IssueNode, RepoSettings, Session } from "./api";
+import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, IssueNode, PrLink, RepoSettings, Session } from "./api";
+import GearIcon from "./icons/gear.svg?react";
+import GitHubIcon from "./icons/github.svg?react";
+import FolderIcon from "./icons/folder.svg?react";
+import VSCodeIcon from "./icons/vscode.svg?react";
+import ChevronRightIcon from "./icons/chevron-right.svg?react";
+import PrOpenIcon from "./icons/pull-request-open.svg?react";
+import PrDraftIcon from "./icons/pull-request-draft.svg?react";
+import PrMergedIcon from "./icons/pull-request-merged.svg?react";
+import PrClosedIcon from "./icons/pull-request-closed.svg?react";
+
+// One static icon per PR state — colour is baked into each asset, so no runtime
+// theming. Falls back to the open icon for any unexpected state string.
+const PR_STATE_ICONS: Record<string, typeof PrOpenIcon> = {
+  open: PrOpenIcon,
+  draft: PrDraftIcon,
+  merged: PrMergedIcon,
+  closed: PrClosedIcon,
+};
 
 type Tab = "identity" | "repo";
 type SaveStatus = "idle" | "saving" | "saved" | "clearing" | "error";
@@ -696,19 +714,43 @@ function MainView() {
   const [expanded, setExpanded] = useState<Expand>(null);
 
   const [sessions, setSessions] = useState<Session[]>([]);
+  // PR link per session id, discovered live from GitHub. `null` = looked up, none
+  // found (or the lookup failed); absent key = not looked up yet.
+  const [prs, setPrs] = useState<Record<string, PrLink | null>>({});
   // Session id whose inline command strip is expanded (only one at a time).
   const [commandsOpen, setCommandsOpen] = useState<string | null>(null);
   // Pending Clean Up confirmation: the session id and the warnings to show.
   const [cleanupConfirm, setCleanupConfirm] = useState<{ id: string; warnings: string[] } | null>(null);
 
   const refreshSessions = useCallback(() => {
-    api.sessionsList().then(setSessions).catch(() => {});
+    api.sessionsList().then((list) => {
+      setSessions(list);
+      // Fire PR lookups in parallel; each settles its own entry and soft-fails,
+      // so rows render immediately and a PR button appears as its lookup lands.
+      for (const s of list) {
+        api.sessionPr(s.id)
+          .then((pr) => setPrs((prev) => ({ ...prev, [s.id]: pr })))
+          .catch(() => setPrs((prev) => ({ ...prev, [s.id]: null })));
+      }
+    }).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    api.listRepos().then(setRepos);
+  const refreshAll = useCallback(() => {
+    api.listRepos().then(setRepos).catch(() => {});
     refreshSessions();
   }, [refreshSessions]);
+
+  useEffect(() => {
+    refreshAll();
+  }, [refreshAll]);
+
+  // The popover hides on blur, so each tray-icon click is a fresh open. Re-fetch
+  // on the backend's "popover-shown" event so it never displays stale sessions
+  // or PR state after work happened (or windows closed) while it was hidden.
+  useEffect(() => {
+    const unlisten = getCurrentWindow().listen("popover-shown", refreshAll);
+    return () => { unlisten.then((f) => f()); };
+  }, [refreshAll]);
 
   // Tracked sessions grouped by repo full_name.
   const sessionsByRepo = useMemo(() => {
@@ -825,10 +867,7 @@ function MainView() {
       <header className="panel-header">
         <h1>m<span className="ai">AI</span>estro</h1>
         <button className="icon-btn" onClick={openSettings} title="Settings" aria-label="Settings">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
+          <GearIcon />
         </button>
       </header>
 
@@ -855,19 +894,30 @@ function MainView() {
                 ) : (
                   repoSessions.map((s) => {
                     const cmdOpen = commandsOpen === s.id;
+                    const pr = prs[s.id];
+                    const PrIcon = pr ? (PR_STATE_ICONS[pr.state] ?? PrOpenIcon) : null;
                     return (
                     <div key={s.id} className="workspace-item">
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
                         <span className="workspace-title">{s.session_title}</span>
                         <div className="session-pill">
+                          {pr && PrIcon && (
+                            <button
+                              className="pill-btn pill-btn--pr"
+                              onClick={() => api.openUrl(pr.html_url)}
+                              title={`Open PR #${pr.number} (${pr.state}) on GitHub`}
+                              aria-label="Open pull request on GitHub"
+                            >
+                              <PrIcon />
+                              #{pr.number}
+                            </button>
+                          )}
                           <button
                             className="pill-btn"
                             onClick={() => api.openUrl(s.issue_url)}
                             title={`Open issue #${s.issue_number} on GitHub`}
                           >
-                            <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
-                            </svg>
+                            <GitHubIcon />
                             #{s.issue_number}
                           </button>
                           <button
@@ -876,9 +926,7 @@ function MainView() {
                             title={`Reveal in Finder: ${s.work_dir}`}
                             aria-label="Open folder in Finder"
                           >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
-                            </svg>
+                            <FolderIcon />
                           </button>
                           <button
                             className="pill-btn"
@@ -886,9 +934,7 @@ function MainView() {
                             title="Open in VS Code"
                             aria-label="Open in VS Code"
                           >
-                            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                              <path d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z" />
-                            </svg>
+                            <VSCodeIcon />
                           </button>
                         </div>
                         <button
@@ -898,9 +944,7 @@ function MainView() {
                           aria-label="Commands"
                           aria-expanded={cmdOpen}
                         >
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                            <path d="M9 18l6-6-6-6" />
-                          </svg>
+                          <ChevronRightIcon />
                         </button>
                       </div>
                       <div className={`command-strip ${cmdOpen ? "command-strip--open" : ""}`}>

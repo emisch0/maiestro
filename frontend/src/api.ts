@@ -48,6 +48,14 @@ export interface Session {
   emoji: string;
 }
 
+export interface PrLink {
+  number: number;
+  html_url: string;
+  title: string;
+  /** One of "draft", "open", "merged", "closed". */
+  state: string;
+}
+
 export type CredentialScope = { kind: "identity"; identity_id: string };
 
 export interface CredentialTypeDto {
@@ -117,4 +125,7 @@ export const api = {
 
   teardown: (sessionId: string, confirmed = false) =>
     invoke<TeardownOutcome>("teardown", { sessionId, confirmed }),
+
+  sessionPr: (sessionId: string) =>
+    invoke<PrLink | null>("session_pr", { sessionId }),
 };

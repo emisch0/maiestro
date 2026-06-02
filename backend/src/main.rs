@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
 use tauri_plugin_positioner::{Position, WindowExt};
 
@@ -36,6 +36,10 @@ fn show_popover(app: &tauri::AppHandle) {
         let _ = window.move_window(Position::TrayCenter);
         let _ = window.show();
         let _ = window.set_focus();
+        // Tell the UI it's being shown so it can refresh; the popover hides on
+        // blur, so each show is a fresh open where sessions/PRs may have changed
+        // (e.g. work happened or windows closed while it was hidden).
+        let _ = window.emit("popover-shown", ());
     }
 }
 
@@ -72,6 +76,7 @@ fn main() {
             spawn::create_issue_and_spawn,
             spawn::open_in_editor,
             spawn::teardown,
+            spawn::session_pr,
             sessions::sessions_list,
         ])
         .setup(|app| {
