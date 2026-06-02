@@ -390,6 +390,23 @@ body {
   background: var(--surface-hover);
 }
 
+/* Issues that already have a spawned session: a tinted dot (workspace color)
+   and a slightly emphasized title so they stand out in the list. */
+.issue-row--active .issue-title,
+.issue-row--active .issue-title-full {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.issue-active-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  align-self: center;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
 .issue-number {
   font-size: 11.5px;
   color: var(--muted);
@@ -503,9 +520,14 @@ body {
   transition: background 0.12s, color 0.12s;
 }
 
-.btn-ghost:hover {
+.btn-ghost:hover:not(:disabled) {
   background: var(--surface-hover);
   color: var(--text);
+}
+
+.btn-ghost:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 /* The idea box reveals its create/cancel actions when focused. */
@@ -619,6 +641,17 @@ body {
 .text-input:disabled {
   opacity: 0.35;
   cursor: not-allowed;
+}
+
+/* The idea box: a textarea sized to its content by JS, capped here so long
+   ideas scroll instead of pushing the issue list off-screen. */
+.idea-textarea {
+  display: block;
+  resize: none;
+  min-height: 34px;
+  max-height: 160px;
+  overflow-y: auto;
+  line-height: 1.4;
 }
 
 .profile-select {
@@ -852,6 +885,36 @@ body {
 .btn-save:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+
+/* Busy state for a create button: hide the label and spin a ring in its place.
+   Stays full-opacity even while disabled so the spinner reads clearly; the
+   other (non-loading) disabled button still dims via its own :disabled rule. */
+.btn-loading {
+  position: relative;
+  color: transparent !important;
+}
+
+.btn-loading:disabled {
+  opacity: 1;
+}
+
+.btn-loading::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  color: var(--accent);
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .btn-clear {
