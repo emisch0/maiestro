@@ -67,4 +67,7 @@ export const api = {
 
   githubListIssues: (identityId: string, repo: string) =>
     invoke<IssueNode[]>("github_list_issues", { identityId, repo }),
+
+  openUrl: (url: string) =>
+    invoke<void>("open_url", { url }),
 };

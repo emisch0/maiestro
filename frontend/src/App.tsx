@@ -638,7 +638,17 @@ function IssueRow({ node, depth, expandedNumber, onExpand, onCollapse, onSpawn }
       {isExpanded ? (
         <div className="issue-row issue-row--expanded" style={{ paddingLeft: indent }}>
           <div className="issue-expanded-head">
-            <span className="issue-number">#{node.number}</span>
+            <a
+              className="issue-number issue-number--link"
+              href={node.html_url}
+              title={node.html_url}
+              onClick={(e) => {
+                e.preventDefault();
+                api.openUrl(node.html_url);
+              }}
+            >
+              #{node.number}
+            </a>
             <span className="issue-title-full">{node.title}</span>
           </div>
           <div className="issue-actions">
@@ -647,15 +657,27 @@ function IssueRow({ node, depth, expandedNumber, onExpand, onCollapse, onSpawn }
           </div>
         </div>
       ) : (
-        <button
-          className="issue-row"
-          style={{ paddingLeft: indent }}
-          onClick={() => onExpand(node.number)}
-          title={node.title}
-        >
-          <span className="issue-number">#{node.number}</span>
-          <span className="issue-title">{node.title}</span>
-        </button>
+        <div className="issue-row" style={{ paddingLeft: indent }}>
+          <a
+            className="issue-number issue-number--link"
+            href={node.html_url}
+            title={node.html_url}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              api.openUrl(node.html_url);
+            }}
+          >
+            #{node.number}
+          </a>
+          <button
+            className="issue-title issue-row-expand"
+            onClick={() => onExpand(node.number)}
+            title={node.title}
+          >
+            {node.title}
+          </button>
+        </div>
       )}
       {node.children.map((c) => (
         <IssueRow

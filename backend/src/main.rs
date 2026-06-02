@@ -3,6 +3,7 @@
 
 mod credentials;
 mod identities;
+mod links;
 mod plugin;
 mod plugins;
 mod repo_settings;
@@ -63,6 +64,7 @@ fn main() {
             identities::identities_list,
             identities::identities_get_default,
             identities::identities_set_default,
+            links::open_url,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
