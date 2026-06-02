@@ -10,6 +10,7 @@ mod plugins;
 mod repo_settings;
 mod sessions;
 mod spawn;
+mod status;
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -45,6 +46,17 @@ fn show_popover(app: &tauri::AppHandle) {
 }
 
 fn main() {
+    // The app binary doubles as the Claude Code hook helper. When invoked as
+    // `maiestro hook <state> --workspace <ws-id>` (from a spawned worktree's
+    // .claude/settings.local.json), handle the hook and exit BEFORE booting the
+    // tray app — otherwise every hook would launch a second mAIestro. This path
+    // is short-lived and writes only a status file, so it skips logging setup.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("hook") {
+        status::run_hook_cli(&args[2..]);
+        return;
+    }
+
     logging::init();
     tracing::info!("mAIestro starting");
 
@@ -91,6 +103,7 @@ fn main() {
             spawn::session_create_pr,
             sessions::sessions_list,
             sessions::session_set_visibility,
+            status::sessions_status_list,
             logging::logs_read,
             logging::logs_reveal,
         ])
@@ -98,6 +111,18 @@ fn main() {
             // Menu-bar-only: no dock icon on macOS.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Live per-session status: drop orphaned status files, then watch
+            // ~/.maiestro/status/ and forward changes to the popover as
+            // `session-status` events. The watcher must outlive setup(), so park
+            // it in managed state (dropping it would stop the watch).
+            status::sweep_stale();
+            match status::start_watcher(app.handle().clone()) {
+                Ok(watcher) => {
+                    app.manage(Mutex::new(watcher));
+                }
+                Err(e) => tracing::error!(error = %e, "status watcher failed to start"),
+            }
 
             let logs = MenuItem::with_id(app, "logs", "Show Logs", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;

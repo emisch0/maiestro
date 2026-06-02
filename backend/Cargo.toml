@@ -20,6 +20,8 @@ tokio = { version = "1", features = ["process", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
+notify = "6"
+chrono = { version = "0.4", features = ["clock"], default-features = false }
 
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }

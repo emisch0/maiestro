@@ -211,6 +211,127 @@ fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, session_t
     Ok(())
 }
 
+// ── Claude Code hooks (live session status) ───────────────────────────────────
+
+/// Write Claude Code hooks into the worktree's `.claude/settings.local.json`
+/// (the personal, gitignored layer that merges with the user's settings and
+/// applies to both terminal and VS Code integrated-terminal sessions). Each hook
+/// invokes *this* binary as `maiestro hook <state> --workspace <ws-id>`, which
+/// writes a status record the backend watches. See `status.rs`.
+///
+/// Merges into any existing file rather than overwriting, so user/repo settings
+/// and unrelated hooks survive.
+fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
+    // The hook commands run through a shell, so quote the binary path (it may
+    // contain spaces, e.g. inside "/Applications/.../mAIestro.app") and the ws id.
+    let bin = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let bin_q = shell_quote(&bin.to_string_lossy());
+    let ws_q = shell_quote(ws_id);
+    let cmd = |state: &str| format!("{bin_q} hook {state} --workspace {ws_q}");
+
+    // Bare hook group (events that take no matcher).
+    let group = |state: &str| {
+        serde_json::json!({
+            "hooks": [{ "type": "command", "command": cmd(state) }]
+        })
+    };
+    // PreToolUse takes a matcher group; "" matches all tools.
+    let matcher_group = |state: &str| {
+        serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": cmd(state) }]
+        })
+    };
+
+    let ours: Vec<(&str, serde_json::Value)> = vec![
+        ("SessionStart", group("running")),
+        ("UserPromptSubmit", group("busy")),
+        ("PreToolUse", matcher_group("busy")),
+        // PostToolUse is the event that fires *after* an approved permission
+        // prompt's tool completes — the only signal that Claude has resumed
+        // working. Without it, a session sticks on `needs_you` (from the prompt's
+        // Notification) all the way through the rest of the turn, even while
+        // Claude is actively thinking. PreToolUse alone can't cover this: it
+        // fires *before* the prompt, not after approval.
+        ("PostToolUse", matcher_group("busy")),
+        ("Notification", group("notification")),
+        ("Stop", group("idle")),
+        ("SessionEnd", group("ended")),
+    ];
+
+    let dir = work_dir.join(".claude");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("settings.local.json");
+
+    // Start from any existing settings; ensure a top-level object with a `hooks` map.
+    let mut root: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .filter(|v: &serde_json::Value| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let hooks = root["hooks"].as_object().cloned().unwrap_or_default();
+    let mut hooks = serde_json::Value::Object(hooks);
+
+    for (event, group) in ours {
+        let arr = hooks[event].as_array().cloned().unwrap_or_default();
+        // Idempotent: don't append if an identical group is already present.
+        if arr.iter().any(|g| g == &group) {
+            hooks[event] = serde_json::Value::Array(arr);
+            continue;
+        }
+        let mut arr = arr;
+        arr.push(group);
+        hooks[event] = serde_json::Value::Array(arr);
+    }
+    root["hooks"] = hooks;
+
+    std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap() + "\n")
+        .map_err(|e| e.to_string())?;
+
+    exclude_generated_files(work_dir);
+    Ok(())
+}
+
+/// Append mAIestro's generated files to the worktree's shared git exclude file so
+/// they don't show up as untracked changes (which would trip teardown's
+/// `git status --porcelain` dirty check before Claude has run / in repos that
+/// don't already ignore them). Idempotent and best-effort.
+fn exclude_generated_files(work_dir: &Path) {
+    // Worktrees share the main repo's exclude via the common git dir; resolve it
+    // rather than assuming `<work_dir>/.git` is a directory (in a worktree it's a
+    // file pointing elsewhere).
+    let Ok(common) = git(work_dir, &["rev-parse", "--git-common-dir"]) else {
+        return;
+    };
+    let common = expand_tilde(&common);
+    let common = if common.is_absolute() { common } else { work_dir.join(common) };
+    let exclude = common.join("info").join("exclude");
+
+    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    let mut to_add: Vec<&str> = Vec::new();
+    for pat in [".claude/settings.local.json", ".vscode/"] {
+        if !existing.lines().any(|l| l.trim() == pat) {
+            to_add.push(pat);
+        }
+    }
+    if to_add.is_empty() {
+        return;
+    }
+    if let Some(parent) = exclude.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut body = existing;
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str("# Added by mAIestro\n");
+    for pat in to_add {
+        body.push_str(pat);
+        body.push('\n');
+    }
+    let _ = std::fs::write(&exclude, body);
+}
+
 /// Locate the VS Code `code` CLI: $PATH first, then common install locations
 /// (the bundled CLI inside the .app is the most reliable when $PATH is minimal).
 fn code_cli() -> Option<PathBuf> {
@@ -470,6 +591,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     }
 
     write_vscode_files(&work_dir, &work_parent, color, &session_title)?;
+    write_claude_hooks(&work_dir, &workspace)?;
 
     // Record the session so mAIestro can track it (and so its color counts as
     // taken for the next spawn). Non-fatal: the worktree already exists.
@@ -1190,10 +1312,11 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
         }
     }
 
-    // 5. Drop the session record.
+    // 5. Drop the session record and its live status file.
     if let Err(e) = crate::sessions::delete(&session_id) {
         tracing::warn!(error = %e, "could not delete session record during teardown");
     }
+    crate::status::remove(&session_id);
 
     tracing::info!(branch = %branch, "tore down workspace");
     Ok(TeardownOutcome::Done)
@@ -1342,14 +1465,9 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
         }
     }
 
-    // Push the branch so GitHub can see the head ref. -u sets upstream for the
-    // user's later pushes from the session.
-    git(&work_dir, &["push", "-u", "origin", &branch])
-        .map_err(|e| format!("could not push branch {branch}: {e}"))?;
-
     // Seed the draft with the issue title/body for context (best-effort).
     let issue = gh.issue(&session.repo, session.issue_number).await.unwrap_or_default();
-    let issue_title = issue["title"].as_str().unwrap_or("").to_string();
+    let issue_title = issue["title"].as_str().unwrap_or("");
     let issue_body = issue["body"].as_str().unwrap_or("");
 
     let summary = change_summary(&work_dir, &base);
@@ -1363,24 +1481,23 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
         number = session.issue_number,
     );
 
-    // Draft via Claude; fall back to the issue title + change summary if it fails
-    // so the action still produces a usable PR.
-    let (title, body) = match claude_text(&work_dir, &prompt, "drafting the PR").await {
-        // The PR draft reuses the issue-draft parser but only needs title + body.
-        Ok(reply) => match parse_issue_draft(&reply) {
-            Ok((t, b, _)) => (t, b),
-            Err(e) => {
-                tracing::warn!(error = %e, "PR draft reply was unparseable; falling back to issue title + raw diff");
-                (fallback_title(&issue_title, &branch), summary.clone())
-            }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "Claude PR draft failed; falling back to issue title + raw diff");
-            (fallback_title(&issue_title, &branch), summary.clone())
-        }
-    };
+    // Draft via Claude. If drafting fails (claude errored, or its reply had no
+    // parseable {title, body}), log and propagate the error and abort *before*
+    // pushing or opening the PR — we'd rather tell the user why than open a
+    // garbage PR. The PR draft reuses the issue-draft parser but only needs
+    // title + body.
+    let reply = claude_text(&work_dir, &prompt, "drafting the PR")
+        .await
+        .map_err(|e| { tracing::warn!(error = %e, "Claude PR draft failed"); e })?;
+    let (title, body, _) = parse_issue_draft(&reply)
+        .map_err(|e| { tracing::warn!(error = %e, "PR draft reply was unparseable"); e })?;
 
     let body = format!("{body}\n\nCloses #{}", session.issue_number);
+
+    // Draft succeeded — now push the branch so GitHub can see the head ref. -u
+    // sets upstream for the user's later pushes from the session.
+    git(&work_dir, &["push", "-u", "origin", &branch])
+        .map_err(|e| format!("could not push branch {branch}: {e}"))?;
 
     let pr = gh
         .create_pull(&session.repo, &title, &branch, &base, &body, true)
@@ -1388,14 +1505,4 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
     let link = pr_link_from(&pr);
     tracing::info!(repo = %session.repo, branch = %branch, pr = link.number, "created pull request");
     Ok(link)
-}
-
-/// Title to use when the AI draft is unavailable: the tracked issue title, or
-/// the branch name as a last resort.
-fn fallback_title(issue_title: &str, branch: &str) -> String {
-    if issue_title.trim().is_empty() {
-        branch.to_string()
-    } else {
-        issue_title.to_string()
-    }
 }

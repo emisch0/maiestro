@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan } from "./api";
+import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord } from "./api";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
 import FolderIcon from "./icons/folder.svg?react";
 import VSCodeIcon from "./icons/vscode.svg?react";
+import ClaudeIcon from "./icons/claude.svg?react";
 import ChevronRightIcon from "./icons/chevron-right.svg?react";
 import PrOpenIcon from "./icons/pull-request-open.svg?react";
 import PrDraftIcon from "./icons/pull-request-draft.svg?react";
@@ -816,6 +817,39 @@ function IssueRow({ node, depth, expandedNumber, active, onExpand, onCollapse, o
   );
 }
 
+// How each status state renders in a work-item row. `running`/`idle` are quiet;
+// `busy` and `needs_you` draw attention. States not in the map render nothing.
+const STATUS_LABELS: Record<string, string> = {
+  running: "Ready",
+  busy: "Working",
+  needs_you: "Needs you",
+  idle: "Idle",
+};
+
+// The Claude session pill: the Claude mark tints by live state (green=working,
+// amber=needs you, muted=ready/idle), with the status word beside it. Clicking
+// jumps to where the session lives — the worktree's VS Code window (there is no
+// deep link to the remote-controlled session itself). Renders nothing until a
+// status exists, and once the session has ended.
+function ClaudePill({ status, onClick }: { status?: StatusRecord; onClick: () => void }) {
+  if (!status || status.state === "ended") return null;
+  const label = STATUS_LABELS[status.state];
+  if (!label) return null;
+  // `needs_you` carries the reason (e.g. the permission request) in `detail`.
+  const title = status.detail ? `Claude · ${label} — ${status.detail}` : `Claude · ${label}`;
+  return (
+    <button
+      className={`claude-pill claude-pill--${status.state}`}
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+    >
+      <ClaudeIcon className="claude-pill-mark" />
+      <span className="claude-pill-label">{label}</span>
+    </button>
+  );
+}
+
 // ── Hide / snooze ──────────────────────────────────────────────────────────
 
 type HideTarget =
@@ -948,6 +982,9 @@ function MainView() {
   // PR link per session id, discovered live from GitHub. `null` = looked up, none
   // found (or the lookup failed); absent key = not looked up yet.
   const [prs, setPrs] = useState<Record<string, PrLink | null>>({});
+  // Live status per workspace id (busy / needs_you / idle / …), seeded on open
+  // and kept current by the backend's `session-status` event.
+  const [statuses, setStatuses] = useState<Record<string, StatusRecord>>({});
   // Session id whose inline command strip is expanded (only one at a time).
   const [commandsOpen, setCommandsOpen] = useState<string | null>(null);
   // Pending Tear Down prompt for a session: either a warnings confirmation, or a
@@ -978,6 +1015,16 @@ function MainView() {
     }).catch(() => {});
   }, []);
 
+  // Replace the status map with a fresh snapshot from disk. Called on open so a
+  // reopened/reloaded popover reflects current state even if it missed events.
+  const refreshStatuses = useCallback(() => {
+    api.sessionsStatusList().then((list) => {
+      const next: Record<string, StatusRecord> = {};
+      for (const s of list) next[s.workspace] = s;
+      setStatuses(next);
+    }).catch(() => {});
+  }, []);
+
   const refreshAll = useCallback(() => {
     api.listRepos().then((list) => {
       setRepos(list);
@@ -990,7 +1037,8 @@ function MainView() {
       }
     }).catch(() => {});
     refreshSessions();
-  }, [refreshSessions]);
+    refreshStatuses();
+  }, [refreshSessions, refreshStatuses]);
 
   useEffect(() => {
     refreshAll();
@@ -1003,6 +1051,22 @@ function MainView() {
     const unlisten = getCurrentWindow().listen("popover-shown", refreshAll);
     return () => { unlisten.then((f) => f()); };
   }, [refreshAll]);
+
+  // Live status updates from the backend's status-file watcher. Each event is one
+  // workspace's latest record; `ended` clears its row indicator.
+  useEffect(() => {
+    const unlisten = getCurrentWindow().listen<StatusRecord>("session-status", (e) => {
+      const rec = e.payload;
+      setStatuses((prev) => {
+        if (rec.state === "ended") {
+          const { [rec.workspace]: _drop, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, [rec.workspace]: rec };
+      });
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, []);
 
   // Also refresh whenever the window itself regains focus — covers any path that
   // re-focuses the popover without a fresh "popover-shown" emit. Refresh is
@@ -1371,6 +1435,7 @@ function MainView() {
                     return (
                     <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
+                        <ClaudePill status={statuses[s.id]} onClick={() => api.openInEditor(s.work_dir)} />
                         <span className="workspace-title">{s.session_title}</span>
                         {sessHidden && sessSnoozeLabel && (
                           <span className="snooze-label">Snoozed · {sessSnoozeLabel}</span>
