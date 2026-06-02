@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 use crate::credentials::{CredentialScope, CredentialStore};
 use crate::plugin::{CredentialTypeInfo, Plugin};
 
@@ -24,6 +25,18 @@ impl Plugin for GitHubPlugin {
 pub struct GitHub {
     client: reqwest::Client,
     token: String,
+    /// The identity this client authenticates as — used only to scope the ETag
+    /// cache so two identities never share a cached body for the same URL.
+    identity_id: String,
+}
+
+/// Process-wide ETag cache for conditional GETs: key → (etag, raw JSON body).
+/// Keyed by identity + URL so tokens don't share cached bodies. Serving a `304
+/// Not Modified` from here does NOT count against GitHub's REST rate limit —
+/// which is the whole point for the polled PR/checks calls.
+fn etag_cache() -> &'static Mutex<HashMap<String, (String, String)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (String, String)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 impl GitHub {
@@ -35,7 +48,7 @@ impl GitHub {
             .user_agent("maiestro/0.1")
             .build()
             .map_err(|e| e.to_string())?;
-        Ok(Self { client, token })
+        Ok(Self { client, token, identity_id: identity_id.to_string() })
     }
 
     /// A request builder pre-loaded with auth and the standard GitHub headers.
@@ -65,7 +78,8 @@ impl GitHub {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 // GETs are read-only "get status" calls (and the UI polls them), so
-                // log them at debug; mutations (POST/PATCH/DELETE) stay at info.
+                // log them at debug; mutations (POST/PATCH/DELETE) stay at info. A
+                // non-success response is surfaced (with its URL) by `error_message`.
                 if method == "GET" {
                     tracing::debug!(target: "github", %method, %url, status, "github api call");
                 } else {
@@ -80,13 +94,50 @@ impl GitHub {
         }
     }
 
-    /// GET a URL and parse the JSON body, mapping non-2xx to a GitHub error message.
+    /// GET a URL and parse the JSON body, mapping non-2xx to a GitHub error
+    /// message. Conditional: if we've seen this URL before, the request carries
+    /// `If-None-Match` with the stored ETag; a `304 Not Modified` serves the
+    /// cached body for free (no rate-limit charge). Otherwise the fresh body and
+    /// its ETag are cached for next time.
     pub async fn get_json(&self, url: &str) -> Result<serde_json::Value, String> {
-        let resp = self.send(self.req(reqwest::Method::GET, url)).await.map_err(|e| e.to_string())?;
+        let key = format!("{}\u{1}{}", self.identity_id, url);
+        let cached = etag_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned();
+
+        let mut rb = self.req(reqwest::Method::GET, url);
+        if let Some((etag, _)) = &cached {
+            rb = rb.header(reqwest::header::IF_NONE_MATCH, etag.clone());
+        }
+        let resp = self.send(rb).await.map_err(|e| e.to_string())?;
+
+        // 304: the resource is unchanged — return the cached body. We only sent
+        // the validator when `cached` was Some, so it's present here.
+        if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+            if let Some((_, body)) = cached {
+                return serde_json::from_str(&body).map_err(|e| e.to_string());
+            }
+            return Ok(serde_json::Value::Null); // unreachable in practice
+        }
         if !resp.status().is_success() {
             return Err(error_message(resp).await);
         }
-        resp.json().await.map_err(|e| e.to_string())
+
+        let etag = resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let body = resp.text().await.map_err(|e| e.to_string())?;
+        if let Some(etag) = etag {
+            etag_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, (etag, body.clone()));
+        }
+        serde_json::from_str(&body).map_err(|e| e.to_string())
     }
 
     /// Login of the token's owner (`GET /user`).
@@ -200,15 +251,6 @@ impl GitHub {
     /// and the GraphQL `node_id` used to mark a draft ready for review.
     pub async fn pull(&self, repo: &str, number: u64) -> Result<serde_json::Value, String> {
         self.get_json(&format!("https://api.github.com/repos/{repo}/pulls/{number}")).await
-    }
-
-    /// Check runs for a commit. `repo` is "owner/name"; `sha` is the head commit.
-    /// Returns the bare `check_runs` array (each entry has `status` and
-    /// `conclusion`); an empty vec means the commit has no checks configured.
-    pub async fn check_runs(&self, repo: &str, sha: &str) -> Result<Vec<serde_json::Value>, String> {
-        let url = format!("https://api.github.com/repos/{repo}/commits/{sha}/check-runs?per_page=100");
-        let v = self.get_json(&url).await?;
-        Ok(v["check_runs"].as_array().cloned().unwrap_or_default())
     }
 
     /// Mark a draft pull request ready for review. REST has no endpoint for this,
@@ -457,11 +499,14 @@ fn build_issue_node(
 
 async fn error_message(resp: reqwest::Response) -> String {
     let status = resp.status();
+    // Capture the URL before `text()` consumes the response, so the error line
+    // says *which* call failed (reqwest::Response doesn't expose the method).
+    let url = resp.url().to_string();
     let body = resp.text().await.unwrap_or_default();
     let message = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| v["message"].as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-    tracing::error!(target: "github", status = status.as_u16(), message = %message, "github api error");
+    tracing::error!(target: "github", status = status.as_u16(), %url, message = %message, "github api error");
     message
 }
