@@ -289,7 +289,7 @@ function Settings() {
                   onKeyDown={(e) => e.key === "Enter" && handleSave(t.type_id)}
                 />
                 <button
-                  className="btn-save"
+                  className={`btn-save ${state.status === "saving" ? "btn-busy" : ""}`}
                   disabled={!state.input.trim() || isBusy}
                   onClick={() => handleSave(t.type_id)}
                 >
@@ -467,7 +467,7 @@ function Settings() {
                 <div style={{ display: "flex", gap: 4 }}>
                   {repoSettings.checkout_dir && (
                     <button
-                      className="btn-add"
+                      className={`btn-add ${scanStatus === "scanning" ? "btn-busy" : ""}`}
                       disabled={scanStatus === "scanning"}
                       onClick={handleScanEnvFiles}
                     >
@@ -703,6 +703,9 @@ type Picker = {
   creating?: "create" | "spawn";
   // True while the issue list is being re-fetched via the refresh button.
   refreshing?: boolean;
+  // Issue number whose spawn preview is currently being prepared (the row's
+  // "Spawn Work" button glows until the preview opens or preparation fails).
+  preparing?: number;
   // Set when Claude couldn't draft a clear issue: holds the original idea and
   // Claude's reply, prompting the user to confirm creating from raw text.
   // `action` records which button triggered it, so the retry repeats it.
@@ -757,13 +760,15 @@ interface IssueRowProps {
   node: IssueNode;
   depth: number;
   expandedNumber: number | null;
+  // Issue number whose spawn preview is being prepared, so its row's button glows.
+  preparingNumber: number | null;
   active: ActiveSessions;
   onExpand: (n: number) => void;
   onCollapse: () => void;
   onSpawn: (n: IssueNode) => void;
 }
 
-function IssueRow({ node, depth, expandedNumber, active, onExpand, onCollapse, onSpawn }: IssueRowProps) {
+function IssueRow({ node, depth, expandedNumber, preparingNumber, active, onExpand, onCollapse, onSpawn }: IssueRowProps) {
   const indent = 10 + depth * 16;
   const isExpanded = expandedNumber === node.number;
   const session = active[node.number];
@@ -794,7 +799,13 @@ function IssueRow({ node, depth, expandedNumber, active, onExpand, onCollapse, o
             {workingPill}
           </div>
           <div className="issue-actions">
-            <button className="btn-save" onClick={() => onSpawn(node)}>Spawn Work</button>
+            <button
+              className={`btn-save ${preparingNumber === node.number ? "btn-busy" : ""}`}
+              disabled={preparingNumber !== null}
+              onClick={() => onSpawn(node)}
+            >
+              Spawn Work
+            </button>
             <button className="btn-ghost" onClick={onCollapse}>Cancel</button>
           </div>
         </div>
@@ -835,6 +846,7 @@ function IssueRow({ node, depth, expandedNumber, active, onExpand, onCollapse, o
           node={c}
           depth={depth + 1}
           expandedNumber={expandedNumber}
+          preparingNumber={preparingNumber}
           active={active}
           onExpand={onExpand}
           onCollapse={onCollapse}
@@ -1021,6 +1033,9 @@ function MainView() {
   // Pending Tear Down prompt for a session: either a warnings confirmation, or a
   // "VS Code still open" block that can offer the Accessibility shortcut.
   const [teardownConfirm, setTeardownConfirm] = useState<TeardownPrompt | null>(null);
+  // Session ids whose teardown call is currently in flight, so the triggering
+  // button glows while the backend removes the worktree.
+  const [teardownBusy, setTeardownBusy] = useState<Record<string, boolean>>({});
   // Create-PR progress/error per session id: `{ creating }` while in flight,
   // `{ error }` after a failure. Absent = idle.
   const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; error?: string }>>({});
@@ -1200,12 +1215,12 @@ function MainView() {
   async function spawnIssue(node: IssueNode) {
     if (!picker) return;
     const repo = picker.repo;
-    setPicker((p) => (p ? { ...p, note: `Preparing #${node.number}…` } : p));
+    setPicker((p) => (p ? { ...p, preparing: node.number, note: `Preparing #${node.number}…` } : p));
     try {
       const plan = await api.prepareSpawn(repo, node.number);
-      setPicker((p) => (p ? { ...p, note: undefined, preview: planToPreview(plan, "spawn") } : p));
+      setPicker((p) => (p ? { ...p, preparing: undefined, note: undefined, preview: planToPreview(plan, "spawn") } : p));
     } catch (e) {
-      setPicker((p) => (p ? { ...p, note: `Failed to prepare #${node.number}: ${String(e)}` } : p));
+      setPicker((p) => (p ? { ...p, preparing: undefined, note: `Failed to prepare #${node.number}: ${String(e)}` } : p));
     }
   }
 
@@ -1415,6 +1430,7 @@ function MainView() {
   // confirmation, a "VS Code still open" block, or success (dismiss + refresh).
   // `confirmed` skips the work-state checks; `force` skips closing the editor.
   async function runTeardown(id: string, confirmed: boolean, force: boolean) {
+    setTeardownBusy((prev) => ({ ...prev, [id]: true }));
     try {
       const res = await api.teardown(id, confirmed, force);
       if (res.status === "needs_confirmation") {
@@ -1428,6 +1444,11 @@ function MainView() {
       }
     } catch (e) {
       setTeardownConfirm({ id, kind: "confirm", warnings: [`Teardown failed: ${String(e)}`] });
+    } finally {
+      setTeardownBusy((prev) => {
+        const { [id]: _done, ...rest } = prev;
+        return rest;
+      });
     }
   }
 
@@ -1610,7 +1631,7 @@ function MainView() {
                       </div>
                       <div className={`command-strip ${cmdOpen ? "command-strip--open" : ""}`}>
                         <button
-                          className="command-btn"
+                          className={`command-btn ${prc?.creating ? "btn-busy" : ""}`}
                           onClick={() => createPr(s)}
                           disabled={prc?.creating || prOpen}
                           title={prOpen ? `PR #${pr?.number} is already open` : undefined}
@@ -1618,7 +1639,7 @@ function MainView() {
                           {prc?.creating ? "Creating PR…" : "Create PR"}
                         </button>
                         <button
-                          className="command-btn"
+                          className={`command-btn ${pm?.intent && pr?.state !== "merged" ? "btn-busy" : ""}`}
                           onClick={() => startMerge(s)}
                           disabled={pm?.intent || pr?.state === "merged"}
                           title={
@@ -1634,7 +1655,13 @@ function MainView() {
                         ) : (
                           <button className="command-btn" onClick={() => { setCommandsOpen(null); setHideTarget({ kind: "session", session: s }); }}>Hide…</button>
                         )}
-                        <button className="command-btn" onClick={() => tearDown(s)}>Tear Down</button>
+                        <button
+                          className={`command-btn ${teardownBusy[s.id] ? "btn-busy" : ""}`}
+                          disabled={teardownBusy[s.id]}
+                          onClick={() => tearDown(s)}
+                        >
+                          Tear Down
+                        </button>
                       </div>
                       {prc?.error && (
                         <div className="cleanup-confirm">
@@ -1676,7 +1703,13 @@ function MainView() {
                             ))}
                           </ul>
                           <div className="issue-actions">
-                            <button className="btn-danger" onClick={() => runTeardown(s.id, true, false)}>Remove anyway</button>
+                            <button
+                              className={`btn-danger ${teardownBusy[s.id] ? "btn-busy" : ""}`}
+                              disabled={teardownBusy[s.id]}
+                              onClick={() => runTeardown(s.id, true, false)}
+                            >
+                              Remove anyway
+                            </button>
                             <button className="btn-ghost" onClick={() => setTeardownConfirm(null)}>Cancel</button>
                           </div>
                         </div>
@@ -1689,7 +1722,13 @@ function MainView() {
                             {teardownConfirm.accessibility && (
                               <button className="btn-ghost" onClick={() => api.openAccessibilitySettings()}>Open Accessibility Options</button>
                             )}
-                            <button className="btn-danger" onClick={() => runTeardown(s.id, true, true)}>Delete anyway</button>
+                            <button
+                              className={`btn-danger ${teardownBusy[s.id] ? "btn-busy" : ""}`}
+                              disabled={teardownBusy[s.id]}
+                              onClick={() => runTeardown(s.id, true, true)}
+                            >
+                              Delete anyway
+                            </button>
                             <button className="btn-ghost" onClick={() => setTeardownConfirm(null)}>Cancel</button>
                           </div>
                         </div>
@@ -1810,7 +1849,7 @@ function MainView() {
 
                     <div className="issue-actions">
                       <button
-                        className={`btn-save ${pv.spawning ? "btn-loading" : ""}`}
+                        className={`btn-save ${pv.spawning ? "btn-busy" : ""}`}
                         disabled={pv.spawning || !canConfirm}
                         onClick={confirmPreview}
                       >
@@ -1845,14 +1884,14 @@ function MainView() {
                     {ideaOpen && (
                       <div className="issue-actions">
                         <button
-                          className={`btn-ghost ${picker.creating === "create" ? "btn-loading" : ""}`}
+                          className={`btn-ghost ${picker.creating === "create" ? "btn-busy" : ""}`}
                           disabled={!picker.query.trim() || busy}
                           onClick={createIssueOnly}
                         >
                           Create Issue
                         </button>
                         <button
-                          className={`btn-save ${picker.creating === "spawn" ? "btn-loading" : ""}`}
+                          className={`btn-save ${picker.creating === "spawn" ? "btn-busy" : ""}`}
                           disabled={!picker.query.trim() || busy}
                           onClick={createAndSpawn}
                         >
@@ -1875,7 +1914,7 @@ function MainView() {
                     <div className="issue-list-toolbar">
                       <span className="issue-list-label">Open issues</span>
                       <button
-                        className="btn-add"
+                        className={`btn-add ${picker.refreshing ? "btn-busy" : ""}`}
                         onClick={refreshIssues}
                         disabled={picker.loading || picker.refreshing}
                         title="Refresh issues"
@@ -1895,6 +1934,7 @@ function MainView() {
                             node={n}
                             depth={0}
                             expandedNumber={expanded?.kind === "issue" ? expanded.number : null}
+                            preparingNumber={picker.preparing ?? null}
                             active={active}
                             onExpand={(num) => setExpanded({ kind: "issue", number: num })}
                             onCollapse={() => setExpanded(null)}
