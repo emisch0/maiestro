@@ -955,7 +955,7 @@ function MainView() {
                             title="Open in VS Code"
                             aria-label="Open in VS Code"
                           >
-                            <VSCodeIcon />
+                            <VSCodeIcon style={{ color: s.color }} />
                           </button>
                         </div>
                         <button

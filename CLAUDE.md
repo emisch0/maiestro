@@ -8,6 +8,8 @@ A Tauri v2 menu-bar app on macOS that launches git-worktree-per-issue developmen
 
 Directory layout: `backend/` (Rust/Tauri) and `frontend/` (web). Not Tauri's defaults of `src-tauri/` and `src/`.
 
+The frontend uses **pnpm** (`pnpm-lock.yaml`), not npm or yarn. Use `pnpm install` / `pnpm dev` — `npm install` fails on the `link:` workspace deps.
+
 ## Architectural decisions
 
 ### mAIestro launches sessions; it does not host them

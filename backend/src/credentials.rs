@@ -68,9 +68,8 @@ pub fn credentials_set(
     secret: String,
 ) -> Result<(), CredentialError> {
     CredentialStore::set(&type_id, &scope, &secret)?;
-    if let CredentialScope::Identity { ref identity_id } = scope {
-        crate::identities::register(identity_id);
-    }
+    let CredentialScope::Identity { identity_id } = &scope;
+    crate::identities::register(identity_id);
     Ok(())
 }
 
@@ -80,9 +79,8 @@ pub fn credentials_get(
     scope: CredentialScope,
 ) -> Result<String, CredentialError> {
     let value = CredentialStore::get(&type_id, &scope)?;
-    if let CredentialScope::Identity { ref identity_id } = scope {
-        crate::identities::register(identity_id);
-    }
+    let CredentialScope::Identity { identity_id } = &scope;
+    crate::identities::register(identity_id);
     Ok(value)
 }
 
