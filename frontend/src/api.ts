@@ -42,6 +42,36 @@ export type CreateIssueOutcome =
   | { status: "created"; number: number; issue_url: string; warnings: string[] }
   | { status: "needs_confirmation"; message: string };
 
+/** Editable fields shown in the spawn preview before a worktree is created. */
+export interface SpawnPlan {
+  repo: string;
+  /** null on the create-and-spawn path: the issue isn't opened until confirm. */
+  issue_number: number | null;
+  issue_title: string;
+  issue_body: string;
+  short_title: string;
+  color: string;
+  emoji: string;
+  /** Local checkout dir name, for rendering the worktree path. */
+  repo_name: string;
+}
+
+export type DraftPreviewOutcome =
+  | ({ status: "drafted" } & SpawnPlan)
+  | { status: "needs_confirmation"; message: string };
+
+/** The reviewed preview sent back on confirm. */
+export interface SpawnEdits {
+  issue_number: number | null;
+  issue_title: string;
+  issue_body: string;
+  short_title: string;
+  color: string;
+  emoji: string;
+  /** Existing issue only: PATCH the title/body back to GitHub. */
+  update_issue: boolean;
+}
+
 export type TeardownOutcome =
   | { status: "done" }
   | { status: "needs_confirmation"; warnings: string[] };
@@ -135,8 +165,20 @@ export const api = {
   spawnWork: (repo: string, issueNumber: number, forceNew = false) =>
     invoke<SpawnResult>("spawn_work", { repo, issueNumber, forceNew }),
 
+  prepareSpawn: (repo: string, issueNumber: number) =>
+    invoke<SpawnPlan>("prepare_spawn", { repo, issueNumber }),
+
+  draftSpawnPreview: (repo: string, idea: string, useRawFallback = false) =>
+    invoke<DraftPreviewOutcome>("draft_spawn_preview", { repo, idea, useRawFallback }),
+
+  confirmSpawn: (repo: string, edits: SpawnEdits, forceNew = false) =>
+    invoke<SpawnResult>("confirm_spawn", { repo, edits, forceNew }),
+
   createIssue: (repo: string, idea: string, useRawFallback = false) =>
     invoke<CreateIssueOutcome>("create_issue", { repo, idea, useRawFallback }),
+
+  createIssueDirect: (repo: string, title: string, body: string) =>
+    invoke<CreateIssueOutcome>("create_issue_direct", { repo, title, body }),
 
   createIssueAndSpawn: (repo: string, idea: string, useRawFallback = false, forceNew = false) =>
     invoke<CreateAndSpawnOutcome>("create_issue_and_spawn", { repo, idea, useRawFallback, forceNew }),

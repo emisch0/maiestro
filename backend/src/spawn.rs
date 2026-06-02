@@ -33,6 +33,19 @@ fn palette_emojis(color: &str) -> &'static [&'static str] {
     }
 }
 
+/// Choose a palette color not already claimed by a tracked session (falling back
+/// to the full palette when all are taken), then an emoji within it. Seeded by
+/// `seed` so the same workspace name themes consistently.
+fn pick_theme(seed: &str) -> (&'static str, &'static str) {
+    let used = crate::sessions::used_colors();
+    let pool: Vec<&'static str> = PALETTE.iter().copied().filter(|c| !used.contains(&c.to_string())).collect();
+    let pool: Vec<&'static str> = if pool.is_empty() { PALETTE.to_vec() } else { pool };
+    let color = pool[hash_index(seed, 1, pool.len())];
+    let emojis = palette_emojis(color);
+    let emoji = emojis[hash_index(seed, 2, emojis.len())];
+    (color, emoji)
+}
+
 // ── Small helpers ─────────────────────────────────────────────────────────────
 
 fn home() -> PathBuf {
@@ -100,6 +113,15 @@ fn trim_to_word(s: &str, max: usize) -> String {
         Some(i) if i > 0 => cut[..i].trim_end().to_string(),
         _ => cut.trim_end().to_string(),
     }
+}
+
+/// A reasonable default short label from a (possibly long) issue title when no
+/// AI-generated or user-edited label is available: trimmed to a word boundary
+/// and stripped of trailing punctuation. Never empty.
+fn default_short_title(title: &str) -> String {
+    let s = trim_to_word(title, 50);
+    let s = s.trim_end_matches(|c: char| !c.is_alphanumeric()).trim();
+    if s.is_empty() { "work".to_string() } else { s.to_string() }
 }
 
 fn slugify(title: &str, max_len: usize) -> String {
@@ -314,33 +336,45 @@ pub enum CreateIssueOutcome {
     NeedsConfirmation { message: String },
 }
 
-#[tauri::command]
-pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+/// The decisions a spawn needs once the issue is known: the (possibly edited)
+/// short label that drives the slug, and the chosen theming. Slugs and the
+/// session title are derived from these so the preview and the spawn agree.
+struct SpawnDecision<'a> {
+    repo: &'a str,
+    issue_number: u64,
+    issue_url: &'a str,
+    default_branch: &'a str,
+    short_label: &'a str,
+    color: &'a str,
+    emoji: &'a str,
+    force_new: bool,
+}
+
+/// Core worktree + session creation, shared by every spawn path. Resolves the
+/// repo's settings/identity/checkout itself; the caller supplies the issue facts
+/// and the (reviewed) label/theming. The slug is `<n>-<slug(short_label)>`.
+async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
+    let SpawnDecision { repo, issue_number, issue_url, default_branch, short_label, color, emoji, force_new } = d;
+
+    let settings = crate::repo_settings::repo_settings_get(repo.to_string());
     let identity_id = settings
         .identity_id
         .clone()
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-
     let checkout = expand_tilde(settings.checkout_dir.as_deref().unwrap_or_default());
     if !checkout.join(".git").exists() {
         return Err(format!("checkout dir is not a git repo: {}", checkout.display()));
     }
-    let repo_name = repo.split('/').next_back().unwrap_or(&repo).to_string();
-
+    let repo_name = repo.split('/').next_back().unwrap_or(repo).to_string();
     let gh = GitHub::for_identity(&identity_id)?;
-    let issue = gh.issue(&repo, issue_number).await?;
-    let issue_title = issue["title"].as_str().unwrap_or("").to_string();
-    let issue_url = issue["html_url"].as_str().unwrap_or("").to_string();
-    if issue_title.is_empty() {
-        return Err(format!("issue #{issue_number} not found"));
-    }
-    let default_branch = gh.repo(&repo).await?["default_branch"].as_str().unwrap_or("main").to_string();
 
-    // Workspace name: "<n>-<slug>"; session title budgets the label to ~30 chars.
+    let short_label = {
+        let t = short_label.trim();
+        if t.is_empty() { default_short_title("") } else { t.to_string() }
+    };
+
+    // Workspace name: "<n>-<slug>".
     let prefix = format!("#{issue_number} — ");
-    let label_budget = 30usize.saturating_sub(prefix.chars().count());
-    let short_label = trim_to_word(&issue_title, label_budget);
     let base_workspace = format!("{issue_number}-{}", slugify(&short_label, 25));
     let base_branch = format!("feature/{base_workspace}");
     let base_dir = home().join(format!("src/work-{base_workspace}")).join(&repo_name);
@@ -351,7 +385,7 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
         return Ok(SpawnResult {
             work_dir: base_dir.display().to_string(),
             branch: base_branch,
-            issue_url,
+            issue_url: issue_url.to_string(),
             reused: true,
             warnings: Vec::new(),
         });
@@ -371,14 +405,6 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
         n += 1;
     }
 
-    // Theme: pick a palette color not already claimed by a tracked session,
-    // then an emoji within it.
-    let used = crate::sessions::used_colors();
-    let pool: Vec<&str> = PALETTE.iter().copied().filter(|c| !used.contains(&c.to_string())).collect();
-    let pool: &[&str] = if pool.is_empty() { PALETTE } else { &pool };
-    let color = pool[hash_index(&workspace, 1, pool.len())];
-    let emojis = palette_emojis(color);
-    let emoji = emojis[hash_index(&workspace, 2, emojis.len())];
     let session_title = format!("{emoji} {session_label}");
 
     // Create the worktree from the repo's default branch.
@@ -409,7 +435,7 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
     // comment. Non-fatal: the worktree already exists, so failures only warn.
     match gh.authenticated_login().await {
         Ok(login) => {
-            if let Err(e) = gh.add_assignees(&repo, issue_number, &[login]).await {
+            if let Err(e) = gh.add_assignees(repo, issue_number, &[login]).await {
                 warnings.push(format!("could not assign issue #{issue_number}: {e}"));
             }
             let body = format!(
@@ -419,7 +445,7 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
                  - **Claude Session:** `{session_title}`\n",
                 work_dir.display()
             );
-            if let Err(e) = gh.create_comment(&repo, issue_number, &body).await {
+            if let Err(e) = gh.create_comment(repo, issue_number, &body).await {
                 warnings.push(format!("could not comment on issue #{issue_number}: {e}"));
             }
         }
@@ -432,11 +458,11 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
     // taken for the next spawn). Non-fatal: the worktree already exists.
     let session = crate::sessions::Session {
         id: workspace.clone(),
-        repo: repo.clone(),
+        repo: repo.to_string(),
         issue_number,
-        issue_url: issue_url.clone(),
+        issue_url: issue_url.to_string(),
         branch: branch.clone(),
-        default_branch: default_branch.clone(),
+        default_branch: default_branch.to_string(),
         work_dir: work_dir.display().to_string(),
         checkout_dir: checkout.display().to_string(),
         session_title: session_title.clone(),
@@ -453,10 +479,51 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
     Ok(SpawnResult {
         work_dir: work_dir.display().to_string(),
         branch,
-        issue_url,
+        issue_url: issue_url.to_string(),
         reused: false,
         warnings,
     })
+}
+
+/// Fetch an issue's facts (title, url) and the repo's default branch — the
+/// shared first step of preparing or running a spawn for an existing issue.
+async fn issue_facts(gh: &GitHub, repo: &str, issue_number: u64) -> Result<(String, String, String), String> {
+    let issue = gh.issue(repo, issue_number).await?;
+    let issue_title = issue["title"].as_str().unwrap_or("").to_string();
+    if issue_title.is_empty() {
+        return Err(format!("issue #{issue_number} not found"));
+    }
+    let issue_url = issue["html_url"].as_str().unwrap_or("").to_string();
+    let issue_body = issue["body"].as_str().unwrap_or("").to_string();
+    Ok((issue_title, issue_url, issue_body))
+}
+
+/// Spawn directly from an existing issue using default theming and a heuristic
+/// short label (no preview). Kept for completeness/back-compat; the UI now goes
+/// through `prepare_spawn` + `confirm_spawn`.
+#[tauri::command]
+pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
+    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let identity_id = settings
+        .identity_id
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
+    let (issue_title, issue_url, _) = issue_facts(&gh, &repo, issue_number).await?;
+    let default_branch = gh.repo(&repo).await?["default_branch"].as_str().unwrap_or("main").to_string();
+    let short_label = default_short_title(&issue_title);
+    let seed = format!("{issue_number}-{}", slugify(&short_label, 25));
+    let (color, emoji) = pick_theme(&seed);
+    do_spawn(SpawnDecision {
+        repo: &repo,
+        issue_number,
+        issue_url: &issue_url,
+        default_branch: &default_branch,
+        short_label: &short_label,
+        color,
+        emoji,
+        force_new,
+    })
+    .await
 }
 
 // ── Create-issue-and-spawn ──────────────────────────────────────────────────────
@@ -492,9 +559,11 @@ fn snippet(s: &str) -> String {
     s.chars().take(240).collect()
 }
 
-/// Pull the inner `{title, body}` out of claude's reply text (which may wrap it
-/// in code fences or prose) and extract a non-empty title plus body.
-fn parse_issue_draft(text: &str) -> Result<(String, String), String> {
+/// Pull the inner `{title, body, short_title}` out of claude's reply text (which
+/// may wrap it in code fences or prose) and extract a non-empty title, body, and
+/// a short branch-friendly label. Falls back to the title for `short_title` when
+/// the model omits it.
+fn parse_issue_draft(text: &str) -> Result<(String, String, String), String> {
     let braces = text.find('{').zip(text.rfind('}')).filter(|(s, e)| e > s);
     let Some((start, end)) = braces else {
         // No JSON object: claude replied conversationally (e.g. asking the user
@@ -509,7 +578,9 @@ fn parse_issue_draft(text: &str) -> Result<(String, String), String> {
     if title.is_empty() {
         return Err("claude returned an empty title".into());
     }
-    Ok((title, body))
+    let short_title = v["short_title"].as_str().unwrap_or("").trim().to_string();
+    let short_title = if short_title.is_empty() { default_short_title(&title) } else { short_title };
+    Ok((title, body, short_title))
 }
 
 /// Run Claude (haiku) headlessly with `prompt`, in `dir` for repo context, and
@@ -550,13 +621,19 @@ async fn claude_text(dir: &Path, prompt: &str, what: &str) -> Result<String, Str
 }
 
 /// Ask Claude (haiku), running in the repo checkout for context, to turn the
-/// user's free-text idea into an issue title + markdown body.
-async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String), String> {
+/// user's free-text idea into an issue title + markdown body + a short label.
+/// The `short_title` is produced in the *same* call (no extra Claude run): it's
+/// a punchy branch/session label, distinct from the full issue title.
+async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String, String), String> {
     let prompt = format!(
         "Based on this idea for a change to this codebase, draft a GitHub issue. \
-         Reply with ONLY a JSON object of the form {{\"title\": string, \"body\": string}}. \
+         Reply with ONLY a JSON object of the form \
+         {{\"title\": string, \"body\": string, \"short_title\": string}}. \
          The title is a concise summary (max ~70 characters). The body is clear markdown \
-         describing the work. Idea: {idea}"
+         describing the work. The short_title is a short, human-readable session label — \
+         plain words with normal spaces and capitalization (NOT a slug or branch name, so \
+         no dashes/underscores), at most ~5 words / 40 characters, no issue number, no \
+         trailing punctuation; it should read well, not just be the title cut off. Idea: {idea}"
     );
     let reply = claude_text(checkout, &prompt, "drafting the issue").await?;
     parse_issue_draft(&reply)
@@ -568,6 +645,8 @@ enum DraftStep {
     Ready {
         title: String,
         body: String,
+        /// Punchy branch/session label produced in the same draft call.
+        short_title: String,
         /// Non-fatal note to surface alongside the created issue.
         warning: Option<String>,
     },
@@ -600,14 +679,17 @@ async fn resolve_draft(
     let gh = GitHub::for_identity(&identity_id)?;
 
     let step = if use_raw_fallback {
+        let title = trim_to_word(idea, 70);
+        let short_title = default_short_title(&title);
         DraftStep::Ready {
-            title: trim_to_word(idea, 70),
+            title,
             body: idea.to_string(),
+            short_title,
             warning: Some("created from your text without an AI draft".to_string()),
         }
     } else {
         match draft_issue(&checkout, idea).await {
-            Ok((title, body)) => DraftStep::Ready { title, body, warning: None },
+            Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title, warning: None },
             // Couldn't draft: let the user confirm before creating anything.
             Err(message) => DraftStep::NeedsConfirmation { message },
         }
@@ -631,7 +713,7 @@ pub async fn create_issue(
 ) -> Result<CreateIssueOutcome, String> {
     let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
     let (title, body, warning) = match step {
-        DraftStep::Ready { title, body, warning } => (title, body, warning),
+        DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
         DraftStep::NeedsConfirmation { message } => {
             return Ok(CreateIssueOutcome::NeedsConfirmation { message });
         }
@@ -647,6 +729,27 @@ pub async fn create_issue(
     })
 }
 
+/// Open an issue from an explicit, already-reviewed title and body (no drafting).
+/// Used by the create-issue preview's confirm button.
+#[tauri::command]
+pub async fn create_issue_direct(repo: String, title: String, body: String) -> Result<CreateIssueOutcome, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("Issue title can't be empty.".into());
+    }
+    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let identity_id = settings
+        .identity_id
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
+    let number = gh.create_issue(&repo, title, &body).await?;
+    Ok(CreateIssueOutcome::Created {
+        number,
+        issue_url: format!("https://github.com/{repo}/issues/{number}"),
+        warnings: Vec::new(),
+    })
+}
+
 /// Draft an issue from the user's idea (via Claude), open it on GitHub, then
 /// spawn a workspace for the freshly created issue. See `create_issue` for the
 /// drafting / needs-confirmation semantics.
@@ -659,7 +762,7 @@ pub async fn create_issue_and_spawn(
 ) -> Result<CreateAndSpawnOutcome, String> {
     let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
     let (title, body, draft_warning) = match step {
-        DraftStep::Ready { title, body, warning } => (title, body, warning),
+        DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
         DraftStep::NeedsConfirmation { message } => {
             return Ok(CreateAndSpawnOutcome::NeedsConfirmation { message });
         }
@@ -671,6 +774,140 @@ pub async fn create_issue_and_spawn(
         result.warnings.insert(0, w);
     }
     Ok(CreateAndSpawnOutcome::Spawned(result))
+}
+
+// ── Preview-then-spawn ────────────────────────────────────────────────────────
+
+/// Everything the spawn preview shows for an issue: the editable issue fields
+/// and short label, plus the chosen theming and the repo's local dir name (so
+/// the UI can render the worktree path). `issue_number` is None on the
+/// create-and-spawn path, where the issue isn't opened until the user confirms.
+#[derive(serde::Serialize)]
+pub struct SpawnPlan {
+    pub repo: String,
+    pub issue_number: Option<u64>,
+    pub issue_title: String,
+    pub issue_body: String,
+    pub short_title: String,
+    pub color: String,
+    pub emoji: String,
+    pub repo_name: String,
+}
+
+/// Prepare a preview for spawning an existing issue: fetch its title/body and
+/// pick theming, without touching the worktree or GitHub.
+#[tauri::command]
+pub async fn prepare_spawn(repo: String, issue_number: u64) -> Result<SpawnPlan, String> {
+    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let identity_id = settings
+        .identity_id
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
+    let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
+    let short_title = default_short_title(&issue_title);
+    let seed = format!("{issue_number}-{}", slugify(&short_title, 25));
+    let (color, emoji) = pick_theme(&seed);
+    let repo_name = repo.split('/').next_back().unwrap_or(&repo).to_string();
+    Ok(SpawnPlan {
+        repo,
+        issue_number: Some(issue_number),
+        issue_title,
+        issue_body,
+        short_title,
+        color: color.to_string(),
+        emoji: emoji.to_string(),
+        repo_name,
+    })
+}
+
+/// Result of drafting a spawn preview from a free-text idea: a ready preview, or
+/// a needs-confirmation prompt (Claude couldn't draft a clear issue).
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DraftPreviewOutcome {
+    Drafted(SpawnPlan),
+    NeedsConfirmation { message: String },
+}
+
+/// Draft an issue from the user's idea (one Claude call, which also yields the
+/// short label) and return a preview — WITHOUT creating the issue. The issue is
+/// only opened when the user confirms via `confirm_spawn`.
+#[tauri::command]
+pub async fn draft_spawn_preview(
+    repo: String,
+    idea: String,
+    use_raw_fallback: bool,
+) -> Result<DraftPreviewOutcome, String> {
+    let (_gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
+    match step {
+        DraftStep::Ready { title, body, short_title, .. } => {
+            let seed = format!("new-{}", slugify(&short_title, 25));
+            let (color, emoji) = pick_theme(&seed);
+            let repo_name = repo.split('/').next_back().unwrap_or(&repo).to_string();
+            Ok(DraftPreviewOutcome::Drafted(SpawnPlan {
+                repo,
+                issue_number: None,
+                issue_title: title,
+                issue_body: body,
+                short_title,
+                color: color.to_string(),
+                emoji: emoji.to_string(),
+                repo_name,
+            }))
+        }
+        DraftStep::NeedsConfirmation { message } => Ok(DraftPreviewOutcome::NeedsConfirmation { message }),
+    }
+}
+
+/// The reviewed (possibly edited) preview the user confirmed. `issue_number` is
+/// Some for an existing issue (PATCHed when `update_issue`), None to create one.
+#[derive(serde::Deserialize)]
+pub struct SpawnEdits {
+    pub issue_number: Option<u64>,
+    pub issue_title: String,
+    pub issue_body: String,
+    pub short_title: String,
+    pub color: String,
+    pub emoji: String,
+    /// For an existing issue: whether the title/body were changed and should be
+    /// written back to GitHub. Ignored on the create path (always created).
+    pub update_issue: bool,
+}
+
+/// Confirm a previewed spawn: create or update the GitHub issue as needed, then
+/// build the worktree/session using the reviewed label and theming.
+#[tauri::command]
+pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> Result<SpawnResult, String> {
+    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let identity_id = settings
+        .identity_id
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
+
+    let number = match edits.issue_number {
+        Some(n) => {
+            if edits.update_issue {
+                gh.update_issue(&repo, n, &edits.issue_title, &edits.issue_body).await?;
+            }
+            n
+        }
+        None => gh.create_issue(&repo, &edits.issue_title, &edits.issue_body).await?,
+    };
+
+    let default_branch = gh.repo(&repo).await?["default_branch"].as_str().unwrap_or("main").to_string();
+    let issue_url = format!("https://github.com/{repo}/issues/{number}");
+
+    do_spawn(SpawnDecision {
+        repo: &repo,
+        issue_number: number,
+        issue_url: &issue_url,
+        default_branch: &default_branch,
+        short_label: &edits.short_title,
+        color: &edits.color,
+        emoji: &edits.emoji,
+        force_new,
+    })
+    .await
 }
 
 // ── Teardown ────────────────────────────────────────────────────────────────────
@@ -1061,9 +1298,10 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
     // Draft via Claude; fall back to the issue title + change summary if it fails
     // so the action still produces a usable PR.
     let (title, body) = match claude_text(&work_dir, &prompt, "drafting the PR").await {
-        Ok(reply) => parse_issue_draft(&reply).unwrap_or_else(|_| {
-            (fallback_title(&issue_title, &branch), summary.clone())
-        }),
+        // The PR draft reuses the issue-draft parser but only needs title + body.
+        Ok(reply) => parse_issue_draft(&reply)
+            .map(|(t, b, _)| (t, b))
+            .unwrap_or_else(|_| (fallback_title(&issue_title, &branch), summary.clone())),
         Err(_) => (fallback_title(&issue_title, &branch), summary.clone()),
     };
 
