@@ -229,50 +229,45 @@ body {
   50% { opacity: 0.4; }
 }
 
-/* Work-lifecycle badge beside the title: a coloured dot + label showing where
-   the work stands (Planning → Implementing → Merged). A separate axis from the
-   live Claude status pill. */
-.lifecycle-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  white-space: nowrap;
+/* Lifecycle zones: within a repo group, work items are bucketed under Planning →
+   Implementing → Merged headings and slide between buckets (FLIP) as their phase
+   changes. Empty zones aren't rendered. */
+.lifecycle-zone + .lifecycle-zone {
+  margin-top: 2px;
 }
 
-.lifecycle-dot {
+.lifecycle-zone-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 0 3px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.lifecycle-zone-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
+  background: var(--muted);
 }
 
-/* Planning: not started — muted. */
-.lifecycle-pill--planning { color: var(--muted); }
-.lifecycle-pill--planning .lifecycle-dot { background: var(--muted); }
-
-/* Implementing: work underway — blue. */
-.lifecycle-pill--implementing {
-  color: var(--blue);
-  background: var(--blue-bg);
-  border-color: transparent;
+/* The count sits at the far right, dimmed. */
+.lifecycle-zone-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
 }
-.lifecycle-pill--implementing .lifecycle-dot { background: var(--blue); }
 
-/* Merged: landed — purple, matching the merged-PR icon. */
-.lifecycle-pill--merged {
-  color: var(--purple);
-  background: var(--purple-bg);
-  border-color: transparent;
-}
-.lifecycle-pill--merged .lifecycle-dot { background: var(--purple); }
+/* Per-phase accent on the heading + its dot. Planning stays muted. */
+.lifecycle-zone--implementing .lifecycle-zone-name { color: var(--blue); }
+.lifecycle-zone--implementing .lifecycle-zone-dot { background: var(--blue); }
+.lifecycle-zone--merged .lifecycle-zone-name { color: var(--purple); }
+.lifecycle-zone--merged .lifecycle-zone-dot { background: var(--purple); }
 
 /* Right-aligned segmented pill of icon actions on a session row. */
 .session-pill {

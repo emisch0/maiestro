@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
 import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
 import GearIcon from "./icons/gear.svg?react";
@@ -65,17 +65,9 @@ const LIFECYCLE_LABELS: Record<LifecyclePhase, string> = {
   merged: "Merged",
 };
 
-// A small badge showing where a session's work stands. Rendered beside the title
-// so progress reads at a glance across many worktrees.
-function LifecyclePill({ phase }: { phase: LifecyclePhase }) {
-  const label = LIFECYCLE_LABELS[phase];
-  return (
-    <span className={`lifecycle-pill lifecycle-pill--${phase}`} title={`Work status: ${label}`}>
-      <span className="lifecycle-dot" />
-      {label}
-    </span>
-  );
-}
+// Top-to-bottom order of the lifecycle zones within a repo group. Work items live
+// in the zone matching their phase and slide between zones as the phase changes.
+const ZONES: LifecyclePhase[] = ["planning", "implementing", "merged"];
 
 // A pending Tear Down prompt: a warnings confirmation, or a "VS Code still open"
 // block (which may offer the Accessibility shortcut so mAIestro can close it).
@@ -1032,6 +1024,11 @@ function MainView() {
   const [expanded, setExpanded] = useState<Expand>(null);
   // The multi-line idea box; resized to fit its content (capped in CSS).
   const ideaRef = useRef<HTMLTextAreaElement | null>(null);
+  // The work-list container, scanned by the FLIP effect for `[data-flip-id]` rows.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // Last-known viewport rect of each work item, keyed by session id. Drives the
+  // FLIP slide when an item lands in a different zone on the next render.
+  const flipRects = useRef(new Map<string, DOMRect>());
 
   const [sessions, setSessions] = useState<Session[]>([]);
   // PR link per session id, discovered live from GitHub. `null` = looked up, none
@@ -1485,6 +1482,46 @@ function MainView() {
 
   const now = Date.now();
 
+  // The lifecycle zone a session sorts into. An unresolved work state defaults to
+  // Planning until the local-git lookup lands (then the item slides if it moved).
+  const zoneOf = (s: Session): LifecyclePhase =>
+    lifecyclePhase(prs[s.id], workStates[s.id]) ?? "planning";
+
+  // FLIP: after each render, compare every work item's new position against the
+  // one we recorded last time. If it moved (it changed zones), jump it back to the
+  // old spot with a transform, then release the transform on the next frame so it
+  // glides into place. Runs before paint, so there's no flash. Items track by
+  // session id, so a row remounting into a different zone's container still slides.
+  useLayoutEffect(() => {
+    const container = listRef.current;
+    if (!container) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const rows = container.querySelectorAll<HTMLElement>("[data-flip-id]");
+    const next = new Map<string, DOMRect>();
+    rows.forEach((el) => {
+      const id = el.dataset.flipId!;
+      const rect = el.getBoundingClientRect();
+      // Skip rows that aren't laid out (e.g. the popover is hidden) so we keep the
+      // last good rect and don't fly every item in from 0,0 on the next open.
+      if (rect.height === 0) return;
+      next.set(id, rect);
+      if (reduce) return;
+      const prev = flipRects.current.get(id);
+      if (!prev || prev.height === 0) return;
+      const dx = prev.left - rect.left;
+      const dy = prev.top - rect.top;
+      if (!dx && !dy) return;
+      el.style.transition = "none";
+      el.style.transform = `translate(${dx}px, ${dy}px)`;
+      void el.getBoundingClientRect(); // force the inverted position to commit
+      requestAnimationFrame(() => {
+        el.style.transition = "transform 320ms cubic-bezier(0.22, 1, 0.36, 1)";
+        el.style.transform = "";
+      });
+    });
+    flipRects.current = next;
+  });
+
   return (
     <main className="panel">
       <header className="panel-header">
@@ -1503,7 +1540,7 @@ function MainView() {
         </button>
       </header>
 
-      <div className="work-list">
+      <div className="work-list" ref={listRef}>
         {repos.length === 0 ? (
           <div className="empty-state">
             <p className="empty-state-title">No repos yet</p>
@@ -1561,7 +1598,17 @@ function MainView() {
                 {visibleSessions.length === 0 ? (
                   <p className="repo-group-empty">No active work</p>
                 ) : (
-                  visibleSessions.map((s) => {
+                  ZONES.map((zone) => {
+                    const zoneItems = visibleSessions.filter((s) => zoneOf(s) === zone);
+                    if (zoneItems.length === 0) return null;
+                    return (
+                      <div key={zone} className={`lifecycle-zone lifecycle-zone--${zone}`}>
+                        <div className="lifecycle-zone-header">
+                          <span className="lifecycle-zone-dot" />
+                          <span className="lifecycle-zone-name">{LIFECYCLE_LABELS[zone]}</span>
+                          <span className="lifecycle-zone-count">{zoneItems.length}</span>
+                        </div>
+                        {zoneItems.map((s) => {
                     const cmdOpen = commandsOpen === s.id;
                     const pr = prs[s.id];
                     const PrIcon = pr ? (PR_STATE_ICONS[pr.state] ?? PrOpenIcon) : null;
@@ -1575,13 +1622,11 @@ function MainView() {
                     const prc = prCreate[s.id];
                     const checks = prChecks[s.id];
                     const pm = prMerge[s.id];
-                    const phase = lifecyclePhase(pr, workStates[s.id]);
                     return (
-                    <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
+                    <div key={s.id} data-flip-id={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
                         <ClaudePill status={statuses[s.id]} onClick={() => api.openInEditor(s.work_dir)} />
                         <span className="workspace-title">{s.session_title}</span>
-                        {phase && <LifecyclePill phase={phase} />}
                         {sessHidden && sessSnoozeLabel && (
                           <span className="snooze-label">Snoozed · {sessSnoozeLabel}</span>
                         )}
@@ -1717,6 +1762,9 @@ function MainView() {
                         </div>
                       )}
                     </div>
+                    );
+                        })}
+                      </div>
                     );
                   })
                 )}
