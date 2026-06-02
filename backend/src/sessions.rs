@@ -17,6 +17,10 @@ pub struct Session {
     pub issue_number: u64,
     pub issue_url: String,
     pub branch: String,
+    /// The repo's default branch the worktree was created from (teardown
+    /// compares against `origin/<default_branch>`). Older records default to "main".
+    #[serde(default = "default_branch")]
+    pub default_branch: String,
     /// Absolute path to the spawned worktree.
     pub work_dir: String,
     /// Absolute path to the source checkout the worktree was created from.
@@ -28,6 +32,10 @@ pub struct Session {
     pub emoji: String,
 }
 
+fn default_branch() -> String {
+    "main".to_string()
+}
+
 fn sessions_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home).join(".maiestro/sessions")
@@ -35,6 +43,18 @@ fn sessions_dir() -> PathBuf {
 
 fn session_path(id: &str) -> PathBuf {
     sessions_dir().join(format!("{id}.json"))
+}
+
+pub fn get(id: &str) -> Option<Session> {
+    let data = std::fs::read_to_string(session_path(id)).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+pub fn delete(id: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(session_path(id)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
 }
 
 pub fn save(session: &Session) -> std::io::Result<()> {

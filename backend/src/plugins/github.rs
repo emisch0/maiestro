@@ -88,6 +88,16 @@ impl GitHub {
         if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
     }
 
+    /// All pull requests (any state) whose head is `branch` on `repo` ("owner/name").
+    pub async fn pulls_for_branch(&self, repo: &str, branch: &str) -> Result<Vec<serde_json::Value>, String> {
+        let owner = repo.split('/').next().unwrap_or("");
+        let url = format!(
+            "https://api.github.com/repos/{repo}/pulls?head={owner}:{branch}&state=all&per_page=100"
+        );
+        let v = self.get_json(&url).await?;
+        Ok(v.as_array().cloned().unwrap_or_default())
+    }
+
     /// Open a new issue and return its number. `repo` is "owner/name".
     pub async fn create_issue(&self, repo: &str, title: &str, body: &str) -> Result<u64, String> {
         let url = format!("https://api.github.com/repos/{repo}/issues");

@@ -698,6 +698,8 @@ function MainView() {
   const [sessions, setSessions] = useState<Session[]>([]);
   // Session id whose inline command strip is expanded (only one at a time).
   const [commandsOpen, setCommandsOpen] = useState<string | null>(null);
+  // Pending Clean Up confirmation: the session id and the warnings to show.
+  const [cleanupConfirm, setCleanupConfirm] = useState<{ id: string; warnings: string[] } | null>(null);
 
   const refreshSessions = useCallback(() => {
     api.sessionsList().then(setSessions).catch(() => {});
@@ -790,6 +792,34 @@ function MainView() {
     }
   }
 
+  // "Clean Up": tear down the worktree. Confirms first unless the backend says
+  // it's safe (PR merged, nothing new).
+  async function cleanUp(s: Session) {
+    setCleanupConfirm(null);
+    try {
+      const res = await api.teardown(s.id);
+      if (res.status === "needs_confirmation") {
+        setCleanupConfirm({ id: s.id, warnings: res.warnings });
+      } else {
+        refreshSessions();
+      }
+    } catch (e) {
+      setCleanupConfirm({ id: s.id, warnings: [`Teardown failed: ${String(e)}`] });
+    }
+  }
+
+  async function confirmCleanup(id: string) {
+    try {
+      await api.teardown(id, true);
+    } catch (e) {
+      setCleanupConfirm({ id, warnings: [`Teardown failed: ${String(e)}`] });
+      return;
+    }
+    setCleanupConfirm(null);
+    setCommandsOpen((open) => (open === id ? null : open));
+    refreshSessions();
+  }
+
   return (
     <main className="panel">
       <header className="panel-header">
@@ -874,11 +904,25 @@ function MainView() {
                         </button>
                       </div>
                       <div className={`command-strip ${cmdOpen ? "command-strip--open" : ""}`}>
-                        {/* Commands are UI-only for now — no logic wired yet. */}
+                        {/* Create PR / Merge PR are UI-only for now. */}
                         <button className="command-btn" onClick={() => {}}>Create PR</button>
                         <button className="command-btn" onClick={() => {}}>Merge PR</button>
-                        <button className="command-btn" onClick={() => {}}>Clean Up</button>
+                        <button className="command-btn" onClick={() => cleanUp(s)}>Clean Up</button>
                       </div>
+                      {cleanupConfirm?.id === s.id && (
+                        <div className="cleanup-confirm">
+                          <p className="cleanup-lead">Remove this workspace?</p>
+                          <ul className="cleanup-warnings">
+                            {cleanupConfirm.warnings.map((w, i) => (
+                              <li key={i}>{w}</li>
+                            ))}
+                          </ul>
+                          <div className="issue-actions">
+                            <button className="btn-danger" onClick={() => confirmCleanup(s.id)}>Remove anyway</button>
+                            <button className="btn-ghost" onClick={() => setCleanupConfirm(null)}>Cancel</button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                     );
                   })

@@ -141,6 +141,9 @@ fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str) -> Result
         "task.allowAutomaticTasks": "on",
         "workbench.startupEditor": "none",
         "workbench.secondarySideBar.visible": false,
+        // Let teardown close the window without a "Are you sure?" prompt blocking
+        // the programmatic close (dirty files are preserved via hot exit).
+        "window.confirmBeforeClose": "never",
         // Marker used by teardown to find this window via AppleScript.
         "window.title": format!("${{dirty}}${{activeEditorShort}}${{separator}}{work_parent}/${{rootName}}"),
         "terminal.integrated.gpuAcceleration": "off",
@@ -407,6 +410,7 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
         issue_number,
         issue_url: issue_url.clone(),
         branch: branch.clone(),
+        default_branch: default_branch.clone(),
         work_dir: work_dir.display().to_string(),
         checkout_dir: checkout.display().to_string(),
         session_title: session_title.clone(),
@@ -570,4 +574,229 @@ pub async fn create_issue_and_spawn(
         result.warnings.insert(0, w);
     }
     Ok(CreateAndSpawnOutcome::Spawned(result))
+}
+
+// ── Teardown ────────────────────────────────────────────────────────────────────
+
+/// Close the VS Code window(s) for this worktree by pressing each matching
+/// window's native close button via the accessibility API. We deliberately use
+/// System Events here (the same path `focus_editor_window` uses) rather than
+/// direct Apple events to "Visual Studio Code": Electron's scripting suite is
+/// unreliable, and the direct-events path also needs a *separate* Automation
+/// grant that we'd never prompted for — so the close was failing silently.
+/// No-op if VS Code isn't running.
+async fn close_editor_window(marker: &str) {
+    let safe = marker.replace('"', "");
+    let script = format!(
+        r#"tell application "System Events"
+  if not (exists process "Code") then return
+  tell process "Code"
+    repeat with w in windows
+      if name of w contains "{safe}" then
+        try
+          perform action "AXPress" of (first button of w whose subrole is "AXCloseButton")
+        end try
+      end if
+    end repeat
+  end tell
+end tell"#
+    );
+    let _ = tokio::process::Command::new("osascript").arg("-e").arg(&script).output().await;
+}
+
+/// What we could learn about a worktree's VS Code window. The `Denied` case is
+/// critical: when mAIestro lacks Accessibility permission, osascript errors and
+/// we genuinely cannot see the window — which must NOT be mistaken for "closed",
+/// or teardown would delete the folder out from under a live VS Code and crash it.
+enum WinProbe {
+    /// A window whose title contains the marker is open.
+    Open,
+    /// VS Code isn't running, or no window matches the marker.
+    Absent,
+    /// Couldn't determine — almost always a missing Accessibility grant.
+    Denied,
+}
+
+/// Probe for an open VS Code window whose title contains `marker`, via the
+/// accessibility API (System Events).
+async fn probe_editor_window(marker: &str) -> WinProbe {
+    let safe = marker.replace('"', "");
+    let script = format!(
+        r#"tell application "System Events"
+  if not (exists process "Code") then return "absent"
+  tell process "Code"
+    repeat with w in windows
+      if name of w contains "{safe}" then return "open"
+    end repeat
+  end tell
+end tell
+return "absent""#
+    );
+    match tokio::process::Command::new("osascript").arg("-e").arg(&script).output().await {
+        Ok(out) if out.status.success() => {
+            match String::from_utf8_lossy(&out.stdout).trim() {
+                "open" => WinProbe::Open,
+                _ => WinProbe::Absent,
+            }
+        }
+        // Non-zero exit (e.g. "-25211 not allowed assistive access") or spawn failure.
+        _ => WinProbe::Denied,
+    }
+}
+
+/// Permission-free safety net: is any process's working directory inside this
+/// worktree? Our spawned `claude` runs in VS Code's integrated terminal with its
+/// cwd in the worktree, so this catches the common "still open" case without
+/// needing Accessibility. Uses `lsof -d cwd` (process CWDs only) to avoid the
+/// slow tree walk that `lsof +D` would do over a full checkout.
+fn worktree_in_use(work_dir: &Path) -> bool {
+    let dir = work_dir.to_string_lossy();
+    match Command::new("lsof").args(["-d", "cwd", "-Fn"]).output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|l| l.strip_prefix('n').is_some_and(|p| p.starts_with(&*dir))),
+        Err(_) => false,
+    }
+}
+
+/// Open System Settings → Privacy & Security → Accessibility so the user can
+/// grant mAIestro the permission teardown needs to close VS Code windows.
+fn open_accessibility_settings() {
+    let _ = Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn();
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TeardownOutcome {
+    Done,
+    /// Checks found unresolved work; `warnings` describes it so the UI can ask
+    /// the user to confirm before destroying the worktree.
+    NeedsConfirmation { warnings: Vec<String> },
+}
+
+/// Tear down a spawned session's worktree. Inspects the branch first
+/// (uncommitted changes, PR state, unmerged commits); confirmation is required
+/// in every case except when the PR is merged and nothing new remains. On
+/// teardown the VS Code window is closed *first* (open windows have caused
+/// removal failures), then the worktree, local branch, directory, and session
+/// record are removed.
+#[tauri::command]
+pub async fn teardown(session_id: String, confirmed: bool) -> Result<TeardownOutcome, String> {
+    let session = crate::sessions::get(&session_id)
+        .ok_or_else(|| format!("session not found: {session_id}"))?;
+    let work_dir = PathBuf::from(&session.work_dir);
+    let checkout = expand_tilde(&session.checkout_dir);
+    let branch = session.branch.clone();
+    let base = session.default_branch.clone();
+
+    // ── Checks ──────────────────────────────────────────────────────────────
+    let mut warnings = Vec::new();
+
+    let dirty = git(&work_dir, &["status", "--porcelain"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if dirty {
+        warnings.push("Worktree has uncommitted changes".to_string());
+    }
+
+    // PR state via the REST API (best-effort: needs an identity + token).
+    let mut pr_merged = false;
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    if let Some(identity_id) = settings.identity_id {
+        if let Ok(gh) = GitHub::for_identity(&identity_id) {
+            if let Ok(prs) = gh.pulls_for_branch(&session.repo, &branch).await {
+                pr_merged = prs.iter().any(|p| p["merged_at"].is_string());
+                if let Some(open) = prs.iter().find(|p| p["state"].as_str() == Some("open")) {
+                    warnings.push(format!("PR #{} is still open", open["number"].as_u64().unwrap_or(0)));
+                }
+            }
+        }
+    }
+
+    // Commits on the branch not yet on the base, when no merged PR accounts for them.
+    let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{base}..{branch}")])
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    if !pr_merged && ahead > 0 {
+        warnings.push(format!("Branch has {ahead} commit(s) not merged"));
+    }
+    if !pr_merged && ahead == 0 && !dirty {
+        warnings.push("Nothing has been done on this branch".to_string());
+    }
+
+    // Skip confirmation only when the PR is merged and nothing new remains.
+    let safe = pr_merged && !dirty;
+    if !safe && !confirmed {
+        return Ok(TeardownOutcome::NeedsConfirmation { warnings });
+    }
+
+    // ── Execute ─────────────────────────────────────────────────────────────
+    // 1. Close VS Code FIRST and CONFIRM the worktree is free before touching the
+    //    files. Removing it out from under a live VS Code crashes the editor, so
+    //    we only proceed once we can show the window is gone — never on a guess.
+    if let Some(marker) = window_marker(&work_dir) {
+        close_editor_window(&marker).await;
+        let mut waited = 0u64;
+        loop {
+            match probe_editor_window(&marker).await {
+                // Window confirmed gone — safe to delete.
+                WinProbe::Absent => break,
+                // No Accessibility grant: we can neither close nor see the window.
+                // Fall back to the permission-free check — if nothing is using the
+                // worktree, proceed; otherwise stop and guide the user.
+                WinProbe::Denied => {
+                    if worktree_in_use(&work_dir) {
+                        open_accessibility_settings();
+                        return Err(
+                            "mAIestro needs Accessibility permission to close the VS Code window \
+                             before removing this worktree (without it, VS Code crashes). I opened \
+                             System Settings → Privacy & Security → Accessibility — enable mAIestro \
+                             there and try again, or just close the VS Code window yourself first."
+                                .to_string(),
+                        );
+                    }
+                    break;
+                }
+                // Window still open: the close is in flight (or we lack permission
+                // to close but the user may close it). Wait a bit, then give up.
+                WinProbe::Open => {
+                    if waited >= 4000 {
+                        return Err(
+                            "VS Code still has this worktree open — close its window, then try Clean Up again."
+                                .to_string(),
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    waited += 300;
+                }
+            }
+        }
+    }
+
+    // 2. Remove the worktree (force: the user confirmed discarding any changes).
+    git(&checkout, &["worktree", "remove", "--force", &work_dir.to_string_lossy()])?;
+
+    // 3. Delete the local branch (-D: spawn unset the upstream and -d checks the
+    //    wrong base, so it would refuse even for merged branches).
+    if local_branch_exists(&checkout, &branch) {
+        let _ = git(&checkout, &["branch", "-D", &branch]);
+    }
+
+    // 4. Remove the leftover work-* parent dir, guarding the path shape.
+    if let Some(parent) = work_dir.parent() {
+        let src = home().join("src");
+        let under_src = parent.parent() == Some(src.as_path());
+        let is_work = parent.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("work-"));
+        if under_src && is_work && parent.exists() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    // 5. Drop the session record.
+    let _ = crate::sessions::delete(&session_id);
+
+    Ok(TeardownOutcome::Done)
 }

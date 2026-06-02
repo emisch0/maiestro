@@ -31,6 +31,10 @@ export type CreateAndSpawnOutcome =
   | ({ status: "spawned" } & SpawnResult)
   | { status: "needs_confirmation"; message: string };
 
+export type TeardownOutcome =
+  | { status: "done" }
+  | { status: "needs_confirmation"; warnings: string[] };
+
 export interface Session {
   id: string;
   repo: string;
@@ -110,4 +114,7 @@ export const api = {
 
   sessionsList: () =>
     invoke<Session[]>("sessions_list"),
+
+  teardown: (sessionId: string, confirmed = false) =>
+    invoke<TeardownOutcome>("teardown", { sessionId, confirmed }),
 };
