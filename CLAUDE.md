@@ -70,9 +70,11 @@ Current schema:
 ```json
 {
   "checkout_dir": "~/src/repo-name",
-  "env_files": ["/absolute/path/.env", "/absolute/path/.env.local"]
+  "env_files": ["/absolute/path/.env", "/absolute/path/.env.local"],
+  "hidden": { "snooze_until": 1717372800000 }
 }
 ```
 
 - **`checkout_dir`**: absolute path to the local git checkout. Defaults to `~/src/<repo-name>` (no owner prefix). Used as the root for worktree creation and for env file scanning.
 - **`env_files`**: ordered list of `.env` files to source when launching user-facing tools (VSCode, Terminal) for this repo. Populated via a "Scan" action that walks the checkout directory (up to 4 levels, skipping `node_modules`, `.git`, `target`, etc.) looking for files whose name starts with `.env`. Users can also add or remove entries manually.
+- **`hidden`**: repo-level hide/snooze state. Absent (or `null`) means visible. When present, the repo and all its work items are hidden from the dashboard unless "Show hidden" is toggled on. `snooze_until` is a Unix-epoch-millis timestamp the repo stays hidden until (`null` = hidden indefinitely); once that time passes the repo renders as visible again. Per-work-item hide state is **not** stored here — it lives on each session record (`~/.maiestro/sessions/<id>.json`).

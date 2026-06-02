@@ -428,6 +428,7 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
         session_title: session_title.clone(),
         color: color.to_string(),
         emoji: emoji.to_string(),
+        hidden: None,
     };
     if let Err(e) = crate::sessions::save(&session) {
         warnings.push(format!("could not record session: {e}"));
