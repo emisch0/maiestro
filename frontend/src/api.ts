@@ -1,9 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** Hide/snooze state for a repo or work item. Presence = hidden. */
+export interface HideState {
+  /** Unix-epoch millis to stay hidden until; null = hidden indefinitely. */
+  snooze_until: number | null;
+}
+
 export interface RepoSettings {
   checkout_dir: string | null;
   env_files: string[];
   identity_id: string | null;
+  hidden: HideState | null;
 }
 
 export interface GHRepo {
@@ -50,6 +57,7 @@ export interface Session {
   session_title: string;
   color: string;
   emoji: string;
+  hidden: HideState | null;
 }
 
 export interface PrLink {
@@ -90,6 +98,12 @@ export const api = {
 
   setRepoSettings: (repo: string, settings: RepoSettings) =>
     invoke<void>("repo_settings_set", { repo, settings }),
+
+  setRepoVisibility: (repo: string, hidden: HideState | null) =>
+    invoke<void>("repo_set_visibility", { repo, hidden }),
+
+  setSessionVisibility: (sessionId: string, hidden: HideState | null) =>
+    invoke<void>("session_set_visibility", { sessionId, hidden }),
 
   scanEnvFiles: (checkoutDir: string) =>
     invoke<string[]>("repo_scan_env_files", { checkoutDir }),
@@ -135,4 +149,7 @@ export const api = {
 
   sessionPr: (sessionId: string) =>
     invoke<PrLink | null>("session_pr", { sessionId }),
+
+  createPr: (sessionId: string) =>
+    invoke<PrLink>("session_create_pr", { sessionId }),
 };
