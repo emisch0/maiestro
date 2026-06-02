@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use serde::Serialize;
 
 /// Metadata a plugin declares for a credential type it owns.
@@ -12,18 +11,12 @@ pub struct CredentialTypeInfo {
     pub description: &'static str,
 }
 
-/// A credential value already fetched from Keychain for a specific spawn context.
-pub struct ResolvedCredential {
-    pub type_id: String,
-    pub value: String,
-}
-
-/// A plugin contributes one or more credential types and knows how to inject them
-/// into a subprocess environment at spawn time.
+/// A plugin contributes one or more credential types it owns. (mAIestro does not
+/// inject these into launched sessions — see the architecture notes in CLAUDE.md
+/// on ambient environment — so a plugin is currently just a credential-type
+/// declaration consumed by `plugins_list_credential_types`.)
 pub trait Plugin: Send + Sync {
-    fn id(&self) -> &str;
     fn credential_types(&self) -> &[CredentialTypeInfo];
-    fn on_spawn_env(&self, env: &mut HashMap<String, String>, resolved: &[ResolvedCredential]);
 }
 
 /// Registry of all active plugins. Constructed at app startup and stored as
@@ -39,15 +32,6 @@ impl PluginRegistry {
 
     pub fn all_credential_types(&self) -> impl Iterator<Item = &CredentialTypeInfo> {
         self.plugins.iter().flat_map(|p| p.credential_types())
-    }
-
-    /// Build the subprocess env by asking every plugin to inject its credentials.
-    pub fn build_spawn_env(&self, resolved: &[ResolvedCredential]) -> HashMap<String, String> {
-        let mut env = HashMap::new();
-        for plugin in &self.plugins {
-            plugin.on_spawn_env(&mut env, resolved);
-        }
-        env
     }
 }
 

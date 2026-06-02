@@ -842,6 +842,9 @@ function MainView() {
   const [commandsOpen, setCommandsOpen] = useState<string | null>(null);
   // Pending Clean Up confirmation: the session id and the warnings to show.
   const [cleanupConfirm, setCleanupConfirm] = useState<{ id: string; warnings: string[] } | null>(null);
+  // Create-PR progress/error per session id: `{ creating }` while in flight,
+  // `{ error }` after a failure. Absent = idle.
+  const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; error?: string }>>({});
   // Global toggle: reveal hidden/snoozed repos and work items (dimmed).
   const [showHidden, setShowHidden] = useState(false);
   // Per-repo settings, keyed by repo full_name — the source of repo-level hide state.
@@ -969,6 +972,20 @@ function MainView() {
       applyOutcome(await api.createIssueAndSpawn(repo, idea, true), idea);
     } catch (e) {
       setPicker((p) => (p ? { ...p, note: `Failed to create issue and spawn: ${String(e)}` } : p));
+    }
+  }
+
+  // "Create PR": push the branch, draft a description with Claude, and open a
+  // draft PR. On success the PR pill refreshes to link the new PR (we don't
+  // open it in the browser — the pill is the entry point).
+  async function createPr(s: Session) {
+    setPrCreate((prev) => ({ ...prev, [s.id]: { creating: true } }));
+    try {
+      const pr = await api.createPr(s.id);
+      setPrs((prev) => ({ ...prev, [s.id]: pr }));
+      setPrCreate((prev) => ({ ...prev, [s.id]: {} }));
+    } catch (e) {
+      setPrCreate((prev) => ({ ...prev, [s.id]: { error: String(e) } }));
     }
   }
 
@@ -1101,6 +1118,10 @@ function MainView() {
                     const sessSnoozeLabel = s.hidden?.snooze_until
                       ? formatSnoozeRemaining(s.hidden.snooze_until, now)
                       : "";
+                    // An active PR (open or still a draft) already covers this branch,
+                    // so disable Create PR; the pill links to it.
+                    const prOpen = pr?.state === "open" || pr?.state === "draft";
+                    const prc = prCreate[s.id];
                     return (
                     <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
@@ -1142,7 +1163,7 @@ function MainView() {
                             title="Open in VS Code"
                             aria-label="Open in VS Code"
                           >
-                            <VSCodeIcon />
+                            <VSCodeIcon style={{ color: s.color }} />
                           </button>
                         </div>
                         <button
@@ -1156,8 +1177,15 @@ function MainView() {
                         </button>
                       </div>
                       <div className={`command-strip ${cmdOpen ? "command-strip--open" : ""}`}>
-                        {/* Create PR / Merge PR are UI-only for now. */}
-                        <button className="command-btn" onClick={() => {}}>Create PR</button>
+                        <button
+                          className="command-btn"
+                          onClick={() => createPr(s)}
+                          disabled={prc?.creating || prOpen}
+                          title={prOpen ? `PR #${pr?.number} is already open` : undefined}
+                        >
+                          {prc?.creating ? "Creating PR…" : "Create PR"}
+                        </button>
+                        {/* Merge PR is UI-only for now. */}
                         <button className="command-btn" onClick={() => {}}>Merge PR</button>
                         {sessHidden ? (
                           <button className="command-btn" onClick={() => applyVisibility({ kind: "session", session: s }, null)}>Unhide</button>
@@ -1166,6 +1194,17 @@ function MainView() {
                         )}
                         <button className="command-btn" onClick={() => cleanUp(s)}>Clean Up</button>
                       </div>
+                      {prc?.error && (
+                        <div className="cleanup-confirm">
+                          <p className="cleanup-lead">Couldn't create the PR</p>
+                          <ul className="cleanup-warnings">
+                            <li>{prc.error}</li>
+                          </ul>
+                          <div className="issue-actions">
+                            <button className="btn-ghost" onClick={() => setPrCreate((prev) => ({ ...prev, [s.id]: {} }))}>Dismiss</button>
+                          </div>
+                        </div>
+                      )}
                       {cleanupConfirm?.id === s.id && (
                         <div className="cleanup-confirm">
                           <p className="cleanup-lead">Remove this workspace?</p>

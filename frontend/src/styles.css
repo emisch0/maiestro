@@ -254,9 +254,14 @@ body {
   cursor: pointer;
 }
 
-.command-btn:hover {
+.command-btn:hover:not(:disabled) {
   background: var(--accent-bg);
   border-color: var(--accent-border);
+}
+
+.command-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 /* Clean Up confirmation, shown under a session row when teardown needs review. */

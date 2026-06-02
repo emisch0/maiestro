@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use crate::credentials::{CredentialScope, CredentialStore};
-use crate::plugin::{CredentialTypeInfo, Plugin, ResolvedCredential};
+use crate::plugin::{CredentialTypeInfo, Plugin};
 
 const TYPES: &[CredentialTypeInfo] = &[CredentialTypeInfo {
     type_id: "github_token",
@@ -12,15 +12,7 @@ const TYPES: &[CredentialTypeInfo] = &[CredentialTypeInfo {
 pub struct GitHubPlugin;
 
 impl Plugin for GitHubPlugin {
-    fn id(&self) -> &str { "github" }
-
     fn credential_types(&self) -> &[CredentialTypeInfo] { TYPES }
-
-    fn on_spawn_env(&self, env: &mut HashMap<String, String>, resolved: &[ResolvedCredential]) {
-        if let Some(cred) = resolved.iter().find(|c| c.type_id == "github_token") {
-            env.insert("GITHUB_TOKEN".into(), cred.value.clone());
-        }
-    }
 }
 
 // ── Reusable REST client ────────────────────────────────────────────────────────
@@ -117,6 +109,33 @@ impl GitHub {
             .json(&serde_json::json!({ "body": body }))
             .send().await.map_err(|e| e.to_string())?;
         if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
+    }
+
+    /// Open a pull request and return the created PR object. `repo` is
+    /// "owner/name"; `head` and `base` are branch names on that repo.
+    pub async fn create_pull(
+        &self,
+        repo: &str,
+        title: &str,
+        head: &str,
+        base: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<serde_json::Value, String> {
+        let url = format!("https://api.github.com/repos/{repo}/pulls");
+        let resp = self.req(reqwest::Method::POST, &url)
+            .json(&serde_json::json!({
+                "title": title,
+                "head": head,
+                "base": base,
+                "body": body,
+                "draft": draft,
+            }))
+            .send().await.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(error_message(resp).await);
+        }
+        resp.json().await.map_err(|e| e.to_string())
     }
 }
 
