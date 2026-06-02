@@ -61,6 +61,14 @@ Which app a session opens in (a specific terminal, an editor) and any workspace-
 
 One deliberate exception: when VS Code is available, we open worktrees via its `code` CLI (located on `$PATH`, falling back to common install paths and the bundled `.app/Contents/Resources/app/bin/code`) instead of `open -a`, so we can pass `--disable-workspace-trust` and skip the "Do you trust the authors?" prompt on every freshly spawned worktree. The `code` CLI forwards that flag even to an already-running VS Code, which `open -a --args` cannot. If no `code` CLI is found we fall back to `open -a "Visual Studio Code" --args --disable-workspace-trust <worktree>`. The session still inherits the user's ambient environment either way.
 
+### Live per-session status via Claude Code hooks
+
+Because mAIestro launches `claude` but does not host it (see above), it cannot read a session's working/waiting state from stdio. Instead, at worktree creation `spawn.rs` writes Claude Code hooks into the worktree's `.claude/settings.local.json` (the personal, gitignored layer that merges with the user's own settings and applies to both terminal and VS Code integrated-terminal sessions). Each hook invokes **the mAIestro binary itself** as `maiestro hook <state> --workspace <ws-id>` — a hidden CLI subcommand dispatched in `main()` *before* Tauri starts. Using the app binary as the helper means zero external deps (no `jq`/`python`) and one source of truth; `spawn.rs` bakes its own `current_exe()` path into the generated commands.
+
+The helper reads Claude's hook event JSON on stdin (serde), and atomically writes a status record to `~/.maiestro/status/<ws-id>.json`. The backend watches that directory with the `notify` crate and emits a `session-status` event to the popover; the frontend also reads `sessions_status_list` on open so a reopened popover is correct even if it missed events. The hook → state mapping: `SessionStart`→running, `UserPromptSubmit`/`PreToolUse`→busy, `Notification`→needs_you (detail from the payload message), `Stop`→idle, `SessionEnd`→ended. `PreToolUse`→busy so that resuming after an approved permission prompt flips out of "needs you" without waiting for `Stop`. The helper is deliberately failure-tolerant — a hook must never block or crash the user's session.
+
+The whole mechanism is event-driven and last-write-wins, assuming one session per worktree (keyed by `<ws-id>`, which equals `Session.id`). Generated files (`.claude/settings.local.json`, `.vscode/`) are added to the worktree's shared git exclude (`$(git rev-parse --git-common-dir)/info/exclude`) so they don't trip teardown's `git status --porcelain` dirty check before Claude has run.
+
 ### Per-repo settings
 
 Each repo tracked by mAIestro has a small settings record stored in `~/.maiestro/repos/<owner>-<name>.json`. This is the place for configuration that is specific to a repo but not a credential. The file is human-editable and dotfile-manageable.

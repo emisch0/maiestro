@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, IssueNode, PrLink, RepoSettings, Session } from "./api";
+import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, IssueNode, PrLink, RepoSettings, Session, StatusRecord } from "./api";
 import GearIcon from "./icons/gear.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
 import FolderIcon from "./icons/folder.svg?react";
@@ -707,6 +707,29 @@ function IssueRow({ node, depth, expandedNumber, onExpand, onCollapse, onSpawn }
   );
 }
 
+// How each status state renders in a work-item row. `running`/`idle` are quiet;
+// `busy` and `needs_you` draw attention. States not in the map render nothing.
+const STATUS_LABELS: Record<string, string> = {
+  running: "Ready",
+  busy: "Working",
+  needs_you: "Needs you",
+  idle: "Idle",
+};
+
+function StatusIndicator({ status }: { status?: StatusRecord }) {
+  if (!status || status.state === "ended") return null;
+  const label = STATUS_LABELS[status.state];
+  if (!label) return null;
+  // `needs_you` carries the reason (e.g. the permission request) in `detail`.
+  const title = status.detail ? `${label} — ${status.detail}` : label;
+  return (
+    <span className={`status-indicator status-indicator--${status.state}`} title={title}>
+      <span className="status-dot" />
+      {status.state === "needs_you" ? "Needs you" : label}
+    </span>
+  );
+}
+
 function MainView() {
   const [repos, setRepos] = useState<string[]>([]);
   const [picker, setPicker] = useState<Picker | null>(null);
@@ -717,6 +740,9 @@ function MainView() {
   // PR link per session id, discovered live from GitHub. `null` = looked up, none
   // found (or the lookup failed); absent key = not looked up yet.
   const [prs, setPrs] = useState<Record<string, PrLink | null>>({});
+  // Live status per workspace id (busy / needs_you / idle / …), seeded on open
+  // and kept current by the backend's `session-status` event.
+  const [statuses, setStatuses] = useState<Record<string, StatusRecord>>({});
   // Session id whose inline command strip is expanded (only one at a time).
   const [commandsOpen, setCommandsOpen] = useState<string | null>(null);
   // Pending Clean Up confirmation: the session id and the warnings to show.
@@ -735,10 +761,21 @@ function MainView() {
     }).catch(() => {});
   }, []);
 
+  // Replace the status map with a fresh snapshot from disk. Called on open so a
+  // reopened/reloaded popover reflects current state even if it missed events.
+  const refreshStatuses = useCallback(() => {
+    api.sessionsStatusList().then((list) => {
+      const next: Record<string, StatusRecord> = {};
+      for (const s of list) next[s.workspace] = s;
+      setStatuses(next);
+    }).catch(() => {});
+  }, []);
+
   const refreshAll = useCallback(() => {
     api.listRepos().then(setRepos).catch(() => {});
     refreshSessions();
-  }, [refreshSessions]);
+    refreshStatuses();
+  }, [refreshSessions, refreshStatuses]);
 
   useEffect(() => {
     refreshAll();
@@ -751,6 +788,22 @@ function MainView() {
     const unlisten = getCurrentWindow().listen("popover-shown", refreshAll);
     return () => { unlisten.then((f) => f()); };
   }, [refreshAll]);
+
+  // Live status updates from the backend's status-file watcher. Each event is one
+  // workspace's latest record; `ended` clears its row indicator.
+  useEffect(() => {
+    const unlisten = getCurrentWindow().listen<StatusRecord>("session-status", (e) => {
+      const rec = e.payload;
+      setStatuses((prev) => {
+        if (rec.state === "ended") {
+          const { [rec.workspace]: _drop, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, [rec.workspace]: rec };
+      });
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, []);
 
   // Tracked sessions grouped by repo full_name.
   const sessionsByRepo = useMemo(() => {
@@ -900,6 +953,7 @@ function MainView() {
                     <div key={s.id} className="workspace-item">
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
                         <span className="workspace-title">{s.session_title}</span>
+                        <StatusIndicator status={statuses[s.id]} />
                         <div className="session-pill">
                           {pr && PrIcon && (
                             <button

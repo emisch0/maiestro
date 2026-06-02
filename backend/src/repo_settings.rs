@@ -87,7 +87,7 @@ pub fn repos_list() -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(repos_dir()) else { return Vec::new(); };
     let mut repos: Vec<String> = entries
         .flatten()
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
         .filter_map(|e| {
             let data = std::fs::read_to_string(e.path()).ok()?;
             let s: RepoSettings = serde_json::from_str(&data).ok()?;

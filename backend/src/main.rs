@@ -9,6 +9,7 @@ mod plugins;
 mod repo_settings;
 mod sessions;
 mod spawn;
+mod status;
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -44,6 +45,16 @@ fn show_popover(app: &tauri::AppHandle) {
 }
 
 fn main() {
+    // The app binary doubles as the Claude Code hook helper. When invoked as
+    // `maiestro hook <state> --workspace <ws-id>` (from a spawned worktree's
+    // .claude/settings.local.json), handle the hook and exit BEFORE booting the
+    // tray app — otherwise every hook would launch a second mAIestro.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("hook") {
+        status::run_hook_cli(&args[2..]);
+        return;
+    }
+
     let registry = PluginRegistry::builder()
         .register(GitHubPlugin)
         .build();
@@ -78,11 +89,24 @@ fn main() {
             spawn::teardown,
             spawn::session_pr,
             sessions::sessions_list,
+            status::sessions_status_list,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Live per-session status: drop orphaned status files, then watch
+            // ~/.maiestro/status/ and forward changes to the popover as
+            // `session-status` events. The watcher must outlive setup(), so park
+            // it in managed state (dropping it would stop the watch).
+            status::sweep_stale();
+            match status::start_watcher(app.handle().clone()) {
+                Ok(watcher) => {
+                    app.manage(Mutex::new(watcher));
+                }
+                Err(e) => eprintln!("status watcher failed to start: {e}"),
+            }
 
             let quit = MenuItem::with_id(app, "quit", "Quit mAIestro", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&quit])?;
