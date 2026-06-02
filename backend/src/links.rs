@@ -5,6 +5,7 @@ use std::process::Command;
 /// constructing its own environment or bundling a webview navigation.
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
+    crate::log_invoke!("open_url", url = %url);
     // Only hand http(s) URLs to the OS so a malformed value can't invoke
     // `open` with an unexpected scheme or local path.
     if !(url.starts_with("https://") || url.starts_with("http://")) {
@@ -20,6 +21,7 @@ pub fn open_url(url: String) -> Result<(), String> {
 /// Opens a local path in Finder (a directory opens that folder).
 #[tauri::command]
 pub fn open_path(path: String) -> Result<(), String> {
+    crate::log_invoke!("open_path", path = %path);
     let p = std::path::Path::new(&path);
     if !p.exists() {
         return Err(format!("path does not exist: {path}"));

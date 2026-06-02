@@ -108,10 +108,11 @@ fn walk_env_files(dir: &Path, depth: u8, results: &mut Vec<String>) {
 
 #[tauri::command]
 pub fn repos_list() -> Vec<String> {
+    crate::log_invoke!("repos_list");
     let Ok(entries) = std::fs::read_dir(repos_dir()) else { return Vec::new(); };
     let mut repos: Vec<String> = entries
         .flatten()
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
         .filter_map(|e| {
             let data = std::fs::read_to_string(e.path()).ok()?;
             let s: RepoSettings = serde_json::from_str(&data).ok()?;
@@ -124,11 +125,13 @@ pub fn repos_list() -> Vec<String> {
 
 #[tauri::command]
 pub fn repo_settings_get(repo: String) -> RepoSettings {
+    crate::log_invoke!("repo_settings_get", repo = %repo);
     load(&repo).unwrap_or_else(|| RepoSettings::default_for(&repo))
 }
 
 #[tauri::command]
 pub fn repo_settings_set(repo: String, mut settings: RepoSettings) -> Result<(), String> {
+    crate::log_invoke!("repo_settings_set", repo = %repo);
     settings.repo = repo.clone();
     save(&repo, &settings).map_err(|e| e.to_string())
 }
@@ -136,6 +139,7 @@ pub fn repo_settings_set(repo: String, mut settings: RepoSettings) -> Result<(),
 /// Set (or clear) a repo's hide/snooze state. `hidden = None` unhides.
 #[tauri::command]
 pub fn repo_set_visibility(repo: String, hidden: Option<HideState>) -> Result<(), String> {
+    crate::log_invoke!("repo_set_visibility", repo = %repo);
     let mut settings = load(&repo).unwrap_or_else(|| RepoSettings::default_for(&repo));
     settings.hidden = hidden;
     save(&repo, &settings).map_err(|e| e.to_string())
@@ -143,6 +147,7 @@ pub fn repo_set_visibility(repo: String, hidden: Option<HideState>) -> Result<()
 
 #[tauri::command]
 pub fn repo_scan_env_files(checkout_dir: String) -> Vec<String> {
+    crate::log_invoke!("repo_scan_env_files", checkout_dir = %checkout_dir);
     let base = Path::new(&checkout_dir);
     let mut abs = Vec::new();
     walk_env_files(base, 4, &mut abs);

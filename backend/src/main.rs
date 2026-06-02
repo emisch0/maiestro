@@ -4,6 +4,7 @@
 mod credentials;
 mod identities;
 mod links;
+mod logging;
 mod plugin;
 mod plugins;
 mod repo_settings;
@@ -44,6 +45,9 @@ fn show_popover(app: &tauri::AppHandle) {
 }
 
 fn main() {
+    logging::init();
+    tracing::info!("mAIestro starting");
+
     let registry = PluginRegistry::builder()
         .register(GitHubPlugin)
         .build();

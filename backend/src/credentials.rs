@@ -67,8 +67,10 @@ pub fn credentials_set(
     scope: CredentialScope,
     secret: String,
 ) -> Result<(), CredentialError> {
-    CredentialStore::set(&type_id, &scope, &secret)?;
     let CredentialScope::Identity { identity_id } = &scope;
+    // Log the credential type + identity scope only — never the secret value.
+    crate::log_invoke!("credentials_set", type_id = %type_id, identity = %identity_id);
+    CredentialStore::set(&type_id, &scope, &secret)?;
     crate::identities::register(identity_id);
     Ok(())
 }
@@ -78,8 +80,10 @@ pub fn credentials_get(
     type_id: String,
     scope: CredentialScope,
 ) -> Result<String, CredentialError> {
-    let value = CredentialStore::get(&type_id, &scope)?;
     let CredentialScope::Identity { identity_id } = &scope;
+    // Log the credential type + identity scope only — never the secret value.
+    crate::log_invoke!("credentials_get", type_id = %type_id, identity = %identity_id);
+    let value = CredentialStore::get(&type_id, &scope)?;
     crate::identities::register(identity_id);
     Ok(value)
 }
@@ -89,5 +93,7 @@ pub fn credentials_delete(
     type_id: String,
     scope: CredentialScope,
 ) -> Result<(), CredentialError> {
+    let CredentialScope::Identity { identity_id } = &scope;
+    crate::log_invoke!("credentials_delete", type_id = %type_id, identity = %identity_id);
     CredentialStore::delete(&type_id, &scope)
 }

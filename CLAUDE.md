@@ -53,6 +53,26 @@ Release builds must be signed with a **Developer ID Application** certificate an
 
 Dev builds (`tauri dev`) run the raw, ad-hoc-signed binary and will re-prompt on each rebuild — that is expected and accepted. Signing is **not** committed to `tauri.conf.json`; the signing identity and notarization secrets live in a gitignored `.env.release` (template: `.env.release.example`). Run `scripts/release.sh`, which sources that file, builds via `tauri build`, and verifies the signature/notarization.
 
+### Backend logging
+
+The Rust backend logs via `tracing` (`backend/src/logging.rs`). `logging::init()` runs first in `main()` and installs two layers: a **daily, UTC-dated file** and **stderr** (so `tauri dev` / `cargo run` show output in the terminal).
+
+Log files live at:
+
+```
+~/Library/Logs/com.maiestro.app/lYYYYMM/maiestro-YYYYMMDD.log
+```
+
+The monthly directory (`lYYYYMM`) and the filename (`maiestro-YYYYMMDD.log`) are both derived from the **current UTC date**, and every log line's timestamp is UTC (RFC 3339). The file rolls over at UTC midnight even while the long-running menu-bar process keeps going — which is why we use a custom `MakeWriter` rather than `tauri-plugin-log` (its path is fixed at startup and it only rotates by size). To read today's log on a packaged build, open or `tail` that file — no rebuild needed.
+
+Conventions:
+- **Every Tauri command** logs its invocation at `info` via the `log_invoke!` macro (first statement of the command), naming the command and key args.
+- **Every GitHub API call** logs method + URL + status at `info` from the single `GitHub::send` choke point in `plugins/github.rs`.
+- **Workspace-scoped commands** (`teardown`, `session_pr`, `session_create_pr`, and the spawn path via `do_spawn`) are wrapped in a `#[tracing::instrument]` span carrying a `session=<workspace-id>` field. Because the span follows the async work across `.await`s, every nested line it emits — git ops, GitHub API calls, Claude drafts — carries the same `session=`, so you can `grep 'session=28-add-foo'` to see one workspace's whole story. Commands with no workspace (e.g. `repos_list`, `github_list_repos`) have no `session` field.
+- **Never log credentials.** Command invocations log credential *types* and identity scopes but never secret values; the GitHub token lives only in the `Authorization` header, which is never logged.
+- Default level is `info`; override with the `RUST_LOG` env var (standard `EnvFilter` syntax, e.g. `RUST_LOG=maiestro=debug`).
+- Old daily files are not auto-pruned yet (cleanup is a possible follow-up).
+
 ### All launches use `open -a`, not a constructed env
 
 Every launch hands off to the OS rather than building an env: opening an app uses Launch Services (`open -a <App> <worktree-path>`), and starting `claude` in a standalone terminal uses the terminal's own run-command (e.g. `osascript … do script "cd <worktree> && claude …"`), which runs under the user's login shell. Either way the session inherits the user's full environment (Homebrew PATH, shell integrations, all installed tools) with no env construction by mAIestro. There is no separate "agent spawn with a constructed env" path; everything mAIestro launches gets the *user's* world.
