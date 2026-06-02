@@ -4,6 +4,7 @@ node_modules/
 .env
 .env.local
 .env.release
+.vscode/
 
 # Frontend build output
 dist/
