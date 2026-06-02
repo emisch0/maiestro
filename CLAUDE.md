@@ -4,17 +4,21 @@
 
 Never hardcode `/Users/<name>/` in Bash commands. Use relative paths or `~` instead (e.g. `~/src/maiestro`, `./backend`). A hook blocks any command containing a hardcoded `/Users/` path.
 
-A Tauri v2 menu-bar app on macOS that launches and manages git-worktree-per-issue development workspaces, each running its own scoped Claude Code session.
+A Tauri v2 menu-bar app on macOS that launches git-worktree-per-issue development workspaces, opening a Claude Code session in VSCode or a terminal for each. mAIestro is a launcher and dashboard, not a session host.
 
 Directory layout: `backend/` (Rust/Tauri) and `frontend/` (web). Not Tauri's defaults of `src-tauri/` and `src/`.
 
 ## Architectural decisions
 
-### Conversation lives in the popover; VSCode is opt-in
+### mAIestro launches sessions; it does not host them
 
-The chat with Claude is the primary surface, hosted in the mAIestro popover. It is backed by a `claude` CLI subprocess running headlessly in the worktree, with stdio piped to the backend. VSCode is **not** launched to start a conversation — the user clicks "Open in VSCode" only when they want an editor, and the Claude Code VSCode extension attaches to the already-running session (via the lock file / socket `claude` writes into the worktree). One conversation, multiple possible viewers.
+mAIestro is a **launcher and dashboard**, not a session host. The popover lists tracked repos and their open issues and lets the user start work — it does **not** contain the chat with Claude.
 
-Sessions are owned by a backend `SessionRegistry` keyed by worktree path, so they outlive popover open/close and only terminate on explicit end or app quit.
+We tried the opposite first: hosting the conversation in the popover by running `claude` headlessly with its stdio piped to the backend, and letting editors attach to that running session. That did not work out, so it is abandoned. There is no headless `claude` subprocess, no stdio piping, and no `SessionRegistry` owning live conversations.
+
+Instead, starting work creates the worktree and **launches `claude` with the right command-line arguments into a real, user-facing session** — either a VSCode window or a standalone terminal (selected per-repo). The conversation lives in that terminal/editor and the user interacts with it directly.
+
+Consequence: because mAIestro no longer owns the process or its stdio, it cannot directly observe a session's live working/waiting state. Surfacing that later would need a separate, out-of-band mechanism (e.g. Claude Code hooks writing status to a file mAIestro watches), not stdio.
 
 ### Talk to GitHub directly, not via `gh`
 
@@ -25,7 +29,7 @@ Reasons:
 - At app launch the shell environment is not sourced and `$PATH` is minimal, so `gh` may not even be discoverable.
 - Tokens already need to live in Keychain for the profile model; routing them through `gh` adds a layer with no benefit.
 
-`git` itself (clone/fetch/push) still runs as a subprocess, but with `GITHUB_TOKEN` injected into the child env and a credential helper configured per worktree (see "Credential injection" below).
+This applies only to mAIestro's **own** API calls. The user's `git` operations (fetch/push) happen inside the launched session under the user's ambient git auth, not through mAIestro. mAIestro's own local git (e.g. `git worktree add`) runs in the existing checkout and relies on its already-configured auth.
 
 ### Identity = AgentProfile, stored in Keychain
 
@@ -33,13 +37,13 @@ The unit of identity is an `AgentProfile`: name, allowed repos, capability set, 
 
 Keychain is chosen because it is unlocked at user login, so credentials are available even when mAIestro launches at startup (when shell profiles are not sourced and env files are unavailable).
 
-### Credential injection at spawn time
+### Launched sessions use the user's ambient environment
 
-Every subprocess mAIestro spawns into a worktree — the `claude` CLI, a shell, `git` — runs with a **clean, explicitly constructed env**, not the parent's full env. Into that env we inject only what the selected profile authorizes: `GITHUB_TOKEN`, `GIT_{AUTHOR,COMMITTER}_{NAME,EMAIL}` matching the profile's GitHub identity, and a git credential helper that hands out `GITHUB_TOKEN` over HTTPS.
+mAIestro does **not** build a clean per-profile env or inject credentials into the session it launches. Launching goes through macOS Launch Services (`open -a <App> <worktree>`), exactly like a Finder double-click, so the editor/terminal — and the `claude` running inside it — inherits the **user's full ambient environment**: Homebrew PATH, shell integrations, and whatever git/GitHub auth the user already has. Claude authentication likewise comes from the user's own `claude` login (`~/.claude/`). mAIestro stores and manages no `ANTHROPIC_API_KEY`.
 
-We do **not** inject an `ANTHROPIC_API_KEY`. Claude authentication always comes from the `claude` CLI's own login session (read from `~/.claude/` via `$HOME`), so the spawn env must carry `$HOME` through. mAIestro does not store or manage an Anthropic credential.
+We deliberately dropped the per-session GitHub identity isolation that an injected env would give. The simpler launch path wins; the trade-off is that launched dev sessions act as the user's ambient GitHub identity, so there is effectively one active GitHub identity per machine for the sessions themselves.
 
-This is what makes the multi-agent model real: two worktrees open at once can act as fully distinct GitHub identities with no cross-contamination, and a worktree never inherits ambient credentials the user happens to have in their shell.
+Keychain-stored tokens still matter, but **only for mAIestro's own GitHub API calls** (listing a repo's issues under a chosen identity) — never injected into the launched session. See "Identity" and "Talk to GitHub directly".
 
 ### Code signing is required for releases (and for Keychain trust)
 
@@ -47,13 +51,11 @@ Release builds must be signed with a **Developer ID Application** certificate an
 
 Dev builds (`tauri dev`) run the raw, ad-hoc-signed binary and will re-prompt on each rebuild — that is expected and accepted. Signing is **not** committed to `tauri.conf.json`; the signing identity and notarization secrets live in a gitignored `.env.release` (template: `.env.release.example`). Run `scripts/release.sh`, which sources that file, builds via `tauri build`, and verifies the signature/notarization.
 
-### User-facing tool launches use `open -a`, not a constructed env
+### All launches use `open -a`, not a constructed env
 
-When the user clicks "Open in VSCode" or "Open Terminal", mAIestro delegates to macOS Launch Services via `open -a <App> <worktree-path>`. The OS launches the app exactly as a Finder double-click would — the app receives the user's full environment (Homebrew PATH, shell integrations, all installed tools) with no env construction by mAIestro.
+Every launch hands off to the OS rather than building an env: opening an app uses Launch Services (`open -a <App> <worktree-path>`), and starting `claude` in a standalone terminal uses the terminal's own run-command (e.g. `osascript … do script "cd <worktree> && claude …"`), which runs under the user's login shell. Either way the session inherits the user's full environment (Homebrew PATH, shell integrations, all installed tools) with no env construction by mAIestro. There is no separate "agent spawn with a constructed env" path; everything mAIestro launches gets the *user's* world.
 
-This is intentionally different from agent spawns: user-facing tools get the *user's* world; agent subprocesses get the *profile's* world.
-
-Any per-repo settings the user needs to configure (e.g. which terminal app, which editor, workspace-level env overrides) are stored in per-repo settings — see "Per-repo settings" below.
+Which app a session opens in (a specific terminal, an editor) and any workspace-level env files are stored in per-repo settings — see "Per-repo settings" below.
 
 ### Per-repo settings
 
