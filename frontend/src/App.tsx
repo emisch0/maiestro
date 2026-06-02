@@ -3,7 +3,6 @@ import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
 import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan } from "./api";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
-import LogsIcon from "./icons/logs.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
 import FolderIcon from "./icons/folder.svg?react";
 import VSCodeIcon from "./icons/vscode.svg?react";
@@ -640,14 +639,6 @@ async function openSettings() {
   if (settings) {
     await settings.show();
     await settings.setFocus();
-  }
-}
-
-async function openLogs() {
-  const logs = (await getAllWindows()).find((w) => w.label === "logs");
-  if (logs) {
-    await logs.show();
-    await logs.setFocus();
   }
 }
 
@@ -1301,9 +1292,6 @@ function MainView() {
           aria-pressed={showHidden}
         >
           <EyeIcon />
-        </button>
-        <button className="icon-btn" onClick={openLogs} title="Logs" aria-label="Logs">
-          <LogsIcon />
         </button>
         <button className="icon-btn" onClick={openSettings} title="Settings" aria-label="Settings">
           <GearIcon />
