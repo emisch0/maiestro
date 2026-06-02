@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, HideState, IssueNode, PrLink, RepoSettings, Session } from "./api";
+import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session } from "./api";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
@@ -20,6 +20,17 @@ const PR_STATE_ICONS: Record<string, typeof PrOpenIcon> = {
   merged: PrMergedIcon,
   closed: PrClosedIcon,
 };
+
+// Tooltip text for the PR pill's check indicator.
+function checkLabel(checks: PrChecks): string {
+  switch (checks.state) {
+    case "running": return "Checks running…";
+    case "pending": return "Checks queued";
+    case "passed": return checks.ready_to_merge ? "Checks passed — ready to merge" : "Checks passed";
+    case "failed": return "A required check failed";
+    default: return "";
+  }
+}
 
 type Tab = "identity" | "repo";
 type SaveStatus = "idle" | "saving" | "saved" | "clearing" | "error";
@@ -845,6 +856,15 @@ function MainView() {
   // Create-PR progress/error per session id: `{ creating }` while in flight,
   // `{ error }` after a failure. Absent = idle.
   const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; error?: string }>>({});
+  // PR check status per session id, polled from GitHub while the popover is open.
+  // Absent = not yet fetched; null = no open PR (or lookup failed).
+  const [prChecks, setPrChecks] = useState<Record<string, PrChecks | null>>({});
+  // Merge-PR state per session id. `intent` keeps the auto-merge watcher armed
+  // until the PR lands; `merging` guards against overlapping merge attempts.
+  const [prMerge, setPrMerge] = useState<Record<string, { intent?: boolean; merging?: boolean; error?: string }>>({});
+  // Whether the menu-bar popover is currently open. Gates check polling so we
+  // don't hit GitHub while the window is hidden.
+  const [popoverOpen, setPopoverOpen] = useState(true);
   // Global toggle: reveal hidden/snoozed repos and work items (dimmed).
   const [showHidden, setShowHidden] = useState(false);
   // Per-repo settings, keyed by repo full_name — the source of repo-level hide state.
@@ -989,6 +1009,72 @@ function MainView() {
     }
   }
 
+  // One merge attempt for a session: ensure-create + mark-ready + merge-if-clean
+  // happen in the backend. A landed PR (`state === "merged"`) clears the intent;
+  // a PR that isn't mergeable yet comes back unmerged and stays armed for the
+  // next poll to retry; a hard failure (conflict, auth) surfaces in the panel.
+  const runMerge = useCallback(async (id: string) => {
+    setPrMerge((prev) => ({ ...prev, [id]: { ...prev[id], intent: true, merging: true, error: undefined } }));
+    try {
+      const pr = await api.mergePr(id);
+      setPrs((prev) => ({ ...prev, [id]: pr }));
+      setPrMerge((prev) =>
+        pr.state === "merged"
+          ? { ...prev, [id]: {} }
+          : { ...prev, [id]: { ...prev[id], merging: false } },
+      );
+    } catch (e) {
+      setPrMerge((prev) => ({ ...prev, [id]: { error: String(e) } }));
+    }
+  }, []);
+
+  // "Merge PR": arm the auto-merge watcher and take the first attempt now, which
+  // creates the PR if missing and promotes a draft so its checks start running.
+  function startMerge(s: Session) {
+    void runMerge(s.id);
+  }
+
+  // Latest sessions/PR/merge state reachable from the polling interval without
+  // re-arming it on every keystroke of state.
+  const pollRef = useRef({ sessions, prs, prMerge });
+  pollRef.current = { sessions, prs, prMerge };
+
+  // Poll check status for every session that has a PR or an armed merge, and let
+  // a poll that finds the PR mergeable drive the next auto-merge attempt (so
+  // retries are naturally paced to the poll, not a render loop).
+  const pollChecks = useCallback(() => {
+    const { sessions, prs, prMerge } = pollRef.current;
+    for (const s of sessions) {
+      if (!prs[s.id] && !prMerge[s.id]?.intent) continue;
+      api.sessionPrChecks(s.id)
+        .then((c) => {
+          setPrChecks((prev) => ({ ...prev, [s.id]: c }));
+          const m = pollRef.current.prMerge[s.id];
+          if (c?.ready_to_merge && m?.intent && !m.merging) {
+            void runMerge(s.id);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [runMerge]);
+
+  // Run the poll on an interval, but only while the popover is open.
+  useEffect(() => {
+    if (!popoverOpen) return;
+    pollChecks();
+    const id = setInterval(pollChecks, 6000);
+    return () => clearInterval(id);
+  }, [popoverOpen, pollChecks]);
+
+  // Track popover open/close: the backend emits "popover-shown" on each show,
+  // and the window blurs (hides) when it closes.
+  useEffect(() => {
+    const win = getCurrentWindow();
+    const shown = win.listen("popover-shown", () => setPopoverOpen(true));
+    const focus = win.onFocusChanged(({ payload }) => { if (!payload) setPopoverOpen(false); });
+    return () => { shown.then((f) => f()); focus.then((f) => f()); };
+  }, []);
+
   // "Clean Up": tear down the worktree. Confirms first unless the backend says
   // it's safe (PR merged, nothing new).
   async function cleanUp(s: Session) {
@@ -1122,6 +1208,8 @@ function MainView() {
                     // so disable Create PR; the pill links to it.
                     const prOpen = pr?.state === "open" || pr?.state === "draft";
                     const prc = prCreate[s.id];
+                    const checks = prChecks[s.id];
+                    const pm = prMerge[s.id];
                     return (
                     <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
@@ -1139,6 +1227,13 @@ function MainView() {
                             >
                               <PrIcon />
                               #{pr.number}
+                              {checks && checks.state !== "none" && (
+                                <span
+                                  className={`check-dot check-dot--${checks.state}${checks.running ? " check-dot--spin" : ""}`}
+                                  title={checkLabel(checks)}
+                                  aria-label={checkLabel(checks)}
+                                />
+                              )}
                             </button>
                           )}
                           <button
@@ -1185,8 +1280,18 @@ function MainView() {
                         >
                           {prc?.creating ? "Creating PR…" : "Create PR"}
                         </button>
-                        {/* Merge PR is UI-only for now. */}
-                        <button className="command-btn" onClick={() => {}}>Merge PR</button>
+                        <button
+                          className="command-btn"
+                          onClick={() => startMerge(s)}
+                          disabled={pm?.intent || pr?.state === "merged"}
+                          title={
+                            pr?.state === "merged"
+                              ? `PR #${pr.number} is already merged`
+                              : "Create the PR if needed, wait for checks, then merge"
+                          }
+                        >
+                          {pr?.state === "merged" ? "Merged" : pm?.intent ? "Merging…" : "Merge PR"}
+                        </button>
                         {sessHidden ? (
                           <button className="command-btn" onClick={() => applyVisibility({ kind: "session", session: s }, null)}>Unhide</button>
                         ) : (
@@ -1202,6 +1307,17 @@ function MainView() {
                           </ul>
                           <div className="issue-actions">
                             <button className="btn-ghost" onClick={() => setPrCreate((prev) => ({ ...prev, [s.id]: {} }))}>Dismiss</button>
+                          </div>
+                        </div>
+                      )}
+                      {pm?.error && (
+                        <div className="cleanup-confirm">
+                          <p className="cleanup-lead">Couldn't merge the PR</p>
+                          <ul className="cleanup-warnings">
+                            <li>{pm.error}</li>
+                          </ul>
+                          <div className="issue-actions">
+                            <button className="btn-ghost" onClick={() => setPrMerge((prev) => ({ ...prev, [s.id]: {} }))}>Dismiss</button>
                           </div>
                         </div>
                       )}

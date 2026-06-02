@@ -137,6 +137,53 @@ impl GitHub {
         }
         resp.json().await.map_err(|e| e.to_string())
     }
+
+    /// A single pull request. `repo` is "owner/name". The response carries the
+    /// fields the merge flow needs: `mergeable_state`, the head `sha`, `draft`,
+    /// and the GraphQL `node_id` used to mark a draft ready for review.
+    pub async fn pull(&self, repo: &str, number: u64) -> Result<serde_json::Value, String> {
+        self.get_json(&format!("https://api.github.com/repos/{repo}/pulls/{number}")).await
+    }
+
+    /// Check runs for a commit. `repo` is "owner/name"; `sha` is the head commit.
+    /// Returns the bare `check_runs` array (each entry has `status` and
+    /// `conclusion`); an empty vec means the commit has no checks configured.
+    pub async fn check_runs(&self, repo: &str, sha: &str) -> Result<Vec<serde_json::Value>, String> {
+        let url = format!("https://api.github.com/repos/{repo}/commits/{sha}/check-runs?per_page=100");
+        let v = self.get_json(&url).await?;
+        Ok(v["check_runs"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// Mark a draft pull request ready for review. REST has no endpoint for this,
+    /// so it goes through the GraphQL `markPullRequestReadyForReview` mutation.
+    /// `node_id` is the PR's GraphQL id (the `node_id` field on the REST PR).
+    pub async fn mark_ready(&self, node_id: &str) -> Result<(), String> {
+        let query = "mutation($id: ID!) { \
+            markPullRequestReadyForReview(input: { pullRequestId: $id }) { \
+                pullRequest { isDraft } } }";
+        let resp = self.req(reqwest::Method::POST, "https://api.github.com/graphql")
+            .json(&serde_json::json!({ "query": query, "variables": { "id": node_id } }))
+            .send().await.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(error_message(resp).await);
+        }
+        // GraphQL returns 200 even on logical errors; surface them from `errors`.
+        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        if let Some(err) = v["errors"][0]["message"].as_str() {
+            return Err(err.to_string());
+        }
+        Ok(())
+    }
+
+    /// Merge a pull request. `repo` is "owner/name"; `method` is one of
+    /// "merge" / "squash" / "rebase".
+    pub async fn merge_pull(&self, repo: &str, number: u64, method: &str) -> Result<(), String> {
+        let url = format!("https://api.github.com/repos/{repo}/pulls/{number}/merge");
+        let resp = self.req(reqwest::Method::PUT, &url)
+            .json(&serde_json::json!({ "merge_method": method }))
+            .send().await.map_err(|e| e.to_string())?;
+        if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
+    }
 }
 
 // ── Tauri commands ─────────────────────────────────────────────────────────────

@@ -64,6 +64,15 @@ export interface PrLink {
   state: string;
 }
 
+export interface PrChecks {
+  /** One of "passed", "failed", "running", "pending", "none". */
+  state: string;
+  /** Any check actively in_progress — animate the indicator only when true. */
+  running: boolean;
+  /** GitHub reports the PR mergeable (`mergeable_state == "clean"`). */
+  ready_to_merge: boolean;
+}
+
 export type CredentialScope = { kind: "identity"; identity_id: string };
 
 export interface CredentialTypeDto {
@@ -145,4 +154,10 @@ export const api = {
 
   createPr: (sessionId: string) =>
     invoke<PrLink>("session_create_pr", { sessionId }),
+
+  sessionPrChecks: (sessionId: string) =>
+    invoke<PrChecks | null>("session_pr_checks", { sessionId }),
+
+  mergePr: (sessionId: string) =>
+    invoke<PrLink>("session_merge_pr", { sessionId }),
 };
