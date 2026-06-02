@@ -800,3 +800,67 @@ pub async fn teardown(session_id: String, confirmed: bool) -> Result<TeardownOut
 
     Ok(TeardownOutcome::Done)
 }
+
+// ── Session PR link ───────────────────────────────────────────────────────────
+
+/// A pull request associated with a session's branch, surfaced to the UI as a
+/// clickable link in the session pill.
+#[derive(serde::Serialize)]
+pub struct PrLink {
+    pub number: u64,
+    pub html_url: String,
+    pub title: String,
+    /// One of "draft", "open", "merged", "closed".
+    pub state: String,
+}
+
+/// Collapse GitHub's `state` / `draft` / `merged_at` fields into a single label.
+fn pr_state(pr: &serde_json::Value) -> String {
+    if pr["merged_at"].is_string() {
+        "merged".to_string()
+    } else if pr["state"].as_str() == Some("open") {
+        if pr["draft"].as_bool().unwrap_or(false) {
+            "draft".to_string()
+        } else {
+            "open".to_string()
+        }
+    } else {
+        "closed".to_string()
+    }
+}
+
+/// The pull request to show for a session's branch, if any. Prefers the most
+/// recently created open PR; otherwise the most recently created PR of any
+/// state, so the link still resolves after the PR is merged or closed.
+///
+/// Returns `Ok(None)` — not an error — when the session is gone, the repo has
+/// no identity configured, or the branch has no PRs. The UI treats all of these
+/// the same: it simply renders no PR button. Only an actual API failure (e.g.
+/// auth/network) surfaces as `Err`, which the frontend also degrades silently.
+#[tauri::command]
+pub async fn session_pr(session_id: String) -> Result<Option<PrLink>, String> {
+    let Some(session) = crate::sessions::get(&session_id) else {
+        return Ok(None);
+    };
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let Some(identity_id) = settings.identity_id else {
+        return Ok(None);
+    };
+    let gh = GitHub::for_identity(&identity_id)?;
+    let prs = gh.pulls_for_branch(&session.repo, &session.branch).await?;
+
+    // `created_at` is ISO-8601, so lexicographic order is chronological.
+    let created_at = |p: &&serde_json::Value| p["created_at"].as_str().unwrap_or("").to_string();
+    let best = prs
+        .iter()
+        .filter(|p| p["state"].as_str() == Some("open"))
+        .max_by_key(created_at)
+        .or_else(|| prs.iter().max_by_key(created_at));
+
+    Ok(best.map(|pr| PrLink {
+        number: pr["number"].as_u64().unwrap_or(0),
+        html_url: pr["html_url"].as_str().unwrap_or("").to_string(),
+        title: pr["title"].as_str().unwrap_or("").to_string(),
+        state: pr_state(pr),
+    }))
+}

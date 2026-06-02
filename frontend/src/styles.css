@@ -192,6 +192,12 @@ body {
   height: 13px;
 }
 
+/* PR link button: tint by PR state so it reads at a glance. */
+.pill-btn--pr-open { color: #3fb950; }
+.pill-btn--pr-draft { color: var(--muted); }
+.pill-btn--pr-merged { color: #a371f7; }
+.pill-btn--pr-closed { color: #f85149; }
+
 /* Expand/collapse chevron in the last column; rotates to point down when open. */
 .row-expander {
   flex-shrink: 0;
