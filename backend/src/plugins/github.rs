@@ -90,6 +90,19 @@ impl GitHub {
         Ok(v.as_array().cloned().unwrap_or_default())
     }
 
+    /// All pull requests (any state) that contain commit `sha` on `repo`
+    /// ("owner/name"). Unlike `pulls_for_branch`, this resolves by commit rather
+    /// than head ref, so it still finds a merged PR after its head branch has
+    /// been deleted (GitHub's default on merge) — making it the reliable signal
+    /// for "this work already landed via a PR".
+    pub async fn pulls_for_commit(&self, repo: &str, sha: &str) -> Result<Vec<serde_json::Value>, String> {
+        let url = format!(
+            "https://api.github.com/repos/{repo}/commits/{sha}/pulls?per_page=100"
+        );
+        let v = self.get_json(&url).await?;
+        Ok(v.as_array().cloned().unwrap_or_default())
+    }
+
     /// Open a new issue and return its number. `repo` is "owner/name".
     pub async fn create_issue(&self, repo: &str, title: &str, body: &str) -> Result<u64, String> {
         let url = format!("https://api.github.com/repos/{repo}/issues");
@@ -101,6 +114,15 @@ impl GitHub {
         }
         let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
         v["number"].as_u64().ok_or_else(|| "issue created but no number returned".to_string())
+    }
+
+    /// Update an existing issue's title and body. `repo` is "owner/name".
+    pub async fn update_issue(&self, repo: &str, number: u64, title: &str, body: &str) -> Result<(), String> {
+        let url = format!("https://api.github.com/repos/{repo}/issues/{number}");
+        let resp = self.req(reqwest::Method::PATCH, &url)
+            .json(&serde_json::json!({ "title": title, "body": body }))
+            .send().await.map_err(|e| e.to_string())?;
+        if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
     }
 
     pub async fn create_comment(&self, repo: &str, number: u64, body: &str) -> Result<(), String> {
@@ -251,12 +273,12 @@ pub struct IssueNode {
 struct IssueMeta {
     title: String,
     html_url: String,
-    created_at: String, // ISO-8601; lexicographic order == chronological order
+    updated_at: String, // ISO-8601; lexicographic order == chronological order
 }
 
 /// List a repo's open issues as a tree, nesting GitHub's native sub-issues under
 /// their parent. `repo` is "owner/name". Pull requests are excluded, and issues
-/// are ordered most-recently-created first at every level.
+/// are ordered most-recently-modified first at every level.
 #[tauri::command]
 pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec<IssueNode>, String> {
     let (owner, name) = repo
@@ -277,7 +299,7 @@ pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec
             .req(reqwest::Method::GET, &format!("https://api.github.com/repos/{owner}/{name}/issues"))
             .query(&[
                 ("state", "open"),
-                ("sort", "created"),
+                ("sort", "updated"),
                 ("direction", "desc"),
                 ("per_page", "100"),
                 ("page", &page.to_string()),
@@ -342,10 +364,10 @@ pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec
         children_of.insert(parent, kids);
     }
 
-    // 3. Order every sibling group most-recently-created first.
+    // 3. Order every sibling group most-recently-modified first.
     let by_recency = |a: &u64, b: &u64| {
-        let ca = meta.get(a).map(|m| m.created_at.as_str()).unwrap_or("");
-        let cb = meta.get(b).map(|m| m.created_at.as_str()).unwrap_or("");
+        let ca = meta.get(a).map(|m| m.updated_at.as_str()).unwrap_or("");
+        let cb = meta.get(b).map(|m| m.updated_at.as_str()).unwrap_or("");
         cb.cmp(ca).then(b.cmp(a))
     };
     for kids in children_of.values_mut() {
@@ -369,7 +391,7 @@ fn issue_meta(issue: &serde_json::Value) -> IssueMeta {
     IssueMeta {
         title: issue["title"].as_str().unwrap_or("").to_string(),
         html_url: issue["html_url"].as_str().unwrap_or("").to_string(),
-        created_at: issue["created_at"].as_str().unwrap_or("").to_string(),
+        updated_at: issue["updated_at"].as_str().unwrap_or("").to_string(),
     }
 }
 

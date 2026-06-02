@@ -61,6 +61,14 @@ Which app a session opens in (a specific terminal, an editor) and any workspace-
 
 One deliberate exception: when VS Code is available, we open worktrees via its `code` CLI (located on `$PATH`, falling back to common install paths and the bundled `.app/Contents/Resources/app/bin/code`) instead of `open -a`, so we can pass `--disable-workspace-trust` and skip the "Do you trust the authors?" prompt on every freshly spawned worktree. The `code` CLI forwards that flag even to an already-running VS Code, which `open -a --args` cannot. If no `code` CLI is found we fall back to `open -a "Visual Studio Code" --args --disable-workspace-trust <worktree>`. The session still inherits the user's ambient environment either way.
 
+### Live per-session status via Claude Code hooks
+
+Because mAIestro launches `claude` but does not host it (see above), it cannot read a session's working/waiting state from stdio. Instead, at worktree creation `spawn.rs` writes Claude Code hooks into the worktree's `.claude/settings.local.json` (the personal, gitignored layer that merges with the user's own settings and applies to both terminal and VS Code integrated-terminal sessions). Each hook invokes **the mAIestro binary itself** as `maiestro hook <state> --workspace <ws-id>` — a hidden CLI subcommand dispatched in `main()` *before* Tauri starts. Using the app binary as the helper means zero external deps (no `jq`/`python`) and one source of truth; `spawn.rs` bakes its own `current_exe()` path into the generated commands.
+
+The helper reads Claude's hook event JSON on stdin (serde), and atomically writes a status record to `~/.maiestro/status/<ws-id>.json`. The backend watches that directory with the `notify` crate and emits a `session-status` event to the popover; the frontend also reads `sessions_status_list` on open so a reopened popover is correct even if it missed events. The hook → state mapping: `SessionStart`→running, `UserPromptSubmit`/`PreToolUse`/`PostToolUse`→busy, `Notification`→needs_you (detail from the payload message), `Stop`→idle, `SessionEnd`→ended. `PostToolUse`→busy is what flips a session out of "needs you" after an approved permission prompt: the prompt's `Notification` sets needs_you, and `PostToolUse` (fired once the approved tool completes) is the only signal that Claude has resumed working — `PreToolUse` can't serve this, since it fires *before* the prompt, not after approval. The one unavoidable gap is the in-flight execution of a permission-gated tool: there is no hook at the moment of approval, so the pill reads needs_you until that tool finishes. The helper is deliberately failure-tolerant — a hook must never block or crash the user's session.
+
+The whole mechanism is event-driven and last-write-wins, assuming one session per worktree (keyed by `<ws-id>`, which equals `Session.id`). Generated files (`.claude/settings.local.json`, `.vscode/`) are added to the worktree's shared git exclude (`$(git rev-parse --git-common-dir)/info/exclude`) so they don't trip teardown's `git status --porcelain` dirty check before Claude has run.
+
 ### Per-repo settings
 
 Each repo tracked by mAIestro has a small settings record stored in `~/.maiestro/repos/<owner>-<name>.json`. This is the place for configuration that is specific to a repo but not a credential. The file is human-editable and dotfile-manageable.
@@ -70,11 +78,13 @@ Current schema:
 ```json
 {
   "checkout_dir": "~/src/repo-name",
+  "worktree_prefix": "~/src/work-",
   "env_files": ["/absolute/path/.env", "/absolute/path/.env.local"],
   "hidden": { "snooze_until": 1717372800000 }
 }
 ```
 
-- **`checkout_dir`**: absolute path to the local git checkout. Defaults to `~/src/<repo-name>` (no owner prefix). Used as the root for worktree creation and for env file scanning.
+- **`checkout_dir`**: absolute path to the local git checkout. Defaults to `~/src/<repo-name>` (no owner prefix). The source checkout `git worktree add` runs in, and the root for env file scanning.
+- **`worktree_prefix`**: prefix for spawned worktree locations. The full worktree path is `<worktree_prefix><workspace>/<repo>` — a string concatenation, so the trailing `work-` is part of the directory name, not a separate path component (e.g. `~/src/work-12-add-foo/repo-name`). Absent or `null` defaults to `~/src/work-`, preserving the original behavior. Tilde-expanded. Changing it affects future spawns only; it does not move existing worktrees.
 - **`env_files`**: ordered list of `.env` files to source when launching user-facing tools (VSCode, Terminal) for this repo. Populated via a "Scan" action that walks the checkout directory (up to 4 levels, skipping `node_modules`, `.git`, `target`, etc.) looking for files whose name starts with `.env`. Users can also add or remove entries manually.
 - **`hidden`**: repo-level hide/snooze state. Absent (or `null`) means visible. When present, the repo and all its work items are hidden from the dashboard unless "Show hidden" is toggled on. `snooze_until` is a Unix-epoch-millis timestamp the repo stays hidden until (`null` = hidden indefinitely); once that time passes the repo renders as visible again. Per-work-item hide state is **not** stored here — it lives on each session record (`~/.maiestro/sessions/<id>.json`).

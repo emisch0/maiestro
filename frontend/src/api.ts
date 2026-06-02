@@ -8,6 +8,7 @@ export interface HideState {
 
 export interface RepoSettings {
   checkout_dir: string | null;
+  worktree_prefix: string | null;
   env_files: string[];
   identity_id: string | null;
   hidden: HideState | null;
@@ -38,9 +39,44 @@ export type CreateAndSpawnOutcome =
   | ({ status: "spawned" } & SpawnResult)
   | { status: "needs_confirmation"; message: string };
 
+export type CreateIssueOutcome =
+  | { status: "created"; number: number; issue_url: string; warnings: string[] }
+  | { status: "needs_confirmation"; message: string };
+
+/** Editable fields shown in the spawn preview before a worktree is created. */
+export interface SpawnPlan {
+  repo: string;
+  /** null on the create-and-spawn path: the issue isn't opened until confirm. */
+  issue_number: number | null;
+  issue_title: string;
+  issue_body: string;
+  short_title: string;
+  color: string;
+  emoji: string;
+  /** Local checkout dir name, for rendering the worktree path. */
+  repo_name: string;
+}
+
+export type DraftPreviewOutcome =
+  | ({ status: "drafted" } & SpawnPlan)
+  | { status: "needs_confirmation"; message: string };
+
+/** The reviewed preview sent back on confirm. */
+export interface SpawnEdits {
+  issue_number: number | null;
+  issue_title: string;
+  issue_body: string;
+  short_title: string;
+  color: string;
+  emoji: string;
+  /** Existing issue only: PATCH the title/body back to GitHub. */
+  update_issue: boolean;
+}
+
 export type TeardownOutcome =
   | { status: "done" }
-  | { status: "needs_confirmation"; warnings: string[] };
+  | { status: "needs_confirmation"; warnings: string[] }
+  | { status: "blocked_by_editor"; message: string; accessibility: boolean };
 
 export interface Session {
   id: string;
@@ -71,6 +107,21 @@ export interface PrChecks {
   running: boolean;
   /** GitHub reports the PR mergeable (`mergeable_state == "clean"`). */
   ready_to_merge: boolean;
+}
+
+/** Live per-session status, written by the `maiestro hook` helper and watched
+ *  by the backend. Pushed to the UI via the `session-status` event and read in
+ *  bulk via `sessions_status_list`. */
+export interface StatusRecord {
+  /** Workspace id (= Session.id). */
+  workspace: string;
+  /** One of "running", "busy", "needs_you", "idle", "ended". */
+  state: string;
+  session_id?: string;
+  cwd?: string;
+  /** Short human detail, e.g. "permission: Bash" or a tool name. */
+  detail?: string;
+  ts: string;
 }
 
 export type CredentialScope = { kind: "identity"; identity_id: string };
@@ -140,14 +191,35 @@ export const api = {
   spawnWork: (repo: string, issueNumber: number, forceNew = false) =>
     invoke<SpawnResult>("spawn_work", { repo, issueNumber, forceNew }),
 
+  prepareSpawn: (repo: string, issueNumber: number) =>
+    invoke<SpawnPlan>("prepare_spawn", { repo, issueNumber }),
+
+  draftSpawnPreview: (repo: string, idea: string, useRawFallback = false) =>
+    invoke<DraftPreviewOutcome>("draft_spawn_preview", { repo, idea, useRawFallback }),
+
+  confirmSpawn: (repo: string, edits: SpawnEdits, forceNew = false) =>
+    invoke<SpawnResult>("confirm_spawn", { repo, edits, forceNew }),
+
+  createIssue: (repo: string, idea: string, useRawFallback = false) =>
+    invoke<CreateIssueOutcome>("create_issue", { repo, idea, useRawFallback }),
+
+  createIssueDirect: (repo: string, title: string, body: string) =>
+    invoke<CreateIssueOutcome>("create_issue_direct", { repo, title, body }),
+
   createIssueAndSpawn: (repo: string, idea: string, useRawFallback = false, forceNew = false) =>
     invoke<CreateAndSpawnOutcome>("create_issue_and_spawn", { repo, idea, useRawFallback, forceNew }),
 
   sessionsList: () =>
     invoke<Session[]>("sessions_list"),
 
-  teardown: (sessionId: string, confirmed = false) =>
-    invoke<TeardownOutcome>("teardown", { sessionId, confirmed }),
+  sessionsStatusList: () =>
+    invoke<StatusRecord[]>("sessions_status_list"),
+
+  teardown: (sessionId: string, confirmed = false, force = false) =>
+    invoke<TeardownOutcome>("teardown", { sessionId, confirmed, force }),
+
+  openAccessibilitySettings: () =>
+    invoke<void>("open_accessibility_settings"),
 
   sessionPr: (sessionId: string) =>
     invoke<PrLink | null>("session_pr", { sessionId }),

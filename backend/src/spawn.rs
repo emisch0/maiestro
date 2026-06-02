@@ -33,6 +33,19 @@ fn palette_emojis(color: &str) -> &'static [&'static str] {
     }
 }
 
+/// Choose a palette color not already claimed by a tracked session (falling back
+/// to the full palette when all are taken), then an emoji within it. Seeded by
+/// `seed` so the same workspace name themes consistently.
+fn pick_theme(seed: &str) -> (&'static str, &'static str) {
+    let used = crate::sessions::used_colors();
+    let pool: Vec<&'static str> = PALETTE.iter().copied().filter(|c| !used.contains(&c.to_string())).collect();
+    let pool: Vec<&'static str> = if pool.is_empty() { PALETTE.to_vec() } else { pool };
+    let color = pool[hash_index(seed, 1, pool.len())];
+    let emojis = palette_emojis(color);
+    let emoji = emojis[hash_index(seed, 2, emojis.len())];
+    (color, emoji)
+}
+
 // ── Small helpers ─────────────────────────────────────────────────────────────
 
 fn home() -> PathBuf {
@@ -100,6 +113,15 @@ fn trim_to_word(s: &str, max: usize) -> String {
         Some(i) if i > 0 => cut[..i].trim_end().to_string(),
         _ => cut.trim_end().to_string(),
     }
+}
+
+/// A reasonable default short label from a (possibly long) issue title when no
+/// AI-generated or user-edited label is available: trimmed to a word boundary
+/// and stripped of trailing punctuation. Never empty.
+fn default_short_title(title: &str) -> String {
+    let s = trim_to_word(title, 50);
+    let s = s.trim_end_matches(|c: char| !c.is_alphanumeric()).trim();
+    if s.is_empty() { "work".to_string() } else { s.to_string() }
 }
 
 fn slugify(title: &str, max_len: usize) -> String {
@@ -187,6 +209,127 @@ fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, session_t
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ── Claude Code hooks (live session status) ───────────────────────────────────
+
+/// Write Claude Code hooks into the worktree's `.claude/settings.local.json`
+/// (the personal, gitignored layer that merges with the user's settings and
+/// applies to both terminal and VS Code integrated-terminal sessions). Each hook
+/// invokes *this* binary as `maiestro hook <state> --workspace <ws-id>`, which
+/// writes a status record the backend watches. See `status.rs`.
+///
+/// Merges into any existing file rather than overwriting, so user/repo settings
+/// and unrelated hooks survive.
+fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
+    // The hook commands run through a shell, so quote the binary path (it may
+    // contain spaces, e.g. inside "/Applications/.../mAIestro.app") and the ws id.
+    let bin = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let bin_q = shell_quote(&bin.to_string_lossy());
+    let ws_q = shell_quote(ws_id);
+    let cmd = |state: &str| format!("{bin_q} hook {state} --workspace {ws_q}");
+
+    // Bare hook group (events that take no matcher).
+    let group = |state: &str| {
+        serde_json::json!({
+            "hooks": [{ "type": "command", "command": cmd(state) }]
+        })
+    };
+    // PreToolUse takes a matcher group; "" matches all tools.
+    let matcher_group = |state: &str| {
+        serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": cmd(state) }]
+        })
+    };
+
+    let ours: Vec<(&str, serde_json::Value)> = vec![
+        ("SessionStart", group("running")),
+        ("UserPromptSubmit", group("busy")),
+        ("PreToolUse", matcher_group("busy")),
+        // PostToolUse is the event that fires *after* an approved permission
+        // prompt's tool completes — the only signal that Claude has resumed
+        // working. Without it, a session sticks on `needs_you` (from the prompt's
+        // Notification) all the way through the rest of the turn, even while
+        // Claude is actively thinking. PreToolUse alone can't cover this: it
+        // fires *before* the prompt, not after approval.
+        ("PostToolUse", matcher_group("busy")),
+        ("Notification", group("notification")),
+        ("Stop", group("idle")),
+        ("SessionEnd", group("ended")),
+    ];
+
+    let dir = work_dir.join(".claude");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("settings.local.json");
+
+    // Start from any existing settings; ensure a top-level object with a `hooks` map.
+    let mut root: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .filter(|v: &serde_json::Value| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let hooks = root["hooks"].as_object().cloned().unwrap_or_default();
+    let mut hooks = serde_json::Value::Object(hooks);
+
+    for (event, group) in ours {
+        let arr = hooks[event].as_array().cloned().unwrap_or_default();
+        // Idempotent: don't append if an identical group is already present.
+        if arr.iter().any(|g| g == &group) {
+            hooks[event] = serde_json::Value::Array(arr);
+            continue;
+        }
+        let mut arr = arr;
+        arr.push(group);
+        hooks[event] = serde_json::Value::Array(arr);
+    }
+    root["hooks"] = hooks;
+
+    std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap() + "\n")
+        .map_err(|e| e.to_string())?;
+
+    exclude_generated_files(work_dir);
+    Ok(())
+}
+
+/// Append mAIestro's generated files to the worktree's shared git exclude file so
+/// they don't show up as untracked changes (which would trip teardown's
+/// `git status --porcelain` dirty check before Claude has run / in repos that
+/// don't already ignore them). Idempotent and best-effort.
+fn exclude_generated_files(work_dir: &Path) {
+    // Worktrees share the main repo's exclude via the common git dir; resolve it
+    // rather than assuming `<work_dir>/.git` is a directory (in a worktree it's a
+    // file pointing elsewhere).
+    let Ok(common) = git(work_dir, &["rev-parse", "--git-common-dir"]) else {
+        return;
+    };
+    let common = expand_tilde(&common);
+    let common = if common.is_absolute() { common } else { work_dir.join(common) };
+    let exclude = common.join("info").join("exclude");
+
+    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    let mut to_add: Vec<&str> = Vec::new();
+    for pat in [".claude/settings.local.json", ".vscode/"] {
+        if !existing.lines().any(|l| l.trim() == pat) {
+            to_add.push(pat);
+        }
+    }
+    if to_add.is_empty() {
+        return;
+    }
+    if let Some(parent) = exclude.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut body = existing;
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str("# Added by mAIestro\n");
+    for pat in to_add {
+        body.push_str(pat);
+        body.push('\n');
+    }
+    let _ = std::fs::write(&exclude, body);
 }
 
 /// Locate the VS Code `code` CLI: $PATH first, then common install locations
@@ -300,36 +443,68 @@ pub enum CreateAndSpawnOutcome {
     NeedsConfirmation { message: String },
 }
 
-#[tauri::command]
-pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+/// Result of `create_issue`: either the issue was opened (no workspace spawned),
+/// or Claude couldn't turn the idea into a clear issue and we're asking the user
+/// whether to create one from their raw text anyway.
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CreateIssueOutcome {
+    Created {
+        number: u64,
+        issue_url: String,
+        warnings: Vec<String>,
+    },
+    NeedsConfirmation { message: String },
+}
+
+/// The decisions a spawn needs once the issue is known: the (possibly edited)
+/// short label that drives the slug, and the chosen theming. Slugs and the
+/// session title are derived from these so the preview and the spawn agree.
+struct SpawnDecision<'a> {
+    repo: &'a str,
+    issue_number: u64,
+    issue_url: &'a str,
+    default_branch: &'a str,
+    short_label: &'a str,
+    color: &'a str,
+    emoji: &'a str,
+    force_new: bool,
+}
+
+/// Core worktree + session creation, shared by every spawn path. Resolves the
+/// repo's settings/identity/checkout itself; the caller supplies the issue facts
+/// and the (reviewed) label/theming. The slug is `<n>-<slug(short_label)>`.
+async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
+    let SpawnDecision { repo, issue_number, issue_url, default_branch, short_label, color, emoji, force_new } = d;
+
+    let settings = crate::repo_settings::repo_settings_get(repo.to_string());
     let identity_id = settings
         .identity_id
         .clone()
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-
     let checkout = expand_tilde(settings.checkout_dir.as_deref().unwrap_or_default());
     if !checkout.join(".git").exists() {
         return Err(format!("checkout dir is not a git repo: {}", checkout.display()));
     }
-    let repo_name = repo.split('/').next_back().unwrap_or(&repo).to_string();
-
+    let repo_name = repo.split('/').next_back().unwrap_or(repo).to_string();
     let gh = GitHub::for_identity(&identity_id)?;
-    let issue = gh.issue(&repo, issue_number).await?;
-    let issue_title = issue["title"].as_str().unwrap_or("").to_string();
-    let issue_url = issue["html_url"].as_str().unwrap_or("").to_string();
-    if issue_title.is_empty() {
-        return Err(format!("issue #{issue_number} not found"));
-    }
-    let default_branch = gh.repo(&repo).await?["default_branch"].as_str().unwrap_or("main").to_string();
 
-    // Workspace name: "<n>-<slug>"; session title budgets the label to ~30 chars.
+    let short_label = {
+        let t = short_label.trim();
+        if t.is_empty() { default_short_title("") } else { t.to_string() }
+    };
+
+    // Worktree location prefix: the full path is `<prefix><workspace>/<repo>`
+    // (string concat — the trailing `work-` is part of the dir name). Unset
+    // falls back to the original `~/src/work-` behavior.
+    let worktree_prefix = settings.worktree_prefix.as_deref().unwrap_or("~/src/work-").to_string();
+    let worktree_dir = |workspace: &str| expand_tilde(&format!("{worktree_prefix}{workspace}")).join(&repo_name);
+
+    // Workspace name: "<n>-<slug>".
     let prefix = format!("#{issue_number} — ");
-    let label_budget = 30usize.saturating_sub(prefix.chars().count());
-    let short_label = trim_to_word(&issue_title, label_budget);
     let base_workspace = format!("{issue_number}-{}", slugify(&short_label, 25));
     let base_branch = format!("feature/{base_workspace}");
-    let base_dir = home().join(format!("src/work-{base_workspace}")).join(&repo_name);
+    let base_dir = worktree_dir(&base_workspace);
 
     // Reuse an existing workspace by default; --new forces a fresh one.
     if !force_new && base_dir.is_dir() {
@@ -337,7 +512,7 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
         return Ok(SpawnResult {
             work_dir: base_dir.display().to_string(),
             branch: base_branch,
-            issue_url,
+            issue_url: issue_url.to_string(),
             reused: true,
             warnings: Vec::new(),
         });
@@ -352,19 +527,11 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
     while work_dir.is_dir() || local_branch_exists(&checkout, &branch) {
         workspace = format!("{base_workspace}-{n}");
         branch = format!("{base_branch}-{n}");
-        work_dir = home().join(format!("src/work-{workspace}")).join(&repo_name);
+        work_dir = worktree_dir(&workspace);
         session_label = format!("{prefix}{short_label} ({n})");
         n += 1;
     }
 
-    // Theme: pick a palette color not already claimed by a tracked session,
-    // then an emoji within it.
-    let used = crate::sessions::used_colors();
-    let pool: Vec<&str> = PALETTE.iter().copied().filter(|c| !used.contains(&c.to_string())).collect();
-    let pool: &[&str] = if pool.is_empty() { PALETTE } else { &pool };
-    let color = pool[hash_index(&workspace, 1, pool.len())];
-    let emojis = palette_emojis(color);
-    let emoji = emojis[hash_index(&workspace, 2, emojis.len())];
     let session_title = format!("{emoji} {session_label}");
 
     // Create the worktree from the repo's default branch.
@@ -395,7 +562,7 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
     // comment. Non-fatal: the worktree already exists, so failures only warn.
     match gh.authenticated_login().await {
         Ok(login) => {
-            if let Err(e) = gh.add_assignees(&repo, issue_number, &[login]).await {
+            if let Err(e) = gh.add_assignees(repo, issue_number, &[login]).await {
                 warnings.push(format!("could not assign issue #{issue_number}: {e}"));
             }
             let body = format!(
@@ -405,7 +572,7 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
                  - **Claude Session:** `{session_title}`\n",
                 work_dir.display()
             );
-            if let Err(e) = gh.create_comment(&repo, issue_number, &body).await {
+            if let Err(e) = gh.create_comment(repo, issue_number, &body).await {
                 warnings.push(format!("could not comment on issue #{issue_number}: {e}"));
             }
         }
@@ -413,16 +580,17 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
     }
 
     write_vscode_files(&work_dir, &work_parent, color, &session_title)?;
+    write_claude_hooks(&work_dir, &workspace)?;
 
     // Record the session so mAIestro can track it (and so its color counts as
     // taken for the next spawn). Non-fatal: the worktree already exists.
     let session = crate::sessions::Session {
         id: workspace.clone(),
-        repo: repo.clone(),
+        repo: repo.to_string(),
         issue_number,
-        issue_url: issue_url.clone(),
+        issue_url: issue_url.to_string(),
         branch: branch.clone(),
-        default_branch: default_branch.clone(),
+        default_branch: default_branch.to_string(),
         work_dir: work_dir.display().to_string(),
         checkout_dir: checkout.display().to_string(),
         session_title: session_title.clone(),
@@ -439,10 +607,51 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
     Ok(SpawnResult {
         work_dir: work_dir.display().to_string(),
         branch,
-        issue_url,
+        issue_url: issue_url.to_string(),
         reused: false,
         warnings,
     })
+}
+
+/// Fetch an issue's facts (title, url) and the repo's default branch — the
+/// shared first step of preparing or running a spawn for an existing issue.
+async fn issue_facts(gh: &GitHub, repo: &str, issue_number: u64) -> Result<(String, String, String), String> {
+    let issue = gh.issue(repo, issue_number).await?;
+    let issue_title = issue["title"].as_str().unwrap_or("").to_string();
+    if issue_title.is_empty() {
+        return Err(format!("issue #{issue_number} not found"));
+    }
+    let issue_url = issue["html_url"].as_str().unwrap_or("").to_string();
+    let issue_body = issue["body"].as_str().unwrap_or("").to_string();
+    Ok((issue_title, issue_url, issue_body))
+}
+
+/// Spawn directly from an existing issue using default theming and a heuristic
+/// short label (no preview). Kept for completeness/back-compat; the UI now goes
+/// through `prepare_spawn` + `confirm_spawn`.
+#[tauri::command]
+pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
+    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let identity_id = settings
+        .identity_id
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
+    let (issue_title, issue_url, _) = issue_facts(&gh, &repo, issue_number).await?;
+    let default_branch = gh.repo(&repo).await?["default_branch"].as_str().unwrap_or("main").to_string();
+    let short_label = default_short_title(&issue_title);
+    let seed = format!("{issue_number}-{}", slugify(&short_label, 25));
+    let (color, emoji) = pick_theme(&seed);
+    do_spawn(SpawnDecision {
+        repo: &repo,
+        issue_number,
+        issue_url: &issue_url,
+        default_branch: &default_branch,
+        short_label: &short_label,
+        color,
+        emoji,
+        force_new,
+    })
+    .await
 }
 
 // ── Create-issue-and-spawn ──────────────────────────────────────────────────────
@@ -478,9 +687,11 @@ fn snippet(s: &str) -> String {
     s.chars().take(240).collect()
 }
 
-/// Pull the inner `{title, body}` out of claude's reply text (which may wrap it
-/// in code fences or prose) and extract a non-empty title plus body.
-fn parse_issue_draft(text: &str) -> Result<(String, String), String> {
+/// Pull the inner `{title, body, short_title}` out of claude's reply text (which
+/// may wrap it in code fences or prose) and extract a non-empty title, body, and
+/// a short branch-friendly label. Falls back to the title for `short_title` when
+/// the model omits it.
+fn parse_issue_draft(text: &str) -> Result<(String, String, String), String> {
     let braces = text.find('{').zip(text.rfind('}')).filter(|(s, e)| e > s);
     let Some((start, end)) = braces else {
         // No JSON object: claude replied conversationally (e.g. asking the user
@@ -495,7 +706,9 @@ fn parse_issue_draft(text: &str) -> Result<(String, String), String> {
     if title.is_empty() {
         return Err("claude returned an empty title".into());
     }
-    Ok((title, body))
+    let short_title = v["short_title"].as_str().unwrap_or("").trim().to_string();
+    let short_title = if short_title.is_empty() { default_short_title(&title) } else { short_title };
+    Ok((title, body, short_title))
 }
 
 /// Run Claude (haiku) headlessly with `prompt`, in `dir` for repo context, and
@@ -536,39 +749,53 @@ async fn claude_text(dir: &Path, prompt: &str, what: &str) -> Result<String, Str
 }
 
 /// Ask Claude (haiku), running in the repo checkout for context, to turn the
-/// user's free-text idea into an issue title + markdown body.
-async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String), String> {
+/// user's free-text idea into an issue title + markdown body + a short label.
+/// The `short_title` is produced in the *same* call (no extra Claude run): it's
+/// a punchy branch/session label, distinct from the full issue title.
+async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String, String), String> {
     let prompt = format!(
         "Based on this idea for a change to this codebase, draft a GitHub issue. \
-         Reply with ONLY a JSON object of the form {{\"title\": string, \"body\": string}}. \
+         Reply with ONLY a JSON object of the form \
+         {{\"title\": string, \"body\": string, \"short_title\": string}}. \
          The title is a concise summary (max ~70 characters). The body is clear markdown \
-         describing the work. Idea: {idea}"
+         describing the work. The short_title is a short, human-readable session label — \
+         plain words with normal spaces and capitalization (NOT a slug or branch name, so \
+         no dashes/underscores), at most ~5 words / 40 characters, no issue number, no \
+         trailing punctuation; it should read well, not just be the title cut off. Idea: {idea}"
     );
     let reply = claude_text(checkout, &prompt, "drafting the issue").await?;
     parse_issue_draft(&reply)
 }
 
-/// Draft an issue from the user's idea (via Claude), open it on GitHub, then
-/// spawn a workspace for the freshly created issue.
-///
-/// When `use_raw_fallback` is false and Claude can't produce a clear draft
-/// (e.g. the idea is too vague and it asks for clarification), this creates
-/// nothing and returns `NeedsConfirmation` carrying Claude's reply, so the UI
-/// can ask the user whether to proceed. Calling again with `use_raw_fallback`
-/// true skips drafting and creates the issue straight from the user's text.
-#[tauri::command]
-pub async fn create_issue_and_spawn(
-    repo: String,
-    idea: String,
+/// A drafted issue ready to create, or a signal that Claude couldn't produce a
+/// clear draft and the user must confirm creating from raw text.
+enum DraftStep {
+    Ready {
+        title: String,
+        body: String,
+        /// Punchy branch/session label produced in the same draft call.
+        short_title: String,
+        /// Non-fatal note to surface alongside the created issue.
+        warning: Option<String>,
+    },
+    NeedsConfirmation { message: String },
+}
+
+/// Resolve the repo's identity + checkout, then turn the idea into an issue
+/// draft — via Claude, or (when `use_raw_fallback`) straight from the raw text.
+/// Returns the authenticated GitHub client alongside the draft so callers can
+/// create the issue. Shared by `create_issue` and `create_issue_and_spawn`.
+async fn resolve_draft(
+    repo: &str,
+    idea: &str,
     use_raw_fallback: bool,
-    force_new: bool,
-) -> Result<CreateAndSpawnOutcome, String> {
-    let idea = idea.trim().to_string();
+) -> Result<(GitHub, DraftStep), String> {
+    let idea = idea.trim();
     if idea.is_empty() {
         return Err("Describe what you want to work on first.".into());
     }
 
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.to_string());
     let identity_id = settings
         .identity_id
         .clone()
@@ -579,13 +806,93 @@ pub async fn create_issue_and_spawn(
     }
     let gh = GitHub::for_identity(&identity_id)?;
 
-    let (title, body, draft_warning) = if use_raw_fallback {
-        (trim_to_word(&idea, 70), idea.clone(), Some("created from your text without an AI draft".to_string()))
+    let step = if use_raw_fallback {
+        let title = trim_to_word(idea, 70);
+        let short_title = default_short_title(&title);
+        DraftStep::Ready {
+            title,
+            body: idea.to_string(),
+            short_title,
+            warning: Some("created from your text without an AI draft".to_string()),
+        }
     } else {
-        match draft_issue(&checkout, &idea).await {
-            Ok((t, b)) => (t, b, None),
+        match draft_issue(&checkout, idea).await {
+            Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title, warning: None },
             // Couldn't draft: let the user confirm before creating anything.
-            Err(message) => return Ok(CreateAndSpawnOutcome::NeedsConfirmation { message }),
+            Err(message) => DraftStep::NeedsConfirmation { message },
+        }
+    };
+    Ok((gh, step))
+}
+
+/// Draft an issue from the user's idea (via Claude) and open it on GitHub,
+/// **without** spawning a workspace.
+///
+/// When `use_raw_fallback` is false and Claude can't produce a clear draft
+/// (e.g. the idea is too vague and it asks for clarification), this creates
+/// nothing and returns `NeedsConfirmation` carrying Claude's reply, so the UI
+/// can ask the user whether to proceed. Calling again with `use_raw_fallback`
+/// true skips drafting and creates the issue straight from the user's text.
+#[tauri::command]
+pub async fn create_issue(
+    repo: String,
+    idea: String,
+    use_raw_fallback: bool,
+) -> Result<CreateIssueOutcome, String> {
+    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
+    let (title, body, warning) = match step {
+        DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
+        DraftStep::NeedsConfirmation { message } => {
+            return Ok(CreateIssueOutcome::NeedsConfirmation { message });
+        }
+    };
+
+    let number = gh.create_issue(&repo, &title, &body).await?;
+    Ok(CreateIssueOutcome::Created {
+        number,
+        // The create endpoint only returns the number; the html_url is derivable
+        // (the whole app assumes github.com — see plugins/github.rs).
+        issue_url: format!("https://github.com/{repo}/issues/{number}"),
+        warnings: warning.into_iter().collect(),
+    })
+}
+
+/// Open an issue from an explicit, already-reviewed title and body (no drafting).
+/// Used by the create-issue preview's confirm button.
+#[tauri::command]
+pub async fn create_issue_direct(repo: String, title: String, body: String) -> Result<CreateIssueOutcome, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("Issue title can't be empty.".into());
+    }
+    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let identity_id = settings
+        .identity_id
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
+    let number = gh.create_issue(&repo, title, &body).await?;
+    Ok(CreateIssueOutcome::Created {
+        number,
+        issue_url: format!("https://github.com/{repo}/issues/{number}"),
+        warnings: Vec::new(),
+    })
+}
+
+/// Draft an issue from the user's idea (via Claude), open it on GitHub, then
+/// spawn a workspace for the freshly created issue. See `create_issue` for the
+/// drafting / needs-confirmation semantics.
+#[tauri::command]
+pub async fn create_issue_and_spawn(
+    repo: String,
+    idea: String,
+    use_raw_fallback: bool,
+    force_new: bool,
+) -> Result<CreateAndSpawnOutcome, String> {
+    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
+    let (title, body, draft_warning) = match step {
+        DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
+        DraftStep::NeedsConfirmation { message } => {
+            return Ok(CreateAndSpawnOutcome::NeedsConfirmation { message });
         }
     };
 
@@ -595,6 +902,140 @@ pub async fn create_issue_and_spawn(
         result.warnings.insert(0, w);
     }
     Ok(CreateAndSpawnOutcome::Spawned(result))
+}
+
+// ── Preview-then-spawn ────────────────────────────────────────────────────────
+
+/// Everything the spawn preview shows for an issue: the editable issue fields
+/// and short label, plus the chosen theming and the repo's local dir name (so
+/// the UI can render the worktree path). `issue_number` is None on the
+/// create-and-spawn path, where the issue isn't opened until the user confirms.
+#[derive(serde::Serialize)]
+pub struct SpawnPlan {
+    pub repo: String,
+    pub issue_number: Option<u64>,
+    pub issue_title: String,
+    pub issue_body: String,
+    pub short_title: String,
+    pub color: String,
+    pub emoji: String,
+    pub repo_name: String,
+}
+
+/// Prepare a preview for spawning an existing issue: fetch its title/body and
+/// pick theming, without touching the worktree or GitHub.
+#[tauri::command]
+pub async fn prepare_spawn(repo: String, issue_number: u64) -> Result<SpawnPlan, String> {
+    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let identity_id = settings
+        .identity_id
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
+    let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
+    let short_title = default_short_title(&issue_title);
+    let seed = format!("{issue_number}-{}", slugify(&short_title, 25));
+    let (color, emoji) = pick_theme(&seed);
+    let repo_name = repo.split('/').next_back().unwrap_or(&repo).to_string();
+    Ok(SpawnPlan {
+        repo,
+        issue_number: Some(issue_number),
+        issue_title,
+        issue_body,
+        short_title,
+        color: color.to_string(),
+        emoji: emoji.to_string(),
+        repo_name,
+    })
+}
+
+/// Result of drafting a spawn preview from a free-text idea: a ready preview, or
+/// a needs-confirmation prompt (Claude couldn't draft a clear issue).
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DraftPreviewOutcome {
+    Drafted(SpawnPlan),
+    NeedsConfirmation { message: String },
+}
+
+/// Draft an issue from the user's idea (one Claude call, which also yields the
+/// short label) and return a preview — WITHOUT creating the issue. The issue is
+/// only opened when the user confirms via `confirm_spawn`.
+#[tauri::command]
+pub async fn draft_spawn_preview(
+    repo: String,
+    idea: String,
+    use_raw_fallback: bool,
+) -> Result<DraftPreviewOutcome, String> {
+    let (_gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
+    match step {
+        DraftStep::Ready { title, body, short_title, .. } => {
+            let seed = format!("new-{}", slugify(&short_title, 25));
+            let (color, emoji) = pick_theme(&seed);
+            let repo_name = repo.split('/').next_back().unwrap_or(&repo).to_string();
+            Ok(DraftPreviewOutcome::Drafted(SpawnPlan {
+                repo,
+                issue_number: None,
+                issue_title: title,
+                issue_body: body,
+                short_title,
+                color: color.to_string(),
+                emoji: emoji.to_string(),
+                repo_name,
+            }))
+        }
+        DraftStep::NeedsConfirmation { message } => Ok(DraftPreviewOutcome::NeedsConfirmation { message }),
+    }
+}
+
+/// The reviewed (possibly edited) preview the user confirmed. `issue_number` is
+/// Some for an existing issue (PATCHed when `update_issue`), None to create one.
+#[derive(serde::Deserialize)]
+pub struct SpawnEdits {
+    pub issue_number: Option<u64>,
+    pub issue_title: String,
+    pub issue_body: String,
+    pub short_title: String,
+    pub color: String,
+    pub emoji: String,
+    /// For an existing issue: whether the title/body were changed and should be
+    /// written back to GitHub. Ignored on the create path (always created).
+    pub update_issue: bool,
+}
+
+/// Confirm a previewed spawn: create or update the GitHub issue as needed, then
+/// build the worktree/session using the reviewed label and theming.
+#[tauri::command]
+pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> Result<SpawnResult, String> {
+    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let identity_id = settings
+        .identity_id
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
+
+    let number = match edits.issue_number {
+        Some(n) => {
+            if edits.update_issue {
+                gh.update_issue(&repo, n, &edits.issue_title, &edits.issue_body).await?;
+            }
+            n
+        }
+        None => gh.create_issue(&repo, &edits.issue_title, &edits.issue_body).await?,
+    };
+
+    let default_branch = gh.repo(&repo).await?["default_branch"].as_str().unwrap_or("main").to_string();
+    let issue_url = format!("https://github.com/{repo}/issues/{number}");
+
+    do_spawn(SpawnDecision {
+        repo: &repo,
+        issue_number: number,
+        issue_url: &issue_url,
+        default_branch: &default_branch,
+        short_label: &edits.short_title,
+        color: &edits.color,
+        emoji: &edits.emoji,
+        force_new,
+    })
+    .await
 }
 
 // ── Teardown ────────────────────────────────────────────────────────────────────
@@ -682,7 +1123,9 @@ fn worktree_in_use(work_dir: &Path) -> bool {
 
 /// Open System Settings → Privacy & Security → Accessibility so the user can
 /// grant mAIestro the permission teardown needs to close VS Code windows.
-fn open_accessibility_settings() {
+/// Triggered only by an explicit user click — we never launch it automatically.
+#[tauri::command]
+pub fn open_accessibility_settings() {
     let _ = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         .spawn();
@@ -695,6 +1138,11 @@ pub enum TeardownOutcome {
     /// Checks found unresolved work; `warnings` describes it so the UI can ask
     /// the user to confirm before destroying the worktree.
     NeedsConfirmation { warnings: Vec<String> },
+    /// VS Code still has the worktree open and we couldn't close it (no
+    /// Accessibility grant, or the close didn't take). `message` explains the
+    /// situation; `accessibility` is true when granting Accessibility would let
+    /// mAIestro close the window itself, so the UI can offer that shortcut.
+    BlockedByEditor { message: String, accessibility: bool },
 }
 
 /// Tear down a spawned session's worktree. Inspects the branch first
@@ -704,7 +1152,7 @@ pub enum TeardownOutcome {
 /// removal failures), then the worktree, local branch, directory, and session
 /// record are removed.
 #[tauri::command]
-pub async fn teardown(session_id: String, confirmed: bool) -> Result<TeardownOutcome, String> {
+pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Result<TeardownOutcome, String> {
     let session = crate::sessions::get(&session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
     let work_dir = PathBuf::from(&session.work_dir);
@@ -733,6 +1181,17 @@ pub async fn teardown(session_id: String, confirmed: bool) -> Result<TeardownOut
                     warnings.push(format!("PR #{} is still open", open["number"].as_u64().unwrap_or(0)));
                 }
             }
+            // Fallback: once a PR merges, GitHub deletes its head branch by
+            // default, after which the head-ref filter above returns nothing and
+            // we'd wrongly conclude "no work on this branch". Resolve by the
+            // branch's tip commit instead, which still points at the merged PR.
+            if !pr_merged {
+                if let Ok(sha) = git(&work_dir, &["rev-parse", "HEAD"]) {
+                    if let Ok(prs) = gh.pulls_for_commit(&session.repo, &sha).await {
+                        pr_merged = prs.iter().any(|p| p["merged_at"].is_string());
+                    }
+                }
+            }
         }
     }
 
@@ -758,40 +1217,49 @@ pub async fn teardown(session_id: String, confirmed: bool) -> Result<TeardownOut
     // 1. Close VS Code FIRST and CONFIRM the worktree is free before touching the
     //    files. Removing it out from under a live VS Code crashes the editor, so
     //    we only proceed once we can show the window is gone — never on a guess.
-    if let Some(marker) = window_marker(&work_dir) {
-        close_editor_window(&marker).await;
-        let mut waited = 0u64;
-        loop {
-            match probe_editor_window(&marker).await {
-                // Window confirmed gone — safe to delete.
-                WinProbe::Absent => break,
-                // No Accessibility grant: we can neither close nor see the window.
-                // Fall back to the permission-free check — if nothing is using the
-                // worktree, proceed; otherwise stop and guide the user.
-                WinProbe::Denied => {
-                    if worktree_in_use(&work_dir) {
-                        open_accessibility_settings();
-                        return Err(
-                            "mAIestro needs Accessibility permission to close the VS Code window \
-                             before removing this worktree (without it, VS Code crashes). I opened \
-                             System Settings → Privacy & Security → Accessibility — enable mAIestro \
-                             there and try again, or just close the VS Code window yourself first."
-                                .to_string(),
-                        );
+    //    `force` skips this entirely: the user chose "Delete anyway" knowing the
+    //    open window may crash.
+    if !force {
+        if let Some(marker) = window_marker(&work_dir) {
+            close_editor_window(&marker).await;
+            let mut waited = 0u64;
+            loop {
+                match probe_editor_window(&marker).await {
+                    // Window confirmed gone — safe to delete.
+                    WinProbe::Absent => break,
+                    // No Accessibility grant: we can neither close nor see the
+                    // window. Fall back to the permission-free check — if nothing
+                    // is using the worktree, proceed; otherwise stop and let the
+                    // user close the window, grant Accessibility, or force it.
+                    WinProbe::Denied => {
+                        if worktree_in_use(&work_dir) {
+                            return Ok(TeardownOutcome::BlockedByEditor {
+                                message:
+                                    "I couldn't tear down because the Visual Studio Code window \
+                                     is still open.\n\nYou have two options: close the window \
+                                     yourself, or enable Accessibility for mAIestro so it can \
+                                     close the window for you."
+                                        .to_string(),
+                                accessibility: true,
+                            });
+                        }
+                        break;
                     }
-                    break;
-                }
-                // Window still open: the close is in flight (or we lack permission
-                // to close but the user may close it). Wait a bit, then give up.
-                WinProbe::Open => {
-                    if waited >= 4000 {
-                        return Err(
-                            "VS Code still has this worktree open — close its window, then try Clean Up again."
-                                .to_string(),
-                        );
+                    // Window still open with Accessibility granted: the close is in
+                    // flight (or the user may close it). Wait a bit, then give up.
+                    WinProbe::Open => {
+                        if waited >= 4000 {
+                            return Ok(TeardownOutcome::BlockedByEditor {
+                                message:
+                                    "I couldn't tear down because the Visual Studio Code window \
+                                     is still open. Close its window, then try Tear Down again."
+                                        .to_string(),
+                                accessibility: false,
+                            });
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        waited += 300;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    waited += 300;
                 }
             }
         }
@@ -806,18 +1274,21 @@ pub async fn teardown(session_id: String, confirmed: bool) -> Result<TeardownOut
         let _ = git(&checkout, &["branch", "-D", &branch]);
     }
 
-    // 4. Remove the leftover work-* parent dir, guarding the path shape.
+    // 4. Remove the leftover wrapper dir (`<prefix><workspace>`), gating removal
+    //    on the path actually starting with the repo's configured worktree
+    //    prefix so we never remove_dir_all something outside it.
     if let Some(parent) = work_dir.parent() {
-        let src = home().join("src");
-        let under_src = parent.parent() == Some(src.as_path());
-        let is_work = parent.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("work-"));
-        if under_src && is_work && parent.exists() {
+        let prefix = settings.worktree_prefix.as_deref().unwrap_or("~/src/work-");
+        let expanded = expand_tilde(prefix);
+        let under_prefix = parent.to_string_lossy().starts_with(&*expanded.to_string_lossy());
+        if under_prefix && parent.exists() {
             let _ = std::fs::remove_dir_all(parent);
         }
     }
 
-    // 5. Drop the session record.
+    // 5. Drop the session record and its live status file.
     let _ = crate::sessions::delete(&session_id);
+    crate::status::remove(&session_id);
 
     Ok(TeardownOutcome::Done)
 }
@@ -961,14 +1432,9 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
         }
     }
 
-    // Push the branch so GitHub can see the head ref. -u sets upstream for the
-    // user's later pushes from the session.
-    git(&work_dir, &["push", "-u", "origin", &branch])
-        .map_err(|e| format!("could not push branch {branch}: {e}"))?;
-
     // Seed the draft with the issue title/body for context (best-effort).
     let issue = gh.issue(&session.repo, session.issue_number).await.unwrap_or_default();
-    let issue_title = issue["title"].as_str().unwrap_or("").to_string();
+    let issue_title = issue["title"].as_str().unwrap_or("");
     let issue_body = issue["body"].as_str().unwrap_or("");
 
     let summary = change_summary(&work_dir, &base);
@@ -982,31 +1448,23 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
         number = session.issue_number,
     );
 
-    // Draft via Claude; fall back to the issue title + change summary if it fails
-    // so the action still produces a usable PR.
-    let (title, body) = match claude_text(&work_dir, &prompt, "drafting the PR").await {
-        Ok(reply) => parse_issue_draft(&reply).unwrap_or_else(|_| {
-            (fallback_title(&issue_title, &branch), summary.clone())
-        }),
-        Err(_) => (fallback_title(&issue_title, &branch), summary.clone()),
-    };
-
+    // Draft via Claude. If drafting fails (claude errored, or its reply had no
+    // parseable {title, body}), propagate the error and abort *before* pushing
+    // or opening the PR — we'd rather tell the user why than open a garbage PR.
+    // The PR draft reuses the issue-draft parser but only needs title + body.
+    let reply = claude_text(&work_dir, &prompt, "drafting the PR").await?;
+    let (title, body, _) = parse_issue_draft(&reply)?;
     let body = format!("{body}\n\nCloses #{}", session.issue_number);
+
+    // Draft succeeded — now push the branch so GitHub can see the head ref. -u
+    // sets upstream for the user's later pushes from the session.
+    git(&work_dir, &["push", "-u", "origin", &branch])
+        .map_err(|e| format!("could not push branch {branch}: {e}"))?;
 
     let pr = gh
         .create_pull(&session.repo, &title, &branch, &base, &body, true)
         .await?;
     Ok(pr_link_from(&pr))
-}
-
-/// Title to use when the AI draft is unavailable: the tracked issue title, or
-/// the branch name as a last resort.
-fn fallback_title(issue_title: &str, branch: &str) -> String {
-    if issue_title.trim().is_empty() {
-        branch.to_string()
-    } else {
-        issue_title.to_string()
-    }
 }
 
 // ── PR checks & merge ─────────────────────────────────────────────────────────

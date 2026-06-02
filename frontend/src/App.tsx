@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session } from "./api";
+import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord } from "./api";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
 import FolderIcon from "./icons/folder.svg?react";
 import VSCodeIcon from "./icons/vscode.svg?react";
+import ClaudeIcon from "./icons/claude.svg?react";
 import ChevronRightIcon from "./icons/chevron-right.svg?react";
 import PrOpenIcon from "./icons/pull-request-open.svg?react";
 import PrDraftIcon from "./icons/pull-request-draft.svg?react";
@@ -32,6 +33,12 @@ function checkLabel(checks: PrChecks): string {
   }
 }
 
+// A pending Tear Down prompt: a warnings confirmation, or a "VS Code still open"
+// block (which may offer the Accessibility shortcut so mAIestro can close it).
+type TeardownPrompt =
+  | { id: string; kind: "confirm"; warnings: string[] }
+  | { id: string; kind: "blocked"; message: string; accessibility: boolean };
+
 type Tab = "identity" | "repo";
 type SaveStatus = "idle" | "saving" | "saved" | "clearing" | "error";
 type RepoView =
@@ -56,8 +63,9 @@ function Settings() {
   const [repoView, setRepoView] = useState<RepoView>({ mode: "list" });
   const [credTypes, setCredTypes] = useState<CredentialTypeDto[]>([]);
   const [credStates, setCredStates] = useState<Record<string, CredState>>({});
-  const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, env_files: [], identity_id: null, hidden: null });
+  const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, worktree_prefix: null, env_files: [], identity_id: null, hidden: null });
   const [checkoutDraft, setCheckoutDraft] = useState("");
+  const [worktreePrefixDraft, setWorktreePrefixDraft] = useState("");
   const [addingEnvFile, setAddingEnvFile] = useState(false);
   const [envFileInput, setEnvFileInput] = useState("");
   const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "done">("idle");
@@ -141,6 +149,7 @@ function Settings() {
     api.getRepoSettings(repo).then((s) => {
       setRepoSettings(s);
       setCheckoutDraft(s.checkout_dir ?? "");
+      setWorktreePrefixDraft(s.worktree_prefix ?? "");
     });
     setScanStatus("idle");
     setAddingEnvFile(false);
@@ -156,6 +165,11 @@ function Settings() {
   async function handleCheckoutDirCommit() {
     const dir = checkoutDraft.trim() || null;
     await saveRepoSettings({ ...repoSettings, checkout_dir: dir });
+  }
+
+  async function handleWorktreePrefixCommit() {
+    const prefix = worktreePrefixDraft.trim() || null;
+    await saveRepoSettings({ ...repoSettings, worktree_prefix: prefix });
   }
 
   async function handleScanEnvFiles() {
@@ -408,6 +422,27 @@ function Settings() {
               </div>
             </div>
 
+            {/* ── Worktree prefix ── */}
+            <div className="settings-group">
+              <div className="settings-group-header">
+                <span className="field-label" style={{ marginBottom: 0 }}>Worktree prefix</span>
+              </div>
+              <div className="cred-controls">
+                <input
+                  className="text-input"
+                  type="text"
+                  placeholder="~/src/work-"
+                  value={worktreePrefixDraft}
+                  onChange={(e) => setWorktreePrefixDraft(e.target.value)}
+                  onBlur={handleWorktreePrefixCommit}
+                  onKeyDown={(e) => e.key === "Enter" && handleWorktreePrefixCommit()}
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                />
+              </div>
+            </div>
+
             {/* ── Env files ── */}
             <div className="settings-group">
               <div className="settings-group-header">
@@ -619,6 +654,26 @@ async function openSettings() {
   }
 }
 
+// The editable spawn preview, shown in the main area before a worktree is made.
+// `issueNumber` is null on the create path (issue opened only on confirm).
+// `orig*` capture the fetched/drafted values so we know whether to PATCH GitHub.
+type Preview = {
+  // "spawn" creates a worktree (session name + slugs); "create" just opens the
+  // issue and returns to the list.
+  mode: "spawn" | "create";
+  issueNumber: number | null;
+  issueTitle: string;
+  issueBody: string;
+  shortTitle: string;
+  color: string;
+  emoji: string;
+  repoName: string;
+  origTitle: string;
+  origBody: string;
+  spawning: boolean;
+  error?: string;
+};
+
 type Picker = {
   repo: string;
   loading: boolean;
@@ -626,12 +681,43 @@ type Picker = {
   error?: string;
   query: string;
   note?: string;
+  // Which create button is in flight, so we can disable both and spin the
+  // active one. Undefined when idle.
+  creating?: "create" | "spawn";
+  // True while the issue list is being re-fetched via the refresh button.
+  refreshing?: boolean;
   // Set when Claude couldn't draft a clear issue: holds the original idea and
   // Claude's reply, prompting the user to confirm creating from raw text.
-  confirm?: { idea: string; message: string };
+  // `action` records which button triggered it, so the retry repeats it.
+  confirm?: { idea: string; message: string; action: "create" | "spawn" };
+  // When set, the overlay shows the spawn preview instead of the issue list.
+  preview?: Preview;
 };
 
 type Expand = { kind: "idea" } | { kind: "issue"; number: number } | null;
+
+// Slug for branch/worktree names — mirrors the backend's slugify (lowercase,
+// non-alphanumerics collapsed to single dashes, trimmed, cut at a dash boundary)
+// so the preview shows what the backend will actually use. The backend re-derives
+// authoritatively on spawn (and may add a -2 suffix to dodge collisions).
+function slugify(s: string, maxLen = 25): string {
+  let slug = "";
+  let prevDash = false;
+  for (const c of s.toLowerCase()) {
+    if (/[a-z0-9]/.test(c)) {
+      slug += c;
+      prevDash = false;
+    } else if (!prevDash) {
+      slug += "-";
+      prevDash = true;
+    }
+  }
+  slug = slug.replace(/^-+|-+$/g, "");
+  if (slug.length <= maxLen) return slug;
+  const cut = slug.slice(0, maxLen);
+  const i = cut.lastIndexOf("-");
+  return (i > 0 ? cut.slice(0, i) : cut).replace(/-+$/, "");
+}
 
 // Prune the tree to nodes that match the query, keeping any ancestor that has a
 // matching descendant so hierarchy/context is preserved.
@@ -646,22 +732,35 @@ function filterIssues(nodes: IssueNode[], query: string): IssueNode[] {
   return nodes.map(keep).filter((n): n is IssueNode => n !== null);
 }
 
+// Issue number → its active session(s): the workspace color (for the dot) and a
+// title to surface on hover. Issues present here have a spawned worktree.
+type ActiveSessions = Record<number, { color: string; title: string }>;
+
 interface IssueRowProps {
   node: IssueNode;
   depth: number;
   expandedNumber: number | null;
+  active: ActiveSessions;
   onExpand: (n: number) => void;
   onCollapse: () => void;
   onSpawn: (n: IssueNode) => void;
 }
 
-function IssueRow({ node, depth, expandedNumber, onExpand, onCollapse, onSpawn }: IssueRowProps) {
+function IssueRow({ node, depth, expandedNumber, active, onExpand, onCollapse, onSpawn }: IssueRowProps) {
   const indent = 10 + depth * 16;
   const isExpanded = expandedNumber === node.number;
+  const session = active[node.number];
+  // A "working" pill tinted with the workspace color, marking issues that
+  // already have a session. Such issues can't be spawned again, so they don't
+  // expand into the Spawn Work action; the hover explains why.
+  const workingHint = "There is already a work session for this issue";
+  const workingPill = session && (
+    <span className="issue-working-pill" style={{ background: session.color }} title={workingHint}>working</span>
+  );
   return (
     <>
-      {isExpanded ? (
-        <div className="issue-row issue-row--expanded" style={{ paddingLeft: indent }}>
+      {isExpanded && !session ? (
+        <div className={`issue-row issue-row--expanded ${session ? "issue-row--active" : ""}`} style={{ paddingLeft: indent }}>
           <div className="issue-expanded-head">
             <a
               className="issue-number issue-number--link"
@@ -675,6 +774,7 @@ function IssueRow({ node, depth, expandedNumber, onExpand, onCollapse, onSpawn }
               #{node.number}
             </a>
             <span className="issue-title-full">{node.title}</span>
+            {workingPill}
           </div>
           <div className="issue-actions">
             <button className="btn-save" onClick={() => onSpawn(node)}>Spawn Work</button>
@@ -682,7 +782,7 @@ function IssueRow({ node, depth, expandedNumber, onExpand, onCollapse, onSpawn }
           </div>
         </div>
       ) : (
-        <div className="issue-row" style={{ paddingLeft: indent }}>
+        <div className={`issue-row ${session ? "issue-row--active" : ""}`} style={{ paddingLeft: indent }}>
           <a
             className="issue-number issue-number--link"
             href={node.html_url}
@@ -695,13 +795,21 @@ function IssueRow({ node, depth, expandedNumber, onExpand, onCollapse, onSpawn }
           >
             #{node.number}
           </a>
-          <button
-            className="issue-title issue-row-expand"
-            onClick={() => onExpand(node.number)}
-            title={node.title}
-          >
-            {node.title}
-          </button>
+          {session ? (
+            // Already has a session — not expandable; show the hint on hover.
+            <span className="issue-title issue-title--static" title={workingHint}>
+              {node.title}
+            </span>
+          ) : (
+            <button
+              className="issue-title issue-row-expand"
+              onClick={() => onExpand(node.number)}
+              title={node.title}
+            >
+              {node.title}
+            </button>
+          )}
+          {workingPill}
         </div>
       )}
       {node.children.map((c) => (
@@ -710,12 +818,46 @@ function IssueRow({ node, depth, expandedNumber, onExpand, onCollapse, onSpawn }
           node={c}
           depth={depth + 1}
           expandedNumber={expandedNumber}
+          active={active}
           onExpand={onExpand}
           onCollapse={onCollapse}
           onSpawn={onSpawn}
         />
       ))}
     </>
+  );
+}
+
+// How each status state renders in a work-item row. `running`/`idle` are quiet;
+// `busy` and `needs_you` draw attention. States not in the map render nothing.
+const STATUS_LABELS: Record<string, string> = {
+  running: "Ready",
+  busy: "Working",
+  needs_you: "Needs you",
+  idle: "Idle",
+};
+
+// The Claude session pill: the Claude mark tints by live state (green=working,
+// amber=needs you, muted=ready/idle), with the status word beside it. Clicking
+// jumps to where the session lives — the worktree's VS Code window (there is no
+// deep link to the remote-controlled session itself). Renders nothing until a
+// status exists, and once the session has ended.
+function ClaudePill({ status, onClick }: { status?: StatusRecord; onClick: () => void }) {
+  if (!status || status.state === "ended") return null;
+  const label = STATUS_LABELS[status.state];
+  if (!label) return null;
+  // `needs_you` carries the reason (e.g. the permission request) in `detail`.
+  const title = status.detail ? `Claude · ${label} — ${status.detail}` : `Claude · ${label}`;
+  return (
+    <button
+      className={`claude-pill claude-pill--${status.state}`}
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+    >
+      <ClaudeIcon className="claude-pill-mark" />
+      <span className="claude-pill-label">{label}</span>
+    </button>
   );
 }
 
@@ -844,15 +986,21 @@ function MainView() {
   const [picker, setPicker] = useState<Picker | null>(null);
   // Which thing in the overlay is expanded: the idea box, one issue row, or none.
   const [expanded, setExpanded] = useState<Expand>(null);
+  // The multi-line idea box; resized to fit its content (capped in CSS).
+  const ideaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const [sessions, setSessions] = useState<Session[]>([]);
   // PR link per session id, discovered live from GitHub. `null` = looked up, none
   // found (or the lookup failed); absent key = not looked up yet.
   const [prs, setPrs] = useState<Record<string, PrLink | null>>({});
+  // Live status per workspace id (busy / needs_you / idle / …), seeded on open
+  // and kept current by the backend's `session-status` event.
+  const [statuses, setStatuses] = useState<Record<string, StatusRecord>>({});
   // Session id whose inline command strip is expanded (only one at a time).
   const [commandsOpen, setCommandsOpen] = useState<string | null>(null);
-  // Pending Clean Up confirmation: the session id and the warnings to show.
-  const [cleanupConfirm, setCleanupConfirm] = useState<{ id: string; warnings: string[] } | null>(null);
+  // Pending Tear Down prompt for a session: either a warnings confirmation, or a
+  // "VS Code still open" block that can offer the Accessibility shortcut.
+  const [teardownConfirm, setTeardownConfirm] = useState<TeardownPrompt | null>(null);
   // Create-PR progress/error per session id: `{ creating }` while in flight,
   // `{ error }` after a failure. Absent = idle.
   const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; error?: string }>>({});
@@ -887,6 +1035,16 @@ function MainView() {
     }).catch(() => {});
   }, []);
 
+  // Replace the status map with a fresh snapshot from disk. Called on open so a
+  // reopened/reloaded popover reflects current state even if it missed events.
+  const refreshStatuses = useCallback(() => {
+    api.sessionsStatusList().then((list) => {
+      const next: Record<string, StatusRecord> = {};
+      for (const s of list) next[s.workspace] = s;
+      setStatuses(next);
+    }).catch(() => {});
+  }, []);
+
   const refreshAll = useCallback(() => {
     api.listRepos().then((list) => {
       setRepos(list);
@@ -899,7 +1057,8 @@ function MainView() {
       }
     }).catch(() => {});
     refreshSessions();
-  }, [refreshSessions]);
+    refreshStatuses();
+  }, [refreshSessions, refreshStatuses]);
 
   useEffect(() => {
     refreshAll();
@@ -912,6 +1071,41 @@ function MainView() {
     const unlisten = getCurrentWindow().listen("popover-shown", refreshAll);
     return () => { unlisten.then((f) => f()); };
   }, [refreshAll]);
+
+  // Live status updates from the backend's status-file watcher. Each event is one
+  // workspace's latest record; `ended` clears its row indicator.
+  useEffect(() => {
+    const unlisten = getCurrentWindow().listen<StatusRecord>("session-status", (e) => {
+      const rec = e.payload;
+      setStatuses((prev) => {
+        if (rec.state === "ended") {
+          const { [rec.workspace]: _drop, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, [rec.workspace]: rec };
+      });
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, []);
+
+  // Also refresh whenever the window itself regains focus — covers any path that
+  // re-focuses the popover without a fresh "popover-shown" emit. Refresh is
+  // idempotent, so overlapping with the event above is harmless.
+  useEffect(() => {
+    const unlisten = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) refreshAll();
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, [refreshAll]);
+
+  // Grow the idea box to fit its content (reset to auto first so it can also
+  // shrink), capped by the CSS max-height which then scrolls.
+  useEffect(() => {
+    const el = ideaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [picker?.query, expanded]);
 
   // Tracked sessions grouped by repo full_name.
   const sessionsByRepo = useMemo(() => {
@@ -941,57 +1135,174 @@ function MainView() {
     }
   }
 
+  // Re-fetch the repo's open issues (and sessions, so "working" pills are
+  // current) without closing the overlay. Best-effort: keep the list on failure.
+  async function refreshIssues() {
+    if (!picker) return;
+    const repo = picker.repo;
+    refreshSessions();
+    setPicker((p) => (p ? { ...p, refreshing: true } : p));
+    try {
+      const settings = await api.getRepoSettings(repo);
+      if (settings.identity_id) {
+        const issues = await api.githubListIssues(settings.identity_id, repo);
+        setPicker((p) => (p && p.repo === repo ? { ...p, issues } : p));
+      }
+    } catch { /* keep the existing list */ }
+    setPicker((p) => (p ? { ...p, refreshing: false } : p));
+  }
+
+  // Turn a backend SpawnPlan into the editable preview state. `mode` decides
+  // what the preview offers: "spawn" shows the session name + derived slugs and
+  // creates a worktree; "create" just opens the issue (no worktree).
+  function planToPreview(plan: SpawnPlan, mode: "spawn" | "create"): Preview {
+    return {
+      mode,
+      issueNumber: plan.issue_number,
+      issueTitle: plan.issue_title,
+      issueBody: plan.issue_body,
+      shortTitle: plan.short_title,
+      color: plan.color,
+      emoji: plan.emoji,
+      repoName: plan.repo_name,
+      origTitle: plan.issue_title,
+      origBody: plan.issue_body,
+      spawning: false,
+    };
+  }
+
+  // Patch fields of the open preview.
+  function setPreview(patch: Partial<Preview>) {
+    setPicker((p) => (p && p.preview ? { ...p, preview: { ...p.preview, ...patch } } : p));
+  }
+
+  // Existing issue → open the spawn preview (no worktree yet; fetches the body).
   async function spawnIssue(node: IssueNode) {
     if (!picker) return;
     const repo = picker.repo;
-    setPicker((p) => (p ? { ...p, note: `Spawning #${node.number}…` } : p));
+    setPicker((p) => (p ? { ...p, note: `Preparing #${node.number}…` } : p));
     try {
-      const res = await api.spawnWork(repo, node.number);
-      const summary = res.reused
-        ? `Reused workspace for #${node.number} → ${res.work_dir}`
-        : `Spawned #${node.number} on ${res.branch} → ${res.work_dir}`;
-      const note = res.warnings.length ? `${summary}\n⚠ ${res.warnings.join("; ")}` : summary;
-      setPicker((p) => (p ? { ...p, note } : p));
-      refreshSessions();
+      const plan = await api.prepareSpawn(repo, node.number);
+      setPicker((p) => (p ? { ...p, note: undefined, preview: planToPreview(plan, "spawn") } : p));
     } catch (e) {
-      setPicker((p) => (p ? { ...p, note: `Failed to spawn #${node.number}: ${String(e)}` } : p));
+      setPicker((p) => (p ? { ...p, note: `Failed to prepare #${node.number}: ${String(e)}` } : p));
     }
   }
 
-  function applyOutcome(res: CreateAndSpawnOutcome, idea: string) {
+  function applyDraftPreview(res: DraftPreviewOutcome, idea: string, mode: "spawn" | "create") {
     if (res.status === "needs_confirmation") {
-      setPicker((p) => (p ? { ...p, note: undefined, confirm: { idea, message: res.message } } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, note: undefined, confirm: { idea, message: res.message, action: mode } } : p));
     } else {
-      const summary = `Spawned ${res.issue_url} on ${res.branch} → ${res.work_dir}`;
-      const note = res.warnings.length ? `${summary}\n⚠ ${res.warnings.join("; ")}` : summary;
-      setPicker((p) => (p ? { ...p, note, confirm: undefined } : p));
-      refreshSessions();
+      setPicker((p) => (p ? { ...p, creating: undefined, note: undefined, confirm: undefined, preview: planToPreview(res, mode) } : p));
     }
   }
 
+  // Cancel the preview → back to the issue list (overlay stays open).
+  function cancelPreview() {
+    setPicker((p) => (p ? { ...p, preview: undefined, note: undefined } : p));
+  }
+
+  // Confirm a spawn preview: create/update the issue, then spawn. On success the
+  // overlay closes and we land back in the main window.
+  async function confirmSpawnNow() {
+    if (!picker?.preview) return;
+    const repo = picker.repo;
+    const pv = picker.preview;
+    if (!pv.shortTitle.trim() || !pv.issueTitle.trim()) return;
+    setPreview({ spawning: true, error: undefined });
+    const edits: SpawnEdits = {
+      issue_number: pv.issueNumber,
+      issue_title: pv.issueTitle,
+      issue_body: pv.issueBody,
+      short_title: pv.shortTitle,
+      color: pv.color,
+      emoji: pv.emoji,
+      update_issue: pv.issueNumber !== null && (pv.issueTitle !== pv.origTitle || pv.issueBody !== pv.origBody),
+    };
+    try {
+      await api.confirmSpawn(repo, edits);
+      refreshSessions();
+      closePicker();
+    } catch (e) {
+      setPreview({ spawning: false, error: String(e) });
+    }
+  }
+
+  // Confirm a create-only preview: open the issue from the edited title/body,
+  // surface it in the list (optimistically + a reconciling refetch), and return
+  // to the list. No worktree is created.
+  async function createFromPreview() {
+    if (!picker?.preview) return;
+    const repo = picker.repo;
+    const pv = picker.preview;
+    if (!pv.issueTitle.trim()) return;
+    setPreview({ spawning: true, error: undefined });
+    try {
+      const res = await api.createIssueDirect(repo, pv.issueTitle, pv.issueBody);
+      if (res.status !== "created") {
+        setPreview({ spawning: false, error: "Unexpected response while creating the issue." });
+        return;
+      }
+      const node: IssueNode = { number: res.number, title: pv.issueTitle, html_url: res.issue_url, children: [] };
+      setPicker((p) => {
+        if (!p) return p;
+        // Insert the new issue locally — we know exactly what it is, and GitHub's
+        // list endpoint lags, so refetching would briefly drop it. The next
+        // popover refresh reconciles with GitHub.
+        const present = (p.issues ?? []).some((n) => n.number === res.number);
+        const issues = present ? p.issues : [node, ...(p.issues ?? [])];
+        return { ...p, preview: undefined, query: "", note: `Created ${res.issue_url}`, issues };
+      });
+    } catch (e) {
+      setPreview({ spawning: false, error: String(e) });
+    }
+  }
+
+  // The preview's primary button: spawn or create-only depending on its mode.
+  function confirmPreview() {
+    if (picker?.preview?.mode === "create") createFromPreview();
+    else confirmSpawnNow();
+  }
+
+  // Idea → AI draft → create-only preview (issue isn't opened until confirm).
+  async function createIssueOnly() {
+    if (!picker) return;
+    const repo = picker.repo;
+    const idea = picker.query.trim();
+    if (!idea) return;
+    setPicker((p) => (p ? { ...p, creating: "create", note: `Drafting an issue for “${idea}”…`, confirm: undefined } : p));
+    try {
+      applyDraftPreview(await api.draftSpawnPreview(repo, idea), idea, "create");
+    } catch (e) {
+      setPicker((p) => (p ? { ...p, creating: undefined, note: `Failed to draft issue: ${String(e)}` } : p));
+    }
+  }
+
+  // Idea → AI draft → spawn preview (issue isn't opened until confirm).
   async function createAndSpawn() {
     if (!picker) return;
     const repo = picker.repo;
     const idea = picker.query.trim();
     if (!idea) return;
-    setPicker((p) => (p ? { ...p, note: `Drafting an issue for “${idea}” and spawning…`, confirm: undefined } : p));
+    setPicker((p) => (p ? { ...p, creating: "spawn", note: `Drafting an issue for “${idea}”…`, confirm: undefined } : p));
     try {
-      applyOutcome(await api.createIssueAndSpawn(repo, idea), idea);
+      applyDraftPreview(await api.draftSpawnPreview(repo, idea), idea, "spawn");
     } catch (e) {
-      setPicker((p) => (p ? { ...p, note: `Failed to create issue and spawn: ${String(e)}` } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, note: `Failed to draft issue: ${String(e)}` } : p));
     }
   }
 
-  // User chose to create the issue from their raw text despite Claude's prompt.
-  async function confirmRawSpawn() {
+  // User chose to proceed from their raw text despite Claude's prompt. Repeats
+  // whichever action raised it, landing on its preview built from the raw text.
+  async function confirmRaw() {
     if (!picker?.confirm) return;
     const repo = picker.repo;
-    const idea = picker.confirm.idea;
-    setPicker((p) => (p ? { ...p, note: "Creating issue from your text…", confirm: undefined } : p));
+    const { idea, action } = picker.confirm;
+    setPicker((p) => (p ? { ...p, creating: action, note: "Drafting from your text…", confirm: undefined } : p));
     try {
-      applyOutcome(await api.createIssueAndSpawn(repo, idea, true), idea);
+      applyDraftPreview(await api.draftSpawnPreview(repo, idea, true), idea, action);
     } catch (e) {
-      setPicker((p) => (p ? { ...p, note: `Failed to create issue and spawn: ${String(e)}` } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, note: `Failed: ${String(e)}` } : p));
     }
   }
 
@@ -1075,32 +1386,31 @@ function MainView() {
     return () => { shown.then((f) => f()); focus.then((f) => f()); };
   }, []);
 
-  // "Clean Up": tear down the worktree. Confirms first unless the backend says
-  // it's safe (PR merged, nothing new).
-  async function cleanUp(s: Session) {
-    setCleanupConfirm(null);
+  // Run teardown and route its outcome to the right prompt: a warnings
+  // confirmation, a "VS Code still open" block, or success (dismiss + refresh).
+  // `confirmed` skips the work-state checks; `force` skips closing the editor.
+  async function runTeardown(id: string, confirmed: boolean, force: boolean) {
     try {
-      const res = await api.teardown(s.id);
+      const res = await api.teardown(id, confirmed, force);
       if (res.status === "needs_confirmation") {
-        setCleanupConfirm({ id: s.id, warnings: res.warnings });
+        setTeardownConfirm({ id, kind: "confirm", warnings: res.warnings });
+      } else if (res.status === "blocked_by_editor") {
+        setTeardownConfirm({ id, kind: "blocked", message: res.message, accessibility: res.accessibility });
       } else {
+        setTeardownConfirm(null);
+        setCommandsOpen((open) => (open === id ? null : open));
         refreshSessions();
       }
     } catch (e) {
-      setCleanupConfirm({ id: s.id, warnings: [`Teardown failed: ${String(e)}`] });
+      setTeardownConfirm({ id, kind: "confirm", warnings: [`Teardown failed: ${String(e)}`] });
     }
   }
 
-  async function confirmCleanup(id: string) {
-    try {
-      await api.teardown(id, true);
-    } catch (e) {
-      setCleanupConfirm({ id, warnings: [`Teardown failed: ${String(e)}`] });
-      return;
-    }
-    setCleanupConfirm(null);
-    setCommandsOpen((open) => (open === id ? null : open));
-    refreshSessions();
+  // "Tear Down": remove the worktree. Confirms first unless the backend says
+  // it's safe (PR merged, nothing new).
+  function tearDown(s: Session) {
+    setTeardownConfirm(null);
+    runTeardown(s.id, false, false);
   }
 
   // Set or clear (hidden = null → unhide) hide/snooze state for a repo or work
@@ -1213,6 +1523,7 @@ function MainView() {
                     return (
                     <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
+                        <ClaudePill status={statuses[s.id]} onClick={() => api.openInEditor(s.work_dir)} />
                         <span className="workspace-title">{s.session_title}</span>
                         {sessHidden && sessSnoozeLabel && (
                           <span className="snooze-label">Snoozed · {sessSnoozeLabel}</span>
@@ -1297,7 +1608,7 @@ function MainView() {
                         ) : (
                           <button className="command-btn" onClick={() => { setCommandsOpen(null); setHideTarget({ kind: "session", session: s }); }}>Hide…</button>
                         )}
-                        <button className="command-btn" onClick={() => cleanUp(s)}>Clean Up</button>
+                        <button className="command-btn" onClick={() => tearDown(s)}>Tear Down</button>
                       </div>
                       {prc?.error && (
                         <div className="cleanup-confirm">
@@ -1321,17 +1632,30 @@ function MainView() {
                           </div>
                         </div>
                       )}
-                      {cleanupConfirm?.id === s.id && (
+                      {teardownConfirm?.id === s.id && teardownConfirm.kind === "confirm" && (
                         <div className="cleanup-confirm">
                           <p className="cleanup-lead">Remove this workspace?</p>
                           <ul className="cleanup-warnings">
-                            {cleanupConfirm.warnings.map((w, i) => (
+                            {teardownConfirm.warnings.map((w, i) => (
                               <li key={i}>{w}</li>
                             ))}
                           </ul>
                           <div className="issue-actions">
-                            <button className="btn-danger" onClick={() => confirmCleanup(s.id)}>Remove anyway</button>
-                            <button className="btn-ghost" onClick={() => setCleanupConfirm(null)}>Cancel</button>
+                            <button className="btn-danger" onClick={() => runTeardown(s.id, true, false)}>Remove anyway</button>
+                            <button className="btn-ghost" onClick={() => setTeardownConfirm(null)}>Cancel</button>
+                          </div>
+                        </div>
+                      )}
+                      {teardownConfirm?.id === s.id && teardownConfirm.kind === "blocked" && (
+                        <div className="cleanup-confirm">
+                          <p className="cleanup-lead" style={{ whiteSpace: "pre-line" }}>{teardownConfirm.message}</p>
+                          <div className="issue-actions">
+                            <button className="btn-ghost" onClick={() => api.openInEditor(s.work_dir)}>Open in VS Code</button>
+                            {teardownConfirm.accessibility && (
+                              <button className="btn-ghost" onClick={() => api.openAccessibilitySettings()}>Open Accessibility Options</button>
+                            )}
+                            <button className="btn-danger" onClick={() => runTeardown(s.id, true, true)}>Delete anyway</button>
+                            <button className="btn-ghost" onClick={() => setTeardownConfirm(null)}>Cancel</button>
                           </div>
                         </div>
                       )}
@@ -1348,73 +1672,223 @@ function MainView() {
       {picker && (() => {
         const filtered = filterIssues(picker.issues ?? [], picker.query);
         const ideaOpen = expanded?.kind === "idea";
+        const busy = !!picker.creating;
+        // Issues in this repo that already have a session, keyed by issue number,
+        // carrying the workspace color and (joined) session title(s).
+        const active: ActiveSessions = {};
+        for (const s of sessionsByRepo[picker.repo] ?? []) {
+          active[s.issue_number] = active[s.issue_number]
+            ? { color: active[s.issue_number].color, title: `${active[s.issue_number].title}, ${s.session_title}` }
+            : { color: s.color, title: s.session_title };
+        }
+        // Issues already being worked on sink to the end (stable sort keeps the
+        // backend's most-recently-modified order within each group).
+        const ordered = [...filtered].sort((a, b) => (active[a.number] ? 1 : 0) - (active[b.number] ? 1 : 0));
         return (
           <div className="overlay" onClick={closePicker}>
             <div className="overlay-panel" onClick={(e) => e.stopPropagation()}>
               <div className="overlay-header">
-                <span className="overlay-title">Start work · {picker.repo}</span>
+                <span className="overlay-title">{picker.preview ? (picker.preview.mode === "create" ? "New issue" : "Review & spawn") : "Start work"} · {picker.repo}</span>
                 <button className="icon-btn" onClick={closePicker} aria-label="Close">✕</button>
               </div>
-              <div className={`overlay-search-wrap ${ideaOpen ? "idea-open" : ""}`}>
-                <input
-                  className="text-input"
-                  type="text"
-                  placeholder="Write your own idea…"
-                  value={picker.query}
-                  onFocus={() => setExpanded({ kind: "idea" })}
-                  onChange={(e) => setPicker((p) => (p ? { ...p, query: e.target.value } : p))}
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                />
-                {ideaOpen && (
-                  <div className="issue-actions">
-                    <button className="btn-save" disabled={!picker.query.trim()} onClick={createAndSpawn}>
-                      Create Issue and Spawn
-                    </button>
-                    <button className="btn-ghost" onClick={() => setExpanded(null)}>Cancel</button>
-                  </div>
-                )}
-              </div>
-              <div className="overlay-body">
-                {picker.loading ? (
-                  <p className="repo-group-empty">Loading issues…</p>
-                ) : picker.error ? (
-                  <p className="cred-error">{picker.error}</p>
-                ) : filtered.length > 0 ? (
-                  <div className="issue-tree">
-                    {filtered.map((n) => (
-                      <IssueRow
-                        key={n.number}
-                        node={n}
-                        depth={0}
-                        expandedNumber={expanded?.kind === "issue" ? expanded.number : null}
-                        onExpand={(num) => setExpanded({ kind: "issue", number: num })}
-                        onCollapse={() => setExpanded(null)}
-                        onSpawn={spawnIssue}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <p className="repo-group-empty">{picker.query ? "No matching issues." : "No open issues."}</p>
-                )}
-                {picker.confirm && (
-                  <div className="confirm-block">
-                    <p className="confirm-lead">Claude couldn’t turn this into a clear issue:</p>
-                    <p className="confirm-msg">{picker.confirm.message}</p>
+              {picker.preview ? (() => {
+                const pv = picker.preview;
+                const isSpawn = pv.mode === "spawn";
+                // Derived names update live as the session name is edited. The
+                // backend re-derives authoritatively (and resolves collisions).
+                const slug = slugify(pv.shortTitle) || "…";
+                // On the create path the issue number isn't known yet, so show a
+                // `{issue #}` placeholder where it will be inserted on spawn.
+                const numPart = pv.issueNumber != null ? String(pv.issueNumber) : "{issue #}";
+                const workspace = `${numPart}-${slug}`;
+                const issueDirty = pv.issueNumber != null && (pv.issueTitle !== pv.origTitle || pv.issueBody !== pv.origBody);
+                const canConfirm = !!pv.issueTitle.trim() && (!isSpawn || !!pv.shortTitle.trim());
+                return (
+                  <div className="overlay-body preview-body">
+                    {isSpawn && (
+                      <>
+                        <label className="field-label">Session name</label>
+                        <input
+                          className="text-input"
+                          type="text"
+                          value={pv.shortTitle}
+                          autoFocus
+                          placeholder="short session label"
+                          disabled={pv.spawning}
+                          onChange={(e) => setPreview({ shortTitle: e.target.value })}
+                        />
+                      </>
+                    )}
+
+                    <label className="field-label">Issue title</label>
+                    <input
+                      className="text-input"
+                      value={pv.issueTitle}
+                      autoFocus={!isSpawn}
+                      disabled={pv.spawning}
+                      onChange={(e) => setPreview({ issueTitle: e.target.value })}
+                      spellCheck={false}
+                    />
+
+                    <label className="field-label">Issue description</label>
+                    <textarea
+                      className="text-input preview-desc"
+                      value={pv.issueBody}
+                      rows={5}
+                      disabled={pv.spawning}
+                      onChange={(e) => setPreview({ issueBody: e.target.value })}
+                      spellCheck={false}
+                    />
+
+                    {isSpawn && (
+                      <div className="preview-derived">
+                        <div className="preview-derived-row">
+                          <span className="preview-derived-label">Session</span>
+                          <span className="preview-session">
+                            <span className="preview-swatch" style={{ background: pv.color }} />
+                            {pv.emoji} #{numPart} — {pv.shortTitle || "…"}
+                          </span>
+                        </div>
+                        <div className="preview-derived-row">
+                          <span className="preview-derived-label">Workspace</span>
+                          <code>{workspace}</code>
+                        </div>
+                        <div className="preview-derived-row">
+                          <span className="preview-derived-label">Branch</span>
+                          <code>feature/{workspace}</code>
+                        </div>
+                        <div className="preview-derived-row">
+                          <span className="preview-derived-label">Worktree</span>
+                          <code>~/src/work-{workspace}/{pv.repoName}</code>
+                        </div>
+                      </div>
+                    )}
+
+                    {!isSpawn ? (
+                      <p className="session-hint">A new issue will be created on GitHub.</p>
+                    ) : pv.issueNumber == null ? (
+                      <p className="session-hint">A new issue is created on spawn; its number is prefixed to the branch and worktree names.</p>
+                    ) : issueDirty ? (
+                      <p className="session-hint">Saving will update issue #{pv.issueNumber} on GitHub.</p>
+                    ) : null}
+                    {pv.error && <p className="cred-error">{pv.error}</p>}
+
                     <div className="issue-actions">
-                      <button className="btn-save" onClick={confirmRawSpawn}>Create issue from my text</button>
                       <button
-                        className="btn-ghost"
-                        onClick={() => setPicker((p) => (p ? { ...p, confirm: undefined } : p))}
+                        className={`btn-save ${pv.spawning ? "btn-loading" : ""}`}
+                        disabled={pv.spawning || !canConfirm}
+                        onClick={confirmPreview}
                       >
-                        Cancel
+                        {isSpawn ? (pv.issueNumber == null ? "Create & Spawn" : "Spawn") : "Create Issue"}
                       </button>
+                      <button className="btn-ghost" disabled={pv.spawning} onClick={cancelPreview}>Cancel</button>
                     </div>
                   </div>
-                )}
-                {picker.note && <p className="issue-note">{picker.note}</p>}
-              </div>
+                );
+              })() : (
+                <>
+                  <div className={`overlay-search-wrap ${ideaOpen ? "idea-open" : ""}`}>
+                    <textarea
+                      ref={ideaRef}
+                      className="text-input idea-textarea"
+                      placeholder="Write your own idea…"
+                      rows={1}
+                      value={picker.query}
+                      onFocus={() => setExpanded({ kind: "idea" })}
+                      onChange={(e) => setPicker((p) => (p ? { ...p, query: e.target.value } : p))}
+                      onKeyDown={(e) => {
+                        // ⌘/Ctrl+Enter submits the primary action; plain Enter is a newline.
+                        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                          e.preventDefault();
+                          if (picker.query.trim() && !busy) createAndSpawn();
+                        }
+                      }}
+                      spellCheck={false}
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                    />
+                    {ideaOpen && (
+                      <div className="issue-actions">
+                        <button
+                          className={`btn-ghost ${picker.creating === "create" ? "btn-loading" : ""}`}
+                          disabled={!picker.query.trim() || busy}
+                          onClick={createIssueOnly}
+                        >
+                          Create Issue
+                        </button>
+                        <button
+                          className={`btn-save ${picker.creating === "spawn" ? "btn-loading" : ""}`}
+                          disabled={!picker.query.trim() || busy}
+                          onClick={createAndSpawn}
+                        >
+                          Create Issue and Spawn
+                        </button>
+                        <button
+                          className="btn-ghost"
+                          disabled={busy}
+                          onClick={() => {
+                            setExpanded(null);
+                            setPicker((p) => (p ? { ...p, query: "" } : p));
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="overlay-body">
+                    <div className="issue-list-toolbar">
+                      <span className="issue-list-label">Open issues</span>
+                      <button
+                        className="btn-add"
+                        onClick={refreshIssues}
+                        disabled={picker.loading || picker.refreshing}
+                        title="Refresh issues"
+                      >
+                        {picker.refreshing ? "Refreshing…" : "↻ Refresh"}
+                      </button>
+                    </div>
+                    {picker.loading ? (
+                      <p className="repo-group-empty">Loading issues…</p>
+                    ) : picker.error ? (
+                      <p className="cred-error">{picker.error}</p>
+                    ) : ordered.length > 0 ? (
+                      <div className="issue-tree">
+                        {ordered.map((n) => (
+                          <IssueRow
+                            key={n.number}
+                            node={n}
+                            depth={0}
+                            expandedNumber={expanded?.kind === "issue" ? expanded.number : null}
+                            active={active}
+                            onExpand={(num) => setExpanded({ kind: "issue", number: num })}
+                            onCollapse={() => setExpanded(null)}
+                            onSpawn={spawnIssue}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="repo-group-empty">{picker.query ? "No matching issues." : "No open issues."}</p>
+                    )}
+                    {picker.confirm && (
+                      <div className="confirm-block">
+                        <p className="confirm-lead">Claude couldn’t turn this into a clear issue:</p>
+                        <p className="confirm-msg">{picker.confirm.message}</p>
+                        <div className="issue-actions">
+                          <button className="btn-save" onClick={confirmRaw}>Create issue from my text</button>
+                          <button
+                            className="btn-ghost"
+                            onClick={() => setPicker((p) => (p ? { ...p, confirm: undefined } : p))}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {picker.note && <p className="issue-note">{picker.note}</p>}
+                  </div>
+                </>
+              )}
             </div>
           </div>
         );

@@ -74,7 +74,7 @@ pub fn load_all() -> Vec<Session> {
     let Ok(entries) = std::fs::read_dir(sessions_dir()) else { return Vec::new(); };
     entries
         .flatten()
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
         .filter_map(|e| {
             let data = std::fs::read_to_string(e.path()).ok()?;
             serde_json::from_str(&data).ok()

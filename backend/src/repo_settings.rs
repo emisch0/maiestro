@@ -22,6 +22,13 @@ pub struct RepoSettings {
     pub identity_id: Option<String>,
     /// Absolute path to the local checkout directory.
     pub checkout_dir: Option<String>,
+    /// Prefix for worktree locations. The full worktree path is
+    /// `<worktree_prefix><workspace>/<repo>` (a string concatenation — the
+    /// trailing segment is part of the directory name, not a path component).
+    /// `None` falls back to `~/src/work-` at the use site, preserving the
+    /// original hardcoded behavior. Tilde-expanded via `expand_tilde` in spawn.
+    #[serde(default)]
+    pub worktree_prefix: Option<String>,
     /// Env files relative to checkout_dir to source when launching user-facing tools.
     pub env_files: Vec<String>,
     /// Repo-level hide/snooze state. `None` = visible. A hidden repo hides its
@@ -38,6 +45,7 @@ impl RepoSettings {
             repo: repo.to_owned(),
             identity_id: None,
             checkout_dir: Some(format!("{home}/src/{name}")),
+            worktree_prefix: None,
             env_files: Vec::new(),
             hidden: None,
         }
@@ -103,7 +111,7 @@ pub fn repos_list() -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(repos_dir()) else { return Vec::new(); };
     let mut repos: Vec<String> = entries
         .flatten()
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
         .filter_map(|e| {
             let data = std::fs::read_to_string(e.path()).ok()?;
             let s: RepoSettings = serde_json::from_str(&data).ok()?;
