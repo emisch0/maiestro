@@ -154,54 +154,67 @@ body {
   white-space: nowrap;
 }
 
-/* Live session status (busy / needs-you / idle), between the title and the pill. */
-.status-indicator {
+/* Claude session pill: the Claude mark tints by live session state, with the
+   status word beside it. Sits between the title and the action pill group, and
+   clicking it opens the session's VS Code window. */
+.claude-pill {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   flex-shrink: 0;
+  padding: 3px 9px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--font);
   font-size: 10px;
-  font-weight: 500;
+  font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--muted);
   white-space: nowrap;
+  cursor: pointer;
 }
 
-.status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--muted);
+.claude-pill:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.claude-pill-mark {
+  width: 12px;
+  height: 12px;
   flex-shrink: 0;
-}
-
-/* Working: a calm green that gently pulses while a tool runs. */
-.status-indicator--busy {
-  color: var(--green);
-}
-.status-indicator--busy .status-dot {
-  background: var(--green);
-  animation: status-pulse 1.4s ease-in-out infinite;
-}
-
-/* Needs you: the accent color, steady and prominent. */
-.status-indicator--needs_you {
-  color: var(--accent);
-}
-.status-indicator--needs_you .status-dot {
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-bg);
-}
-
-/* Ready / idle stay muted. */
-.status-indicator--running,
-.status-indicator--idle {
   color: var(--muted);
 }
 
-@keyframes status-pulse {
+/* Working: green mark that gently pulses while a tool runs. */
+.claude-pill--busy .claude-pill-mark {
+  color: var(--green);
+  animation: claude-pulse 1.4s ease-in-out infinite;
+}
+.claude-pill--busy .claude-pill-label {
+  color: var(--green);
+}
+
+/* Needs you: amber and emphasized — the actionable state. */
+.claude-pill--needs_you {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.claude-pill--needs_you .claude-pill-mark {
+  color: var(--accent);
+}
+
+/* Ready / idle: muted mark. */
+.claude-pill--running .claude-pill-mark,
+.claude-pill--idle .claude-pill-mark {
+  color: var(--muted);
+}
+
+@keyframes claude-pulse {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
+  50% { opacity: 0.4; }
 }
 
 /* Right-aligned segmented pill of icon actions on a session row. */

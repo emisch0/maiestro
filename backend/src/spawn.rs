@@ -247,6 +247,13 @@ fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
         ("SessionStart", group("running")),
         ("UserPromptSubmit", group("busy")),
         ("PreToolUse", matcher_group("busy")),
+        // PostToolUse is the event that fires *after* an approved permission
+        // prompt's tool completes — the only signal that Claude has resumed
+        // working. Without it, a session sticks on `needs_you` (from the prompt's
+        // Notification) all the way through the rest of the turn, even while
+        // Claude is actively thinking. PreToolUse alone can't cover this: it
+        // fires *before* the prompt, not after approval.
+        ("PostToolUse", matcher_group("busy")),
         ("Notification", group("notification")),
         ("Stop", group("idle")),
         ("SessionEnd", group("ended")),

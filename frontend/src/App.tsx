@@ -6,6 +6,7 @@ import EyeIcon from "./icons/eye.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
 import FolderIcon from "./icons/folder.svg?react";
 import VSCodeIcon from "./icons/vscode.svg?react";
+import ClaudeIcon from "./icons/claude.svg?react";
 import ChevronRightIcon from "./icons/chevron-right.svg?react";
 import PrOpenIcon from "./icons/pull-request-open.svg?react";
 import PrDraftIcon from "./icons/pull-request-draft.svg?react";
@@ -825,17 +826,27 @@ const STATUS_LABELS: Record<string, string> = {
   idle: "Idle",
 };
 
-function StatusIndicator({ status }: { status?: StatusRecord }) {
+// The Claude session pill: the Claude mark tints by live state (green=working,
+// amber=needs you, muted=ready/idle), with the status word beside it. Clicking
+// jumps to where the session lives — the worktree's VS Code window (there is no
+// deep link to the remote-controlled session itself). Renders nothing until a
+// status exists, and once the session has ended.
+function ClaudePill({ status, onClick }: { status?: StatusRecord; onClick: () => void }) {
   if (!status || status.state === "ended") return null;
   const label = STATUS_LABELS[status.state];
   if (!label) return null;
   // `needs_you` carries the reason (e.g. the permission request) in `detail`.
-  const title = status.detail ? `${label} — ${status.detail}` : label;
+  const title = status.detail ? `Claude · ${label} — ${status.detail}` : `Claude · ${label}`;
   return (
-    <span className={`status-indicator status-indicator--${status.state}`} title={title}>
-      <span className="status-dot" />
-      {status.state === "needs_you" ? "Needs you" : label}
-    </span>
+    <button
+      className={`claude-pill claude-pill--${status.state}`}
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+    >
+      <ClaudeIcon className="claude-pill-mark" />
+      <span className="claude-pill-label">{label}</span>
+    </button>
   );
 }
 
@@ -1425,7 +1436,7 @@ function MainView() {
                     <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
                         <span className="workspace-title">{s.session_title}</span>
-                        <StatusIndicator status={statuses[s.id]} />
+                        <ClaudePill status={statuses[s.id]} onClick={() => api.openInEditor(s.work_dir)} />
                         {sessHidden && sessSnoozeLabel && (
                           <span className="snooze-label">Snoozed · {sessSnoozeLabel}</span>
                         )}
