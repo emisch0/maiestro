@@ -872,6 +872,19 @@ function MainView() {
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
                         <span className="workspace-title">{s.session_title}</span>
                         <div className="session-pill">
+                          {prs[s.id] && (
+                            <button
+                              className={`pill-btn pill-btn--pr pill-btn--pr-${prs[s.id]!.state}`}
+                              onClick={() => api.openUrl(prs[s.id]!.html_url)}
+                              title={`Open PR #${prs[s.id]!.number} (${prs[s.id]!.state}) on GitHub`}
+                              aria-label="Open pull request on GitHub"
+                            >
+                              <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z" />
+                              </svg>
+                              #{prs[s.id]!.number}
+                            </button>
+                          )}
                           <button
                             className="pill-btn"
                             onClick={() => api.openUrl(s.issue_url)}
@@ -902,19 +915,6 @@ function MainView() {
                               <path d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z" />
                             </svg>
                           </button>
-                          {prs[s.id] && (
-                            <button
-                              className={`pill-btn pill-btn--pr pill-btn--pr-${prs[s.id]!.state}`}
-                              onClick={() => api.openUrl(prs[s.id]!.html_url)}
-                              title={`Open PR #${prs[s.id]!.number} (${prs[s.id]!.state}) on GitHub`}
-                              aria-label="Open pull request on GitHub"
-                            >
-                              <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                                <path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z" />
-                              </svg>
-                              #{prs[s.id]!.number}
-                            </button>
-                          )}
                         </div>
                         <button
                           className={`row-expander ${cmdOpen ? "row-expander--open" : ""}`}
