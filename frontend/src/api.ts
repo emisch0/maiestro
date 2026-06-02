@@ -99,6 +99,9 @@ export const api = {
   openPath: (path: string) =>
     invoke<void>("open_path", { path }),
 
+  openInEditor: (workDir: string) =>
+    invoke<void>("open_in_editor", { workDir }),
+
   spawnWork: (repo: string, issueNumber: number, forceNew = false) =>
     invoke<SpawnResult>("spawn_work", { repo, issueNumber, forceNew }),
 

@@ -184,6 +184,56 @@ fn open_vscode(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The substring that identifies a worktree's VS Code window — the same
+/// `work_parent/rootName` we bake into `window.title` on spawn.
+fn window_marker(work_dir: &Path) -> Option<String> {
+    let name = work_dir.file_name()?.to_str()?;
+    let parent = work_dir.parent()?.file_name()?.to_str()?;
+    Some(format!("{parent}/{name}"))
+}
+
+/// Look for an open VS Code window whose title contains `marker` and, if found,
+/// raise it to the front and activate the app. Returns true when one was
+/// focused. Requires Accessibility permission for System Events; any failure
+/// (including a missing grant) is treated as "not found" so the caller can fall
+/// back to launching a window.
+async fn focus_editor_window(marker: &str) -> bool {
+    // marker is path-safe (slug + repo dir name); strip quotes defensively.
+    let safe = marker.replace('"', "");
+    let script = format!(
+        r#"tell application "System Events"
+  if not (exists process "Code") then return "notfound"
+  tell process "Code"
+    repeat with w in windows
+      if name of w contains "{safe}" then
+        perform action "AXRaise" of w
+        set frontmost to true
+        return "focused"
+      end if
+    end repeat
+  end tell
+end tell
+return "notfound""#
+    );
+    match tokio::process::Command::new("osascript").arg("-e").arg(&script).output().await {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim() == "focused",
+        Err(_) => false,
+    }
+}
+
+/// Open the worktree in VS Code: focus (and bring to the front) an existing
+/// window for that folder if one is open, otherwise launch a new window.
+#[tauri::command]
+pub async fn open_in_editor(work_dir: String) -> Result<(), String> {
+    let path = PathBuf::from(&work_dir);
+    if let Some(marker) = window_marker(&path) {
+        if focus_editor_window(&marker).await {
+            return Ok(());
+        }
+    }
+    open_vscode(&path)
+}
+
 // ── Command ─────────────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]

@@ -70,6 +70,7 @@ fn main() {
             links::open_path,
             spawn::spawn_work,
             spawn::create_issue_and_spawn,
+            spawn::open_in_editor,
             sessions::sessions_list,
         ])
         .setup(|app| {
@@ -91,7 +92,7 @@ fn main() {
                 })
                 .on_tray_icon_event(|tray, event| {
                     let app = tray.app_handle();
-                    // Cache the tray rectangle so Position::TrayCenter works.
+                    // Cache the tray rectangle so the positioner can place the window.
                     tauri_plugin_positioner::on_tray_event(app, &event);
 
                     if let TrayIconEvent::Click {
