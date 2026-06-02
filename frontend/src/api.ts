@@ -100,6 +100,18 @@ export interface PrLink {
   state: string;
 }
 
+export interface PrChecks {
+  /** One of "passed", "failed", "running", "pending", "none". */
+  state: string;
+  /** Any check actively in_progress — animate the indicator only when true. */
+  running: boolean;
+  /** GitHub reports the PR mergeable (`mergeable_state == "clean"`). */
+  ready_to_merge: boolean;
+  /** Raw GitHub mergeable_state: clean / dirty / behind / blocked / unstable /
+   *  draft / unknown. Used to stop the auto-merge loop on terminal blockers. */
+  mergeable_state: string;
+}
+
 /** Live per-session status, written by the `maiestro hook` helper and watched
  *  by the backend. Pushed to the UI via the `session-status` event and read in
  *  bulk via `sessions_status_list`. */
@@ -217,6 +229,12 @@ export const api = {
 
   createPr: (sessionId: string) =>
     invoke<PrLink>("session_create_pr", { sessionId }),
+
+  sessionPrChecks: (sessionId: string) =>
+    invoke<PrChecks | null>("session_pr_checks", { sessionId }),
+
+  mergePr: (sessionId: string) =>
+    invoke<PrLink>("session_merge_pr", { sessionId }),
 
   logsRead: () =>
     invoke<string>("logs_read"),

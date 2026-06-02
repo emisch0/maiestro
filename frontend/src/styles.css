@@ -263,6 +263,42 @@ body {
   height: 13px;
 }
 
+/* Check indicator on the PR pill: a small dot whose colour reflects CI state.
+   Only the "running" state animates (a spinning ring); queued/pending stays a
+   static dot, per the active-runs-only requirement. */
+.check-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.check-dot--passed { background: var(--green); }
+.check-dot--failed { background: var(--red); }
+.check-dot--pending { background: var(--muted); }
+.check-dot--running { background: var(--accent); }
+
+.check-dot--spin {
+  background: transparent;
+  border: 1.5px solid var(--accent);
+  border-top-color: transparent;
+  animation: check-spin 0.7s linear infinite;
+}
+
+@keyframes check-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Respect reduced-motion: fall back to a solid dot instead of spinning. */
+@media (prefers-reduced-motion: reduce) {
+  .check-dot--spin {
+    background: var(--accent);
+    border: none;
+    animation: none;
+  }
+}
+
 /* Expand/collapse chevron in the last column; rotates to point down when open. */
 .row-expander {
   flex-shrink: 0;

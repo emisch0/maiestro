@@ -1506,3 +1506,196 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
     tracing::info!(repo = %session.repo, branch = %branch, pr = link.number, "created pull request");
     Ok(link)
 }
+
+// ── PR checks & merge ─────────────────────────────────────────────────────────
+
+/// Aggregate CI/merge state of a session's PR, surfaced to the UI to drive the
+/// pill's check indicator and gate auto-merge.
+#[derive(serde::Serialize)]
+pub struct PrChecks {
+    /// One of "passed" / "failed" / "running" / "pending" / "none".
+    pub state: String,
+    /// Whether any check is actively `in_progress` — drives the spinner so it
+    /// animates only during active runs, not while checks are merely queued.
+    pub running: bool,
+    /// GitHub's `mergeable_state == "clean"`: required checks and (where branch
+    /// protection requires them) approvals are satisfied, so a merge will land.
+    pub ready_to_merge: bool,
+    /// Raw GitHub `mergeable_state` (clean / dirty / behind / blocked / unstable
+    /// / draft / unknown). Lets the UI stop the auto-merge loop on states that
+    /// won't self-resolve (behind, conflicts, required review) instead of waiting.
+    pub mergeable_state: String,
+}
+
+/// Collapse a commit's check runs into one label. Failure wins over running,
+/// running over pending; "none" means the head commit has no checks at all.
+fn aggregate_checks(runs: &[serde_json::Value]) -> String {
+    if runs.is_empty() {
+        return "none".to_string();
+    }
+    let mut any_running = false;
+    let mut any_failed = false;
+    let mut all_complete = true;
+    for r in runs {
+        match r["status"].as_str().unwrap_or("") {
+            "completed" => {
+                let ok = matches!(
+                    r["conclusion"].as_str(),
+                    Some("success") | Some("neutral") | Some("skipped")
+                );
+                if !ok {
+                    any_failed = true;
+                }
+            }
+            "in_progress" => {
+                any_running = true;
+                all_complete = false;
+            }
+            _ => all_complete = false, // queued / waiting / pending
+        }
+    }
+    if any_failed {
+        "failed".to_string()
+    } else if any_running {
+        "running".to_string()
+    } else if all_complete {
+        "passed".to_string()
+    } else {
+        "pending".to_string()
+    }
+}
+
+/// Check status for a session's open PR, if any. Mirrors `session_pr`'s soft-fail
+/// contract: `Ok(None)` when the session is gone, the repo has no identity, or
+/// the branch has no open PR. Only an actual API failure surfaces as `Err`, which
+/// the frontend also degrades silently (no indicator).
+#[tauri::command]
+pub async fn session_pr_checks(session_id: String) -> Result<Option<PrChecks>, String> {
+    let Some(session) = crate::sessions::get(&session_id) else {
+        return Ok(None);
+    };
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let Some(identity_id) = settings.identity_id else {
+        return Ok(None);
+    };
+    let gh = GitHub::for_identity(&identity_id)?;
+    let prs = gh.pulls_for_branch(&session.repo, &session.branch).await?;
+
+    let created_at = |p: &&serde_json::Value| p["created_at"].as_str().unwrap_or("").to_string();
+    let Some(pr) = prs
+        .iter()
+        .filter(|p| p["state"].as_str() == Some("open"))
+        .max_by_key(created_at)
+    else {
+        return Ok(None);
+    };
+    let Some(number) = pr["number"].as_u64() else {
+        return Ok(None);
+    };
+    let head_sha = pr["head"]["sha"].as_str().unwrap_or("").to_string();
+
+    // `mergeable_state` is only populated on the single-PR endpoint, not the list.
+    let full = gh.pull(&session.repo, number).await?;
+    let mergeable_state = full["mergeable_state"].as_str().unwrap_or("unknown").to_string();
+    let ready_to_merge = mergeable_state == "clean";
+
+    let runs = if head_sha.is_empty() {
+        Vec::new()
+    } else {
+        gh.check_runs(&session.repo, &head_sha).await.unwrap_or_default()
+    };
+    let running = runs.iter().any(|r| r["status"].as_str() == Some("in_progress"));
+
+    Ok(Some(PrChecks {
+        state: aggregate_checks(&runs),
+        running,
+        ready_to_merge,
+        mergeable_state,
+    }))
+}
+
+/// Merge a session's PR, creating it first if needed. Before touching GitHub it
+/// reconciles the **local worktree** so the merge can't land a stale remote: it
+/// blocks on uncommitted changes and pushes any committed-but-unpushed local
+/// commits (so the PR head reflects local HEAD). Then it reuses/creates the PR,
+/// marks a draft ready for review (a draft can't be merged and its checks don't
+/// gate), and merges — but only once GitHub reports the PR `clean`.
+///
+/// States that won't self-resolve surface as `Err` so the UI can stop waiting:
+/// `dirty` (conflicts) and `behind` (out of date with base). Transient states
+/// (checks still running, GitHub recomputing) return the PR unmerged so the
+/// frontend poll retries.
+#[tauri::command]
+pub async fn session_merge_pr(session_id: String) -> Result<PrLink, String> {
+    let session = crate::sessions::get(&session_id)
+        .ok_or_else(|| format!("session not found: {session_id}"))?;
+    let work_dir = PathBuf::from(&session.work_dir);
+    let branch = session.branch.clone();
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let identity_id = settings
+        .identity_id
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
+
+    // Guard: uncommitted work would be silently excluded — the merge lands the
+    // pushed branch, not the worktree. Block and ask the user to commit first.
+    let dirty = git(&work_dir, &["status", "--porcelain"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if dirty {
+        return Err("This worktree has uncommitted changes. Commit them first, then merge.".to_string());
+    }
+
+    // Reconcile committed-but-unpushed local commits before merging: refresh the
+    // remote ref, and if local HEAD is ahead, push so the PR head includes them.
+    git(&work_dir, &["fetch", "origin", &branch, "--quiet"]).ok();
+    let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{branch}..HEAD")])
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    if ahead > 0 {
+        git(&work_dir, &["push", "origin", &branch])
+            .map_err(|e| format!("could not push local commits before merging: {e}"))?;
+    }
+
+    // Ensure a PR exists: reuse an open one, else create (which drafts + pushes).
+    let prs = gh.pulls_for_branch(&session.repo, &branch).await?;
+    let number = match prs.iter().find(|p| p["state"].as_str() == Some("open")) {
+        Some(p) => p["number"].as_u64().unwrap_or(0),
+        None => session_create_pr(session_id.clone()).await?.number,
+    };
+
+    // Re-fetch so `draft` / `mergeable_state` reflect the (possibly just-created)
+    // PR and any commits we just pushed.
+    let mut pr = gh.pull(&session.repo, number).await?;
+
+    // A draft can't be merged and its checks don't gate; promote it first.
+    if pr["draft"].as_bool().unwrap_or(false) {
+        let node_id = pr["node_id"].as_str().unwrap_or("").to_string();
+        if node_id.is_empty() {
+            return Err("could not resolve PR node id to mark it ready for review".to_string());
+        }
+        gh.mark_ready(&node_id).await?;
+        pr = gh.pull(&session.repo, number).await?;
+    }
+
+    match pr["mergeable_state"].as_str().unwrap_or("") {
+        "clean" => {
+            gh.merge_pull(&session.repo, number, "merge").await?;
+            let merged = gh.pull(&session.repo, number).await?;
+            Ok(pr_link_from(&merged))
+        }
+        "dirty" => Err(format!(
+            "PR #{number} has merge conflicts with {base}. Resolve them in the worktree and push, then merge.",
+            base = session.default_branch,
+        )),
+        "behind" => Err(format!(
+            "PR #{number} is behind {base}. Update the branch (merge or rebase {base}) and push, then merge.",
+            base = session.default_branch,
+        )),
+        // blocked / unstable / unknown (null while GitHub recomputes): transient
+        // or gated on checks/review — return the PR as-is so the poll keeps
+        // waiting; the frontend decides when a blocker is terminal.
+        _ => Ok(pr_link_from(&pr)),
+    }
+}

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord } from "./api";
+import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord } from "./api";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
@@ -21,6 +21,30 @@ const PR_STATE_ICONS: Record<string, typeof PrOpenIcon> = {
   merged: PrMergedIcon,
   closed: PrClosedIcon,
 };
+
+// Tooltip text for the PR pill's check indicator.
+function checkLabel(checks: PrChecks): string {
+  switch (checks.state) {
+    case "running": return "Checks running…";
+    case "pending": return "Checks queued";
+    case "passed": return checks.ready_to_merge ? "Checks passed — ready to merge" : "Checks passed";
+    case "failed": return "A required check failed";
+    default: return "";
+  }
+}
+
+// A terminal reason the auto-merge can't proceed and won't self-resolve, or null
+// to keep waiting. Distinct from a transient wait (checks still running, GitHub
+// recomputing): these need the user to act, so the loop stops and surfaces them.
+// "blocked" is only terminal once checks are green (= a required review is the
+// holdout); while checks run, a blocked state is just the normal waiting path.
+function mergeBlocker(c: PrChecks): string | null {
+  if (c.state === "failed") return "A required check failed — fix it and push, then merge again.";
+  if (c.mergeable_state === "dirty") return "Merge conflicts with the base branch — resolve them and push, then merge again.";
+  if (c.mergeable_state === "behind") return "Branch is behind the base — update it (merge or rebase) and push, then merge again.";
+  if (c.mergeable_state === "blocked" && c.state === "passed") return "Blocked by a required review — get an approval, then merge again.";
+  return null;
+}
 
 // A pending Tear Down prompt: a warnings confirmation, or a "VS Code still open"
 // block (which may offer the Accessibility shortcut so mAIestro can close it).
@@ -993,6 +1017,15 @@ function MainView() {
   // Create-PR progress/error per session id: `{ creating }` while in flight,
   // `{ error }` after a failure. Absent = idle.
   const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; error?: string }>>({});
+  // PR check status per session id, polled from GitHub while the popover is open.
+  // Absent = not yet fetched; null = no open PR (or lookup failed).
+  const [prChecks, setPrChecks] = useState<Record<string, PrChecks | null>>({});
+  // Merge-PR state per session id. `intent` keeps the auto-merge watcher armed
+  // until the PR lands; `merging` guards against overlapping merge attempts.
+  const [prMerge, setPrMerge] = useState<Record<string, { intent?: boolean; merging?: boolean; error?: string }>>({});
+  // Whether the menu-bar popover is currently open. Gates check polling so we
+  // don't hit GitHub while the window is hidden.
+  const [popoverOpen, setPopoverOpen] = useState(true);
   // Global toggle: reveal hidden/snoozed repos and work items (dimmed).
   const [showHidden, setShowHidden] = useState(false);
   // Per-repo settings, keyed by repo full_name — the source of repo-level hide state.
@@ -1300,6 +1333,77 @@ function MainView() {
     }
   }
 
+  // One merge attempt for a session: ensure-create + mark-ready + merge-if-clean
+  // happen in the backend. A landed PR (`state === "merged"`) clears the intent;
+  // a PR that isn't mergeable yet comes back unmerged and stays armed for the
+  // next poll to retry; a hard failure (conflict, auth) surfaces in the panel.
+  const runMerge = useCallback(async (id: string) => {
+    setPrMerge((prev) => ({ ...prev, [id]: { ...prev[id], intent: true, merging: true, error: undefined } }));
+    try {
+      const pr = await api.mergePr(id);
+      setPrs((prev) => ({ ...prev, [id]: pr }));
+      setPrMerge((prev) =>
+        pr.state === "merged"
+          ? { ...prev, [id]: {} }
+          : { ...prev, [id]: { ...prev[id], merging: false } },
+      );
+    } catch (e) {
+      setPrMerge((prev) => ({ ...prev, [id]: { error: String(e) } }));
+    }
+  }, []);
+
+  // "Merge PR": arm the auto-merge watcher and take the first attempt now, which
+  // creates the PR if missing and promotes a draft so its checks start running.
+  function startMerge(s: Session) {
+    void runMerge(s.id);
+  }
+
+  // Latest sessions/PR/merge state reachable from the polling interval without
+  // re-arming it on every keystroke of state.
+  const pollRef = useRef({ sessions, prs, prMerge });
+  pollRef.current = { sessions, prs, prMerge };
+
+  // Poll check status for every session that has a PR or an armed merge, and let
+  // a poll that finds the PR mergeable drive the next auto-merge attempt (so
+  // retries are naturally paced to the poll, not a render loop).
+  const pollChecks = useCallback(() => {
+    const { sessions, prs, prMerge } = pollRef.current;
+    for (const s of sessions) {
+      if (!prs[s.id] && !prMerge[s.id]?.intent) continue;
+      api.sessionPrChecks(s.id)
+        .then((c) => {
+          setPrChecks((prev) => ({ ...prev, [s.id]: c }));
+          const m = pollRef.current.prMerge[s.id];
+          if (!c || !m?.intent || m.merging) return;
+          if (c.ready_to_merge) {
+            void runMerge(s.id);
+            return;
+          }
+          // Stop waiting on a blocker the user must clear; otherwise keep polling.
+          const blocker = mergeBlocker(c);
+          if (blocker) setPrMerge((prev) => ({ ...prev, [s.id]: { error: blocker } }));
+        })
+        .catch(() => {});
+    }
+  }, [runMerge]);
+
+  // Run the poll on an interval, but only while the popover is open.
+  useEffect(() => {
+    if (!popoverOpen) return;
+    pollChecks();
+    const id = setInterval(pollChecks, 6000);
+    return () => clearInterval(id);
+  }, [popoverOpen, pollChecks]);
+
+  // Track popover open/close: the backend emits "popover-shown" on each show,
+  // and the window blurs (hides) when it closes.
+  useEffect(() => {
+    const win = getCurrentWindow();
+    const shown = win.listen("popover-shown", () => setPopoverOpen(true));
+    const focus = win.onFocusChanged(({ payload }) => { if (!payload) setPopoverOpen(false); });
+    return () => { shown.then((f) => f()); focus.then((f) => f()); };
+  }, []);
+
   // Run teardown and route its outcome to the right prompt: a warnings
   // confirmation, a "VS Code still open" block, or success (dismiss + refresh).
   // `confirmed` skips the work-state checks; `force` skips closing the editor.
@@ -1432,6 +1536,8 @@ function MainView() {
                     // so disable Create PR; the pill links to it.
                     const prOpen = pr?.state === "open" || pr?.state === "draft";
                     const prc = prCreate[s.id];
+                    const checks = prChecks[s.id];
+                    const pm = prMerge[s.id];
                     return (
                     <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
@@ -1450,6 +1556,13 @@ function MainView() {
                             >
                               <PrIcon />
                               #{pr.number}
+                              {checks && checks.state !== "none" && (
+                                <span
+                                  className={`check-dot check-dot--${checks.state}${checks.running ? " check-dot--spin" : ""}`}
+                                  title={checkLabel(checks)}
+                                  aria-label={checkLabel(checks)}
+                                />
+                              )}
                             </button>
                           )}
                           <button
@@ -1496,8 +1609,18 @@ function MainView() {
                         >
                           {prc?.creating ? "Creating PR…" : "Create PR"}
                         </button>
-                        {/* Merge PR is UI-only for now. */}
-                        <button className="command-btn" onClick={() => {}}>Merge PR</button>
+                        <button
+                          className="command-btn"
+                          onClick={() => startMerge(s)}
+                          disabled={pm?.intent || pr?.state === "merged"}
+                          title={
+                            pr?.state === "merged"
+                              ? `PR #${pr.number} is already merged`
+                              : "Create the PR if needed, wait for checks, then merge"
+                          }
+                        >
+                          {pr?.state === "merged" ? "Merged" : pm?.intent ? "Merging…" : "Merge PR"}
+                        </button>
                         {sessHidden ? (
                           <button className="command-btn" onClick={() => applyVisibility({ kind: "session", session: s }, null)}>Unhide</button>
                         ) : (
@@ -1513,6 +1636,17 @@ function MainView() {
                           </ul>
                           <div className="issue-actions">
                             <button className="btn-ghost" onClick={() => setPrCreate((prev) => ({ ...prev, [s.id]: {} }))}>Dismiss</button>
+                          </div>
+                        </div>
+                      )}
+                      {pm?.error && (
+                        <div className="cleanup-confirm">
+                          <p className="cleanup-lead">Couldn't merge the PR</p>
+                          <ul className="cleanup-warnings">
+                            <li>{pm.error}</li>
+                          </ul>
+                          <div className="issue-actions">
+                            <button className="btn-ghost" onClick={() => setPrMerge((prev) => ({ ...prev, [s.id]: {} }))}>Dismiss</button>
                           </div>
                         </div>
                       )}
