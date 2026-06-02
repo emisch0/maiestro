@@ -169,6 +169,54 @@ mod tests {
     }
 }
 
+/// Absolute path to today's (UTC) log file — the same scheme the writer uses.
+fn today_log_path() -> PathBuf {
+    let now = OffsetDateTime::now_utc();
+    let (y, m, d) = (now.year(), u8::from(now.month()), now.day());
+    log_root()
+        .join(format!("l{y:04}{m:02}"))
+        .join(format!("maiestro-{y:04}{m:02}{d:02}.log"))
+}
+
+/// Read the tail of today's log file (last `MAX_LINES` lines) for the in-app log
+/// viewer. Returns an empty string when no log file exists yet today.
+///
+/// Deliberately does NOT emit an invocation log line: the viewer polls this every
+/// couple of seconds, which would otherwise flood the log with `logs_read` entries.
+#[tauri::command]
+pub fn logs_read() -> Result<String, String> {
+    const MAX_LINES: usize = 500;
+    let path = today_log_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(MAX_LINES);
+    Ok(lines[start..].join("\n"))
+}
+
+/// Reveal today's log file in Finder (falling back to its directory, then the log
+/// root) so the user can open the full history or older days' files.
+#[tauri::command]
+pub fn logs_reveal() -> Result<(), String> {
+    crate::log_invoke!("logs_reveal");
+    let file = today_log_path();
+    let mut cmd = std::process::Command::new("open");
+    if file.exists() {
+        cmd.arg("-R").arg(&file); // reveal-and-select the file
+    } else if let Some(dir) = file.parent().filter(|d| d.exists()) {
+        cmd.arg(dir);
+    } else {
+        let root = log_root();
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        cmd.arg(&root);
+    }
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Log a Tauri command invocation at `info`. Call as the first statement of a
 /// `#[tauri::command]`. Pass the command name and any non-secret key args using
 /// `tracing` field syntax — NEVER a credential value.
@@ -183,5 +231,18 @@ macro_rules! log_invoke {
     };
     ($cmd:expr, $($field:tt)+) => {
         ::tracing::info!(target: "invoke", command = $cmd, $($field)+, "command invoked")
+    };
+}
+
+/// Like [`log_invoke!`] but at `debug` — for high-frequency, read-only "get
+/// status" commands (list/get queries the UI polls) that would otherwise drown
+/// the `info` log. They reappear with `RUST_LOG=debug`.
+#[macro_export]
+macro_rules! log_invoke_debug {
+    ($cmd:expr) => {
+        ::tracing::debug!(target: "invoke", command = $cmd, "command invoked")
+    };
+    ($cmd:expr, $($field:tt)+) => {
+        ::tracing::debug!(target: "invoke", command = $cmd, $($field)+, "command invoked")
     };
 }

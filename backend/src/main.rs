@@ -91,6 +91,8 @@ fn main() {
             spawn::session_create_pr,
             sessions::sessions_list,
             sessions::session_set_visibility,
+            logging::logs_read,
+            logging::logs_reveal,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.

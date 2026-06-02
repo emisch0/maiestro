@@ -89,7 +89,7 @@ pub fn used_colors() -> Vec<String> {
 
 #[tauri::command]
 pub fn sessions_list() -> Vec<Session> {
-    crate::log_invoke!("sessions_list");
+    crate::log_invoke_debug!("sessions_list");
     load_all()
 }
 

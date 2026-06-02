@@ -63,7 +63,14 @@ impl GitHub {
             .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
         match rb.send().await {
             Ok(resp) => {
-                tracing::info!(target: "github", %method, %url, status = resp.status().as_u16(), "github api call");
+                let status = resp.status().as_u16();
+                // GETs are read-only "get status" calls (and the UI polls them), so
+                // log them at debug; mutations (POST/PATCH/DELETE) stay at info.
+                if method == "GET" {
+                    tracing::debug!(target: "github", %method, %url, status, "github api call");
+                } else {
+                    tracing::info!(target: "github", %method, %url, status, "github api call");
+                }
                 Ok(resp)
             }
             Err(e) => {
@@ -200,7 +207,7 @@ pub struct RepoItem {
 
 #[tauri::command]
 pub async fn github_list_repos(identity_id: String) -> Result<Vec<RepoItem>, String> {
-    crate::log_invoke!("github_list_repos", identity = %identity_id);
+    crate::log_invoke_debug!("github_list_repos", identity = %identity_id);
     let gh = GitHub::for_identity(&identity_id)?;
 
     let mut repos = Vec::new();
@@ -262,7 +269,7 @@ struct IssueMeta {
 /// are ordered most-recently-modified first at every level.
 #[tauri::command]
 pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec<IssueNode>, String> {
-    crate::log_invoke!("github_list_issues", identity = %identity_id, repo = %repo);
+    crate::log_invoke_debug!("github_list_issues", identity = %identity_id, repo = %repo);
     let (owner, name) = repo
         .split_once('/')
         .ok_or_else(|| format!("invalid repo (expected owner/name): {repo}"))?;

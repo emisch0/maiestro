@@ -1238,7 +1238,7 @@ fn pr_state(pr: &serde_json::Value) -> String {
 #[tauri::command]
 #[tracing::instrument(skip_all, fields(session = %session_id))]
 pub async fn session_pr(session_id: String) -> Result<Option<PrLink>, String> {
-    crate::log_invoke!("session_pr");
+    crate::log_invoke_debug!("session_pr");
     let Some(session) = crate::sessions::get(&session_id) else {
         return Ok(None);
     };

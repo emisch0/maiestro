@@ -36,6 +36,17 @@
         "resizable": true,
         "visible": false,
         "center": true
+      },
+      {
+        "label": "logs",
+        "title": "mAIestro Logs",
+        "width": 760,
+        "height": 520,
+        "minWidth": 480,
+        "minHeight": 320,
+        "resizable": true,
+        "visible": false,
+        "center": true
       }
     ],
     "security": {

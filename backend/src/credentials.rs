@@ -82,7 +82,7 @@ pub fn credentials_get(
 ) -> Result<String, CredentialError> {
     let CredentialScope::Identity { identity_id } = &scope;
     // Log the credential type + identity scope only — never the secret value.
-    crate::log_invoke!("credentials_get", type_id = %type_id, identity = %identity_id);
+    crate::log_invoke_debug!("credentials_get", type_id = %type_id, identity = %identity_id);
     let value = CredentialStore::get(&type_id, &scope)?;
     crate::identities::register(identity_id);
     Ok(value)
