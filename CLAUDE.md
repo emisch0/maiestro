@@ -57,6 +57,8 @@ Every launch hands off to the OS rather than building an env: opening an app use
 
 Which app a session opens in (a specific terminal, an editor) and any workspace-level env files are stored in per-repo settings — see "Per-repo settings" below.
 
+One deliberate exception: when VS Code is available, we open worktrees via its `code` CLI (located on `$PATH`, falling back to common install paths and the bundled `.app/Contents/Resources/app/bin/code`) instead of `open -a`, so we can pass `--disable-workspace-trust` and skip the "Do you trust the authors?" prompt on every freshly spawned worktree. The `code` CLI forwards that flag even to an already-running VS Code, which `open -a --args` cannot. If no `code` CLI is found we fall back to `open -a "Visual Studio Code" --args --disable-workspace-trust <worktree>`. The session still inherits the user's ambient environment either way.
+
 ### Per-repo settings
 
 Each repo tracked by mAIestro has a small settings record stored in `~/.maiestro/repos/<owner>-<name>.json`. This is the place for configuration that is specific to a repo but not a credential. The file is human-editable and dotfile-manageable.

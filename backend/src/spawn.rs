@@ -174,10 +174,38 @@ fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str) -> Result
     Ok(())
 }
 
+/// Locate the VS Code `code` CLI: $PATH first, then common install locations
+/// (the bundled CLI inside the .app is the most reliable when $PATH is minimal).
+fn code_cli() -> Option<PathBuf> {
+    which("code").or_else(|| {
+        [
+            "/opt/homebrew/bin/code",
+            "/usr/local/bin/code",
+            "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
+    })
+}
+
 fn open_vscode(dir: &Path) -> Result<(), String> {
-    // Launch Services hand-off, per the "all launches use open -a" decision.
+    // Prefer the `code` CLI so we can pass --disable-workspace-trust and skip the
+    // "Do you trust the authors of the files in this folder?" prompt on every
+    // freshly spawned worktree. The CLI forwards the flag even to an already
+    // running VS Code, which `open -a --args` cannot.
+    if let Some(code) = code_cli() {
+        Command::new(code)
+            .arg("--disable-workspace-trust")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("failed to open VS Code: {e}"))?;
+        return Ok(());
+    }
+    // Fallback: Launch Services. --args forwards the flag, but only honored when
+    // VS Code isn't already running.
     Command::new("open")
-        .args(["-a", "Visual Studio Code"])
+        .args(["-a", "Visual Studio Code", "--args", "--disable-workspace-trust"])
         .arg(dir)
         .spawn()
         .map_err(|e| format!("failed to open VS Code: {e}"))?;
@@ -402,27 +430,26 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
 
 // ── Create-issue-and-spawn ──────────────────────────────────────────────────────
 
+/// First existing `bin` found on $PATH.
+fn which(bin: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(bin)).find(|p| p.is_file())
+}
+
 /// Resolve the `claude` binary: prefer $PATH, then common install locations
 /// (the app's $PATH is minimal when launched at login, so fall back to disk).
 fn claude_binary() -> PathBuf {
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join("claude");
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    for candidate in [
-        home().join(".claude/local/claude"),
-        PathBuf::from("/opt/homebrew/bin/claude"),
-        PathBuf::from("/usr/local/bin/claude"),
-    ] {
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    PathBuf::from("claude")
+    which("claude")
+        .or_else(|| {
+            [
+                home().join(".claude/local/claude"),
+                PathBuf::from("/opt/homebrew/bin/claude"),
+                PathBuf::from("/usr/local/bin/claude"),
+            ]
+            .into_iter()
+            .find(|p| p.is_file())
+        })
+        .unwrap_or_else(|| PathBuf::from("claude"))
 }
 
 /// A short, trimmed preview of some output for diagnostic error messages.
