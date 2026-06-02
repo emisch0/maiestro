@@ -972,3 +972,95 @@ body {
   color: var(--muted);
   line-height: 1.55;
 }
+
+/* ── Hide / snooze ────────────────────────────────────────────────────── */
+
+/* The "Show hidden" toggle stays highlighted while it's on. */
+.icon-btn--active {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.icon-btn--active:hover {
+  background: rgba(250, 204, 21, 0.2);
+  color: var(--accent);
+}
+
+/* A repo's options chevron lives after Start Work, which carries margin-left:auto. */
+.repo-group-header .row-expander {
+  flex-shrink: 0;
+}
+
+/* Dim hidden repos/items (only shown when "Show hidden" is on) without dimming
+   their snooze chip or action controls. */
+.repo-group--hidden .repo-group-name,
+.workspace-item--hidden .workspace-title {
+  opacity: 0.45;
+}
+
+/* Remaining-time / hidden chip shown on a revealed hidden repo or work item. */
+.snooze-label {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Hide/snooze dialog: a compact, vertically-centered overlay panel. */
+.hide-dialog {
+  align-self: center;
+  flex: 0 1 auto;
+}
+
+.hide-dialog-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Each hide/snooze choice is a full-width tappable row that applies on click. */
+.hide-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: var(--font);
+  text-align: left;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.hide-choice:hover {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+}
+
+.hide-choice-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.hide-choice-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.hide-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}

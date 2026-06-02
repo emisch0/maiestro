@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::repo_settings::HideState;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     /// Unique, human-readable id (the workspace name, e.g. "488-wider-window").
@@ -30,6 +32,10 @@ pub struct Session {
     /// Title-bar background color (hex).
     pub color: String,
     pub emoji: String,
+    /// Hide/snooze state for this work item. `None` = visible. Snooze expiry is
+    /// resolved on the frontend at render time.
+    #[serde(default)]
+    pub hidden: Option<HideState>,
 }
 
 fn default_branch() -> String {
@@ -84,4 +90,12 @@ pub fn used_colors() -> Vec<String> {
 #[tauri::command]
 pub fn sessions_list() -> Vec<Session> {
     load_all()
+}
+
+/// Set (or clear) a work item's hide/snooze state. `hidden = None` unhides.
+#[tauri::command]
+pub fn session_set_visibility(session_id: String, hidden: Option<HideState>) -> Result<(), String> {
+    let mut session = get(&session_id).ok_or_else(|| format!("session not found: {session_id}"))?;
+    session.hidden = hidden;
+    save(&session).map_err(|e| e.to_string())
 }

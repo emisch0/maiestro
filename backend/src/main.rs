@@ -64,6 +64,7 @@ fn main() {
             repo_settings::repos_list,
             repo_settings::repo_settings_get,
             repo_settings::repo_settings_set,
+            repo_settings::repo_set_visibility,
             repo_settings::repo_scan_env_files,
             github_list_repos,
             github_list_issues,
@@ -78,6 +79,7 @@ fn main() {
             spawn::teardown,
             spawn::session_pr,
             sessions::sessions_list,
+            sessions::session_set_visibility,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
