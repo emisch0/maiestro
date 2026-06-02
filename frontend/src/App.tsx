@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord } from "./api";
+import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
@@ -44,6 +44,37 @@ function mergeBlocker(c: PrChecks): string | null {
   if (c.mergeable_state === "behind") return "Branch is behind the base — update it (merge or rebase) and push, then merge again.";
   if (c.mergeable_state === "blocked" && c.state === "passed") return "Blocked by a required review — get an approval, then merge again.";
   return null;
+}
+
+// The work-lifecycle phase of a session, an axis distinct from the live Claude
+// busy/idle status. A merged PR wins outright; otherwise any local work (commits
+// ahead of base or an uncommitted change) means Implementing, and a pristine
+// branch is still Planning. Returns null while the work state is unresolved so a
+// working branch isn't briefly mislabeled "Planning".
+type LifecyclePhase = "planning" | "implementing" | "merged";
+function lifecyclePhase(pr: PrLink | null | undefined, work: WorkState | null | undefined): LifecyclePhase | null {
+  if (pr?.state === "merged") return "merged";
+  if (work === undefined) return null;
+  if (work && (work.ahead > 0 || work.dirty)) return "implementing";
+  return "planning";
+}
+
+const LIFECYCLE_LABELS: Record<LifecyclePhase, string> = {
+  planning: "Planning",
+  implementing: "Implementing",
+  merged: "Merged",
+};
+
+// A small badge showing where a session's work stands. Rendered beside the title
+// so progress reads at a glance across many worktrees.
+function LifecyclePill({ phase }: { phase: LifecyclePhase }) {
+  const label = LIFECYCLE_LABELS[phase];
+  return (
+    <span className={`lifecycle-pill lifecycle-pill--${phase}`} title={`Work status: ${label}`}>
+      <span className="lifecycle-dot" />
+      {label}
+    </span>
+  );
 }
 
 // A pending Tear Down prompt: a warnings confirmation, or a "VS Code still open"
@@ -1006,6 +1037,9 @@ function MainView() {
   // PR link per session id, discovered live from GitHub. `null` = looked up, none
   // found (or the lookup failed); absent key = not looked up yet.
   const [prs, setPrs] = useState<Record<string, PrLink | null>>({});
+  // Local git state per session id (commits ahead / dirty), used to derive the
+  // work-lifecycle phase. Refreshed alongside the PR lookup on popover open.
+  const [workStates, setWorkStates] = useState<Record<string, WorkState | null>>({});
   // Live status per workspace id (busy / needs_you / idle / …), seeded on open
   // and kept current by the backend's `session-status` event.
   const [statuses, setStatuses] = useState<Record<string, StatusRecord>>({});
@@ -1044,6 +1078,9 @@ function MainView() {
         api.sessionPr(s.id)
           .then((pr) => setPrs((prev) => ({ ...prev, [s.id]: pr })))
           .catch(() => setPrs((prev) => ({ ...prev, [s.id]: null })));
+        api.sessionWorkState(s.id)
+          .then((ws) => setWorkStates((prev) => ({ ...prev, [s.id]: ws })))
+          .catch(() => setWorkStates((prev) => ({ ...prev, [s.id]: null })));
       }
     }).catch(() => {});
   }, []);
@@ -1538,11 +1575,13 @@ function MainView() {
                     const prc = prCreate[s.id];
                     const checks = prChecks[s.id];
                     const pm = prMerge[s.id];
+                    const phase = lifecyclePhase(pr, workStates[s.id]);
                     return (
                     <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
                         <ClaudePill status={statuses[s.id]} onClick={() => api.openInEditor(s.work_dir)} />
                         <span className="workspace-title">{s.session_title}</span>
+                        {phase && <LifecyclePill phase={phase} />}
                         {sessHidden && sessSnoozeLabel && (
                           <span className="snooze-label">Snoozed · {sessSnoozeLabel}</span>
                         )}

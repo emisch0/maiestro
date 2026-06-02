@@ -127,6 +127,15 @@ export interface StatusRecord {
   ts: string;
 }
 
+/** Local git facts about a session's worktree, used to derive the work-lifecycle
+ *  phase (planning → implementing → merged). Purely local — no GitHub call. */
+export interface WorkState {
+  /** Commits in origin/<default_branch>..HEAD (local ref; may lag origin). */
+  ahead: number;
+  /** Worktree has uncommitted changes. */
+  dirty: boolean;
+}
+
 export type CredentialScope = { kind: "identity"; identity_id: string };
 
 export interface CredentialTypeDto {
@@ -232,6 +241,9 @@ export const api = {
 
   sessionPrChecks: (sessionId: string) =>
     invoke<PrChecks | null>("session_pr_checks", { sessionId }),
+
+  sessionWorkState: (sessionId: string) =>
+    invoke<WorkState | null>("session_work_state", { sessionId }),
 
   mergePr: (sessionId: string) =>
     invoke<PrLink>("session_merge_pr", { sessionId }),
