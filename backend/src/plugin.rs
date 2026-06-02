@@ -65,6 +65,7 @@ pub struct CredentialTypeDto {
 pub fn plugins_list_credential_types(
     registry: tauri::State<'_, PluginRegistry>,
 ) -> Vec<CredentialTypeDto> {
+    crate::log_invoke_debug!("plugins_list_credential_types");
     registry
         .all_credential_types()
         .map(|t| CredentialTypeDto {

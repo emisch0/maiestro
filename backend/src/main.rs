@@ -4,6 +4,7 @@
 mod credentials;
 mod identities;
 mod links;
+mod logging;
 mod plugin;
 mod plugins;
 mod repo_settings;
@@ -15,7 +16,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, WindowEvent,
 };
@@ -48,12 +49,16 @@ fn main() {
     // The app binary doubles as the Claude Code hook helper. When invoked as
     // `maiestro hook <state> --workspace <ws-id>` (from a spawned worktree's
     // .claude/settings.local.json), handle the hook and exit BEFORE booting the
-    // tray app — otherwise every hook would launch a second mAIestro.
+    // tray app — otherwise every hook would launch a second mAIestro. This path
+    // is short-lived and writes only a status file, so it skips logging setup.
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("hook") {
         status::run_hook_cli(&args[2..]);
         return;
     }
+
+    logging::init();
+    tracing::info!("mAIestro starting");
 
     let registry = PluginRegistry::builder()
         .register(GitHubPlugin)
@@ -101,6 +106,8 @@ fn main() {
             sessions::sessions_list,
             sessions::session_set_visibility,
             status::sessions_status_list,
+            logging::logs_read,
+            logging::logs_reveal,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
@@ -116,20 +123,27 @@ fn main() {
                 Ok(watcher) => {
                     app.manage(Mutex::new(watcher));
                 }
-                Err(e) => eprintln!("status watcher failed to start: {e}"),
+                Err(e) => tracing::error!(error = %e, "status watcher failed to start"),
             }
 
+            let logs = MenuItem::with_id(app, "logs", "Show Logs", true, None::<&str>)?;
+            let separator = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "Quit mAIestro", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&quit])?;
+            let menu = Menu::with_items(app, &[&logs, &separator, &quit])?;
 
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| {
-                    if event.id().as_ref() == "quit" {
-                        app.exit(0);
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "quit" => app.exit(0),
+                    "logs" => {
+                        if let Some(window) = app.get_webview_window("logs") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
                     }
+                    _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
                     let app = tray.app_handle();

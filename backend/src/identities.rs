@@ -56,6 +56,7 @@ pub fn register(identity_id: &str) {
 
 #[tauri::command]
 pub fn identities_list() -> Vec<String> {
+    crate::log_invoke_debug!("identities_list");
     load_store().identities
 }
 
@@ -63,6 +64,7 @@ pub fn identities_list() -> Vec<String> {
 /// when the stored default is missing or points at an identity that no longer exists.
 #[tauri::command]
 pub fn identities_get_default() -> Option<String> {
+    crate::log_invoke_debug!("identities_get_default");
     let store = load_store();
     match &store.default {
         Some(d) if store.identities.iter().any(|i| i == d) => Some(d.clone()),
@@ -72,6 +74,7 @@ pub fn identities_get_default() -> Option<String> {
 
 #[tauri::command]
 pub fn identities_set_default(identity_id: String) -> Result<(), String> {
+    crate::log_invoke!("identities_set_default", identity = %identity_id);
     let mut store = load_store();
     if !store.identities.iter().any(|i| i == &identity_id) {
         store.identities.push(identity_id.clone());

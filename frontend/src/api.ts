@@ -235,4 +235,10 @@ export const api = {
 
   mergePr: (sessionId: string) =>
     invoke<PrLink>("session_merge_pr", { sessionId }),
+
+  logsRead: () =>
+    invoke<string>("logs_read"),
+
+  logsReveal: () =>
+    invoke<void>("logs_reveal"),
 };

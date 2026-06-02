@@ -42,14 +42,47 @@ impl GitHub {
     pub fn req(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
         self.client
             .request(method, url)
+            // The token goes only into this Authorization header. It must never
+            // be logged — `send` below logs the method + URL but not headers.
             .bearer_auth(&self.token)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
     }
 
+    /// Send a built request, logging method + URL + resulting status at `info`.
+    /// The single choke point for outbound GitHub calls — credentials live in the
+    /// Authorization header, which is never logged (only the URL, which GitHub
+    /// never puts the token in).
+    pub async fn send(&self, rb: reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+        // Clone to read method + URL for the log line without consuming the
+        // builder. Bodies are in-memory JSON, so the clone always succeeds.
+        let (method, url) = rb
+            .try_clone()
+            .and_then(|c| c.build().ok())
+            .map(|r| (r.method().to_string(), r.url().to_string()))
+            .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
+        match rb.send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                // GETs are read-only "get status" calls (and the UI polls them), so
+                // log them at debug; mutations (POST/PATCH/DELETE) stay at info.
+                if method == "GET" {
+                    tracing::debug!(target: "github", %method, %url, status, "github api call");
+                } else {
+                    tracing::info!(target: "github", %method, %url, status, "github api call");
+                }
+                Ok(resp)
+            }
+            Err(e) => {
+                tracing::error!(target: "github", %method, %url, error = %e, "github api call failed");
+                Err(e)
+            }
+        }
+    }
+
     /// GET a URL and parse the JSON body, mapping non-2xx to a GitHub error message.
     pub async fn get_json(&self, url: &str) -> Result<serde_json::Value, String> {
-        let resp = self.req(reqwest::Method::GET, url).send().await.map_err(|e| e.to_string())?;
+        let resp = self.send(self.req(reqwest::Method::GET, url)).await.map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(error_message(resp).await);
         }
@@ -74,9 +107,9 @@ impl GitHub {
 
     pub async fn add_assignees(&self, repo: &str, number: u64, assignees: &[String]) -> Result<(), String> {
         let url = format!("https://api.github.com/repos/{repo}/issues/{number}/assignees");
-        let resp = self.req(reqwest::Method::POST, &url)
-            .json(&serde_json::json!({ "assignees": assignees }))
-            .send().await.map_err(|e| e.to_string())?;
+        let resp = self.send(self.req(reqwest::Method::POST, &url)
+            .json(&serde_json::json!({ "assignees": assignees })))
+            .await.map_err(|e| e.to_string())?;
         if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
     }
 
@@ -106,30 +139,32 @@ impl GitHub {
     /// Open a new issue and return its number. `repo` is "owner/name".
     pub async fn create_issue(&self, repo: &str, title: &str, body: &str) -> Result<u64, String> {
         let url = format!("https://api.github.com/repos/{repo}/issues");
-        let resp = self.req(reqwest::Method::POST, &url)
-            .json(&serde_json::json!({ "title": title, "body": body }))
-            .send().await.map_err(|e| e.to_string())?;
+        let resp = self.send(self.req(reqwest::Method::POST, &url)
+            .json(&serde_json::json!({ "title": title, "body": body })))
+            .await.map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(error_message(resp).await);
         }
         let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-        v["number"].as_u64().ok_or_else(|| "issue created but no number returned".to_string())
+        let number = v["number"].as_u64().ok_or_else(|| "issue created but no number returned".to_string())?;
+        tracing::info!(target: "github", %repo, issue = number, "created issue");
+        Ok(number)
     }
 
     /// Update an existing issue's title and body. `repo` is "owner/name".
     pub async fn update_issue(&self, repo: &str, number: u64, title: &str, body: &str) -> Result<(), String> {
         let url = format!("https://api.github.com/repos/{repo}/issues/{number}");
-        let resp = self.req(reqwest::Method::PATCH, &url)
-            .json(&serde_json::json!({ "title": title, "body": body }))
-            .send().await.map_err(|e| e.to_string())?;
+        let resp = self.send(self.req(reqwest::Method::PATCH, &url)
+            .json(&serde_json::json!({ "title": title, "body": body })))
+            .await.map_err(|e| e.to_string())?;
         if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
     }
 
     pub async fn create_comment(&self, repo: &str, number: u64, body: &str) -> Result<(), String> {
         let url = format!("https://api.github.com/repos/{repo}/issues/{number}/comments");
-        let resp = self.req(reqwest::Method::POST, &url)
-            .json(&serde_json::json!({ "body": body }))
-            .send().await.map_err(|e| e.to_string())?;
+        let resp = self.send(self.req(reqwest::Method::POST, &url)
+            .json(&serde_json::json!({ "body": body })))
+            .await.map_err(|e| e.to_string())?;
         if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
     }
 
@@ -145,15 +180,15 @@ impl GitHub {
         draft: bool,
     ) -> Result<serde_json::Value, String> {
         let url = format!("https://api.github.com/repos/{repo}/pulls");
-        let resp = self.req(reqwest::Method::POST, &url)
+        let resp = self.send(self.req(reqwest::Method::POST, &url)
             .json(&serde_json::json!({
                 "title": title,
                 "head": head,
                 "base": base,
                 "body": body,
                 "draft": draft,
-            }))
-            .send().await.map_err(|e| e.to_string())?;
+            })))
+            .await.map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(error_message(resp).await);
         }
@@ -219,6 +254,7 @@ pub struct RepoItem {
 
 #[tauri::command]
 pub async fn github_list_repos(identity_id: String) -> Result<Vec<RepoItem>, String> {
+    crate::log_invoke_debug!("github_list_repos", identity = %identity_id);
     let gh = GitHub::for_identity(&identity_id)?;
 
     let mut repos = Vec::new();
@@ -226,14 +262,13 @@ pub async fn github_list_repos(identity_id: String) -> Result<Vec<RepoItem>, Str
 
     loop {
         let resp = gh
-            .req(reqwest::Method::GET, "https://api.github.com/user/repos")
-            .query(&[
-                ("per_page", "100"),
-                ("page", &page.to_string()),
-                ("sort", "pushed"),
-                ("affiliation", "owner,collaborator,organization_member"),
-            ])
-            .send()
+            .send(gh.req(reqwest::Method::GET, "https://api.github.com/user/repos")
+                .query(&[
+                    ("per_page", "100"),
+                    ("page", &page.to_string()),
+                    ("sort", "pushed"),
+                    ("affiliation", "owner,collaborator,organization_member"),
+                ]))
             .await
             .map_err(|e| e.to_string())?;
 
@@ -281,6 +316,7 @@ struct IssueMeta {
 /// are ordered most-recently-modified first at every level.
 #[tauri::command]
 pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec<IssueNode>, String> {
+    crate::log_invoke_debug!("github_list_issues", identity = %identity_id, repo = %repo);
     let (owner, name) = repo
         .split_once('/')
         .ok_or_else(|| format!("invalid repo (expected owner/name): {repo}"))?;
@@ -296,15 +332,14 @@ pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec
 
     loop {
         let resp = gh
-            .req(reqwest::Method::GET, &format!("https://api.github.com/repos/{owner}/{name}/issues"))
-            .query(&[
-                ("state", "open"),
-                ("sort", "updated"),
-                ("direction", "desc"),
-                ("per_page", "100"),
-                ("page", &page.to_string()),
-            ])
-            .send()
+            .send(gh.req(reqwest::Method::GET, &format!("https://api.github.com/repos/{owner}/{name}/issues"))
+                .query(&[
+                    ("state", "open"),
+                    ("sort", "updated"),
+                    ("direction", "desc"),
+                    ("per_page", "100"),
+                    ("page", &page.to_string()),
+                ]))
             .await
             .map_err(|e| e.to_string())?;
 
@@ -338,9 +373,8 @@ pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec
 
     for parent in parents {
         let resp = gh
-            .req(reqwest::Method::GET, &format!("https://api.github.com/repos/{owner}/{name}/issues/{parent}/sub_issues"))
-            .query(&[("per_page", "100")])
-            .send()
+            .send(gh.req(reqwest::Method::GET, &format!("https://api.github.com/repos/{owner}/{name}/issues/{parent}/sub_issues"))
+                .query(&[("per_page", "100")]))
             .await
             .map_err(|e| e.to_string())?;
 
@@ -424,8 +458,10 @@ fn build_issue_node(
 async fn error_message(resp: reqwest::Response) -> String {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&body)
+    let message = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| v["message"].as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()))
+        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+    tracing::error!(target: "github", status = status.as_u16(), message = %message, "github api error");
+    message
 }
