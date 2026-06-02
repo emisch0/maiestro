@@ -108,6 +108,7 @@ fn main() {
             status::sessions_status_list,
             logging::logs_read,
             logging::logs_reveal,
+            status::clear_session_error,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.

@@ -861,9 +861,12 @@ function ClaudePill({ status, onClick }: { status?: StatusRecord; onClick: () =>
   if (!label) return null;
   // `needs_you` carries the reason (e.g. the permission request) in `detail`.
   const title = status.detail ? `Claude · ${label} — ${status.detail}` : `Claude · ${label}`;
+  // A failed tool tints the pill red; the error itself lives in the dismissible
+  // row block, not this tooltip.
+  const cls = `claude-pill claude-pill--${status.state}${status.last_error ? " claude-pill--error" : ""}`;
   return (
     <button
-      className={`claude-pill claude-pill--${status.state}`}
+      className={cls}
       onClick={onClick}
       title={title}
       aria-label={title}
@@ -1526,6 +1529,7 @@ function MainView() {
                 ) : (
                   visibleSessions.map((s) => {
                     const cmdOpen = commandsOpen === s.id;
+                    const toolErr = statuses[s.id]?.last_error;
                     const pr = prs[s.id];
                     const PrIcon = pr ? (PR_STATE_ICONS[pr.state] ?? PrOpenIcon) : null;
                     const sessHidden = effectiveHidden(s.hidden, now);
@@ -1647,6 +1651,15 @@ function MainView() {
                           </ul>
                           <div className="issue-actions">
                             <button className="btn-ghost" onClick={() => setPrMerge((prev) => ({ ...prev, [s.id]: {} }))}>Dismiss</button>
+                          </div>
+                        </div>
+                      )}
+                      {toolErr && (
+                        <div className="cleanup-confirm">
+                          <p className="cleanup-lead">{toolErr.tool ? `${toolErr.tool} failed` : "A tool call failed"}</p>
+                          <pre className="tool-error-message">{toolErr.message}</pre>
+                          <div className="issue-actions">
+                            <button className="btn-ghost" onClick={() => api.clearSessionError(s.id)}>Dismiss</button>
                           </div>
                         </div>
                       )}

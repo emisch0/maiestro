@@ -124,6 +124,15 @@ export interface StatusRecord {
   cwd?: string;
   /** Short human detail, e.g. "permission: Bash" or a tool name. */
   detail?: string;
+  /** The most recent failed tool call, kept until dismissed or a new turn. */
+  last_error?: ToolError;
+  ts: string;
+}
+
+/** A failed tool call surfaced from a `PostToolUseFailure` hook. */
+export interface ToolError {
+  tool?: string;
+  message: string;
   ts: string;
 }
 
@@ -217,6 +226,9 @@ export const api = {
 
   sessionsStatusList: () =>
     invoke<StatusRecord[]>("sessions_status_list"),
+
+  clearSessionError: (workspace: string) =>
+    invoke<void>("clear_session_error", { workspace }),
 
   teardown: (sessionId: string, confirmed = false, force = false) =>
     invoke<TeardownOutcome>("teardown", { sessionId, confirmed, force }),

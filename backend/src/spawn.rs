@@ -270,7 +270,9 @@ fn maiestro_hook_groups(bin: &Path, ws_id: &str) -> Vec<(&'static str, serde_jso
 
     vec![
         ("SessionStart", group("running")),
-        ("UserPromptSubmit", group("busy")),
+        // Its own `prompt` verb (not `busy`) so a fresh turn clears a stale
+        // failed-tool error while still reading as working.
+        ("UserPromptSubmit", group("prompt")),
         ("PreToolUse", matcher_group("busy")),
         // PostToolUse is the event that fires *after* an approved permission
         // prompt's tool completes — the only signal that Claude has resumed
@@ -279,6 +281,9 @@ fn maiestro_hook_groups(bin: &Path, ws_id: &str) -> Vec<(&'static str, serde_jso
         // Claude is actively thinking. PreToolUse alone can't cover this: it
         // fires *before* the prompt, not after approval.
         ("PostToolUse", matcher_group("busy")),
+        // A failed tool call: captures the error into `last_error` (kept until
+        // dismissed) and logs it. State stays `busy` — Claude works on past it.
+        ("PostToolUseFailure", matcher_group("tool_failed")),
         ("Notification", group("notification")),
         ("Stop", group("idle")),
         ("SessionEnd", group("ended")),
