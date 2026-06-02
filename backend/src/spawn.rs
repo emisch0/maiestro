@@ -300,6 +300,20 @@ pub enum CreateAndSpawnOutcome {
     NeedsConfirmation { message: String },
 }
 
+/// Result of `create_issue`: either the issue was opened (no workspace spawned),
+/// or Claude couldn't turn the idea into a clear issue and we're asking the user
+/// whether to create one from their raw text anyway.
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CreateIssueOutcome {
+    Created {
+        number: u64,
+        issue_url: String,
+        warnings: Vec<String>,
+    },
+    NeedsConfirmation { message: String },
+}
+
 #[tauri::command]
 pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
     let settings = crate::repo_settings::repo_settings_get(repo.clone());
@@ -539,27 +553,33 @@ async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String), St
     parse_issue_draft(envelope["result"].as_str().unwrap_or(""))
 }
 
-/// Draft an issue from the user's idea (via Claude), open it on GitHub, then
-/// spawn a workspace for the freshly created issue.
-///
-/// When `use_raw_fallback` is false and Claude can't produce a clear draft
-/// (e.g. the idea is too vague and it asks for clarification), this creates
-/// nothing and returns `NeedsConfirmation` carrying Claude's reply, so the UI
-/// can ask the user whether to proceed. Calling again with `use_raw_fallback`
-/// true skips drafting and creates the issue straight from the user's text.
-#[tauri::command]
-pub async fn create_issue_and_spawn(
-    repo: String,
-    idea: String,
+/// A drafted issue ready to create, or a signal that Claude couldn't produce a
+/// clear draft and the user must confirm creating from raw text.
+enum DraftStep {
+    Ready {
+        title: String,
+        body: String,
+        /// Non-fatal note to surface alongside the created issue.
+        warning: Option<String>,
+    },
+    NeedsConfirmation { message: String },
+}
+
+/// Resolve the repo's identity + checkout, then turn the idea into an issue
+/// draft — via Claude, or (when `use_raw_fallback`) straight from the raw text.
+/// Returns the authenticated GitHub client alongside the draft so callers can
+/// create the issue. Shared by `create_issue` and `create_issue_and_spawn`.
+async fn resolve_draft(
+    repo: &str,
+    idea: &str,
     use_raw_fallback: bool,
-    force_new: bool,
-) -> Result<CreateAndSpawnOutcome, String> {
-    let idea = idea.trim().to_string();
+) -> Result<(GitHub, DraftStep), String> {
+    let idea = idea.trim();
     if idea.is_empty() {
         return Err("Describe what you want to work on first.".into());
     }
 
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.to_string());
     let identity_id = settings
         .identity_id
         .clone()
@@ -570,13 +590,69 @@ pub async fn create_issue_and_spawn(
     }
     let gh = GitHub::for_identity(&identity_id)?;
 
-    let (title, body, draft_warning) = if use_raw_fallback {
-        (trim_to_word(&idea, 70), idea.clone(), Some("created from your text without an AI draft".to_string()))
+    let step = if use_raw_fallback {
+        DraftStep::Ready {
+            title: trim_to_word(idea, 70),
+            body: idea.to_string(),
+            warning: Some("created from your text without an AI draft".to_string()),
+        }
     } else {
-        match draft_issue(&checkout, &idea).await {
-            Ok((t, b)) => (t, b, None),
+        match draft_issue(&checkout, idea).await {
+            Ok((title, body)) => DraftStep::Ready { title, body, warning: None },
             // Couldn't draft: let the user confirm before creating anything.
-            Err(message) => return Ok(CreateAndSpawnOutcome::NeedsConfirmation { message }),
+            Err(message) => DraftStep::NeedsConfirmation { message },
+        }
+    };
+    Ok((gh, step))
+}
+
+/// Draft an issue from the user's idea (via Claude) and open it on GitHub,
+/// **without** spawning a workspace.
+///
+/// When `use_raw_fallback` is false and Claude can't produce a clear draft
+/// (e.g. the idea is too vague and it asks for clarification), this creates
+/// nothing and returns `NeedsConfirmation` carrying Claude's reply, so the UI
+/// can ask the user whether to proceed. Calling again with `use_raw_fallback`
+/// true skips drafting and creates the issue straight from the user's text.
+#[tauri::command]
+pub async fn create_issue(
+    repo: String,
+    idea: String,
+    use_raw_fallback: bool,
+) -> Result<CreateIssueOutcome, String> {
+    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
+    let (title, body, warning) = match step {
+        DraftStep::Ready { title, body, warning } => (title, body, warning),
+        DraftStep::NeedsConfirmation { message } => {
+            return Ok(CreateIssueOutcome::NeedsConfirmation { message });
+        }
+    };
+
+    let number = gh.create_issue(&repo, &title, &body).await?;
+    Ok(CreateIssueOutcome::Created {
+        number,
+        // The create endpoint only returns the number; the html_url is derivable
+        // (the whole app assumes github.com — see plugins/github.rs).
+        issue_url: format!("https://github.com/{repo}/issues/{number}"),
+        warnings: warning.into_iter().collect(),
+    })
+}
+
+/// Draft an issue from the user's idea (via Claude), open it on GitHub, then
+/// spawn a workspace for the freshly created issue. See `create_issue` for the
+/// drafting / needs-confirmation semantics.
+#[tauri::command]
+pub async fn create_issue_and_spawn(
+    repo: String,
+    idea: String,
+    use_raw_fallback: bool,
+    force_new: bool,
+) -> Result<CreateAndSpawnOutcome, String> {
+    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
+    let (title, body, draft_warning) = match step {
+        DraftStep::Ready { title, body, warning } => (title, body, warning),
+        DraftStep::NeedsConfirmation { message } => {
+            return Ok(CreateAndSpawnOutcome::NeedsConfirmation { message });
         }
     };
 

@@ -31,6 +31,10 @@ export type CreateAndSpawnOutcome =
   | ({ status: "spawned" } & SpawnResult)
   | { status: "needs_confirmation"; message: string };
 
+export type CreateIssueOutcome =
+  | { status: "created"; number: number; issue_url: string; warnings: string[] }
+  | { status: "needs_confirmation"; message: string };
+
 export type TeardownOutcome =
   | { status: "done" }
   | { status: "needs_confirmation"; warnings: string[] };
@@ -116,6 +120,9 @@ export const api = {
 
   spawnWork: (repo: string, issueNumber: number, forceNew = false) =>
     invoke<SpawnResult>("spawn_work", { repo, issueNumber, forceNew }),
+
+  createIssue: (repo: string, idea: string, useRawFallback = false) =>
+    invoke<CreateIssueOutcome>("create_issue", { repo, idea, useRawFallback }),
 
   createIssueAndSpawn: (repo: string, idea: string, useRawFallback = false, forceNew = false) =>
     invoke<CreateAndSpawnOutcome>("create_issue_and_spawn", { repo, idea, useRawFallback, forceNew }),

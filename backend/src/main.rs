@@ -73,6 +73,7 @@ fn main() {
             links::open_url,
             links::open_path,
             spawn::spawn_work,
+            spawn::create_issue,
             spawn::create_issue_and_spawn,
             spawn::open_in_editor,
             spawn::teardown,
