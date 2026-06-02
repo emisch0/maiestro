@@ -281,6 +281,29 @@ body {
   overflow-wrap: anywhere;
 }
 
+.confirm-block {
+  margin: 6px 8px 2px;
+  padding: 8px;
+  background: var(--surface-hover);
+  border-radius: var(--radius);
+}
+
+.confirm-lead {
+  font-size: 11.5px;
+  color: var(--text);
+  margin: 0 0 4px;
+}
+
+.confirm-msg {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  margin: 0 0 8px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
 /* Expanded issue row: full wrapped title plus Spawn/Cancel actions. */
 .issue-row--expanded {
   flex-direction: column;

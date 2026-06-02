@@ -68,6 +68,7 @@ fn main() {
             identities::identities_set_default,
             links::open_url,
             spawn::spawn_work,
+            spawn::create_issue_and_spawn,
             sessions::sessions_list,
         ])
         .setup(|app| {

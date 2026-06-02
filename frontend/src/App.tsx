@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CredentialScope, CredentialTypeDto, GHRepo, IssueNode, RepoSettings } from "./api";
+import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, IssueNode, RepoSettings } from "./api";
 
 type Tab = "identity" | "repo";
 type SaveStatus = "idle" | "saving" | "saved" | "clearing" | "error";
@@ -604,6 +604,9 @@ type Picker = {
   error?: string;
   query: string;
   note?: string;
+  // Set when Claude couldn't draft a clear issue: holds the original idea and
+  // Claude's reply, prompting the user to confirm creating from raw text.
+  confirm?: { idea: string; message: string };
 };
 
 type Expand = { kind: "idea" } | { kind: "issue"; number: number } | null;
@@ -744,10 +747,40 @@ function MainView() {
     }
   }
 
-  function createAndSpawn() {
-    const idea = picker?.query.trim();
+  function applyOutcome(res: CreateAndSpawnOutcome, idea: string) {
+    if (res.status === "needs_confirmation") {
+      setPicker((p) => (p ? { ...p, note: undefined, confirm: { idea, message: res.message } } : p));
+    } else {
+      const summary = `Spawned ${res.issue_url} on ${res.branch} → ${res.work_dir}`;
+      const note = res.warnings.length ? `${summary}\n⚠ ${res.warnings.join("; ")}` : summary;
+      setPicker((p) => (p ? { ...p, note, confirm: undefined } : p));
+    }
+  }
+
+  async function createAndSpawn() {
+    if (!picker) return;
+    const repo = picker.repo;
+    const idea = picker.query.trim();
     if (!idea) return;
-    setPicker((p) => (p ? { ...p, note: `Would create an issue for “${idea}” and spawn — not wired up yet.` } : p));
+    setPicker((p) => (p ? { ...p, note: `Drafting an issue for “${idea}” and spawning…`, confirm: undefined } : p));
+    try {
+      applyOutcome(await api.createIssueAndSpawn(repo, idea), idea);
+    } catch (e) {
+      setPicker((p) => (p ? { ...p, note: `Failed to create issue and spawn: ${String(e)}` } : p));
+    }
+  }
+
+  // User chose to create the issue from their raw text despite Claude's prompt.
+  async function confirmRawSpawn() {
+    if (!picker?.confirm) return;
+    const repo = picker.repo;
+    const idea = picker.confirm.idea;
+    setPicker((p) => (p ? { ...p, note: "Creating issue from your text…", confirm: undefined } : p));
+    try {
+      applyOutcome(await api.createIssueAndSpawn(repo, idea, true), idea);
+    } catch (e) {
+      setPicker((p) => (p ? { ...p, note: `Failed to create issue and spawn: ${String(e)}` } : p));
+    }
   }
 
   return (
@@ -848,6 +881,21 @@ function MainView() {
                   </div>
                 ) : (
                   <p className="repo-group-empty">{picker.query ? "No matching issues." : "No open issues."}</p>
+                )}
+                {picker.confirm && (
+                  <div className="confirm-block">
+                    <p className="confirm-lead">Claude couldn’t turn this into a clear issue:</p>
+                    <p className="confirm-msg">{picker.confirm.message}</p>
+                    <div className="issue-actions">
+                      <button className="btn-save" onClick={confirmRawSpawn}>Create issue from my text</button>
+                      <button
+                        className="btn-ghost"
+                        onClick={() => setPicker((p) => (p ? { ...p, confirm: undefined } : p))}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
                 )}
                 {picker.note && <p className="issue-note">{picker.note}</p>}
               </div>

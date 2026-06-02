@@ -197,6 +197,16 @@ pub struct SpawnResult {
     pub warnings: Vec<String>,
 }
 
+/// Result of `create_issue_and_spawn`: either the spawn went through, or Claude
+/// couldn't turn the idea into a clear issue and we're asking the user whether
+/// to create one from their raw text anyway.
+#[derive(serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CreateAndSpawnOutcome {
+    Spawned(SpawnResult),
+    NeedsConfirmation { message: String },
+}
+
 #[tauri::command]
 pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
     let settings = crate::repo_settings::repo_settings_get(repo.clone());
@@ -338,4 +348,149 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
         reused: false,
         warnings,
     })
+}
+
+// ── Create-issue-and-spawn ──────────────────────────────────────────────────────
+
+/// Resolve the `claude` binary: prefer $PATH, then common install locations
+/// (the app's $PATH is minimal when launched at login, so fall back to disk).
+fn claude_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("claude");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    for candidate in [
+        home().join(".claude/local/claude"),
+        PathBuf::from("/opt/homebrew/bin/claude"),
+        PathBuf::from("/usr/local/bin/claude"),
+    ] {
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from("claude")
+}
+
+/// A short, trimmed preview of some output for diagnostic error messages.
+fn snippet(s: &str) -> String {
+    let s = s.trim();
+    if s.is_empty() {
+        return "<empty>".into();
+    }
+    s.chars().take(240).collect()
+}
+
+/// Pull the inner `{title, body}` out of claude's reply text (which may wrap it
+/// in code fences or prose) and extract a non-empty title plus body.
+fn parse_issue_draft(text: &str) -> Result<(String, String), String> {
+    let braces = text.find('{').zip(text.rfind('}')).filter(|(s, e)| e > s);
+    let Some((start, end)) = braces else {
+        // No JSON object: claude replied conversationally (e.g. asking the user
+        // to clarify a vague idea). Surface that reply verbatim so the caller
+        // can show it and let the user decide.
+        return Err(text.trim().chars().take(400).collect());
+    };
+    let v: serde_json::Value = serde_json::from_str(&text[start..=end])
+        .map_err(|e| format!("could not parse claude reply as JSON ({e}): {}", snippet(text)))?;
+    let title = v["title"].as_str().unwrap_or("").trim().to_string();
+    let body = v["body"].as_str().unwrap_or("").trim().to_string();
+    if title.is_empty() {
+        return Err("claude returned an empty title".into());
+    }
+    Ok((title, body))
+}
+
+/// Ask Claude (haiku), running in the repo checkout for context, to turn the
+/// user's free-text idea into an issue title + markdown body. Uses
+/// `--output-format json` so we parse a stable envelope rather than guessing at
+/// raw text, and surfaces stdout/stderr in errors when something goes wrong.
+async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String), String> {
+    let prompt = format!(
+        "Based on this idea for a change to this codebase, draft a GitHub issue. \
+         Reply with ONLY a JSON object of the form {{\"title\": string, \"body\": string}}. \
+         The title is a concise summary (max ~70 characters). The body is clear markdown \
+         describing the work. Idea: {idea}"
+    );
+    // `--tools ""` disables ALL tools: this call only needs to generate text, so
+    // it must not be able to read arbitrary files, run Bash, edit, or fetch URLs
+    // — even though it runs in the real checkout with the user's ambient
+    // permissions. That contains prompt injection from the idea text (or from
+    // repo files like CLAUDE.md, which is still loaded as context) to, at worst,
+    // a bad issue title/body the user reviews — not code execution or exfiltration.
+    let run = tokio::process::Command::new(claude_binary())
+        .current_dir(checkout)
+        .args(["-p", &prompt, "--model", "haiku", "--output-format", "json", "--tools", ""])
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(90), run)
+        .await
+        .map_err(|_| "claude timed out while drafting the issue".to_string())?
+        .map_err(|e| format!("could not run claude (is it installed and on PATH?): {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!("claude exited with an error: {}", snippet(&stderr)));
+    }
+
+    // `--output-format json` wraps the reply in a result envelope.
+    let envelope: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|e| {
+        format!("could not parse claude output ({e}); stdout: {}; stderr: {}", snippet(&stdout), snippet(&stderr))
+    })?;
+    if envelope["is_error"].as_bool().unwrap_or(false) {
+        return Err(format!("claude reported an error: {}", snippet(envelope["result"].as_str().unwrap_or(""))));
+    }
+    parse_issue_draft(envelope["result"].as_str().unwrap_or(""))
+}
+
+/// Draft an issue from the user's idea (via Claude), open it on GitHub, then
+/// spawn a workspace for the freshly created issue.
+///
+/// When `use_raw_fallback` is false and Claude can't produce a clear draft
+/// (e.g. the idea is too vague and it asks for clarification), this creates
+/// nothing and returns `NeedsConfirmation` carrying Claude's reply, so the UI
+/// can ask the user whether to proceed. Calling again with `use_raw_fallback`
+/// true skips drafting and creates the issue straight from the user's text.
+#[tauri::command]
+pub async fn create_issue_and_spawn(
+    repo: String,
+    idea: String,
+    use_raw_fallback: bool,
+    force_new: bool,
+) -> Result<CreateAndSpawnOutcome, String> {
+    let idea = idea.trim().to_string();
+    if idea.is_empty() {
+        return Err("Describe what you want to work on first.".into());
+    }
+
+    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let identity_id = settings
+        .identity_id
+        .clone()
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let checkout = expand_tilde(settings.checkout_dir.as_deref().unwrap_or_default());
+    if !checkout.join(".git").exists() {
+        return Err(format!("checkout dir is not a git repo: {}", checkout.display()));
+    }
+    let gh = GitHub::for_identity(&identity_id)?;
+
+    let (title, body, draft_warning) = if use_raw_fallback {
+        (trim_to_word(&idea, 70), idea.clone(), Some("created from your text without an AI draft".to_string()))
+    } else {
+        match draft_issue(&checkout, &idea).await {
+            Ok((t, b)) => (t, b, None),
+            // Couldn't draft: let the user confirm before creating anything.
+            Err(message) => return Ok(CreateAndSpawnOutcome::NeedsConfirmation { message }),
+        }
+    };
+
+    let number = gh.create_issue(&repo, &title, &body).await?;
+    let mut result = spawn_work(repo, number, force_new).await?;
+    if let Some(w) = draft_warning {
+        result.warnings.insert(0, w);
+    }
+    Ok(CreateAndSpawnOutcome::Spawned(result))
 }

@@ -88,6 +88,19 @@ impl GitHub {
         if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
     }
 
+    /// Open a new issue and return its number. `repo` is "owner/name".
+    pub async fn create_issue(&self, repo: &str, title: &str, body: &str) -> Result<u64, String> {
+        let url = format!("https://api.github.com/repos/{repo}/issues");
+        let resp = self.req(reqwest::Method::POST, &url)
+            .json(&serde_json::json!({ "title": title, "body": body }))
+            .send().await.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(error_message(resp).await);
+        }
+        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        v["number"].as_u64().ok_or_else(|| "issue created but no number returned".to_string())
+    }
+
     pub async fn create_comment(&self, repo: &str, number: u64, body: &str) -> Result<(), String> {
         let url = format!("https://api.github.com/repos/{repo}/issues/{number}/comments");
         let resp = self.req(reqwest::Method::POST, &url)

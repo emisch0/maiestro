@@ -27,6 +27,10 @@ export interface SpawnResult {
   warnings: string[];
 }
 
+export type CreateAndSpawnOutcome =
+  | ({ status: "spawned" } & SpawnResult)
+  | { status: "needs_confirmation"; message: string };
+
 export type CredentialScope = { kind: "identity"; identity_id: string };
 
 export interface CredentialTypeDto {
@@ -81,4 +85,7 @@ export const api = {
 
   spawnWork: (repo: string, issueNumber: number, forceNew = false) =>
     invoke<SpawnResult>("spawn_work", { repo, issueNumber, forceNew }),
+
+  createIssueAndSpawn: (repo: string, idea: string, useRawFallback = false, forceNew = false) =>
+    invoke<CreateAndSpawnOutcome>("create_issue_and_spawn", { repo, idea, useRawFallback, forceNew }),
 };
