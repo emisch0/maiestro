@@ -127,7 +127,14 @@ fn slugify(title: &str, max_len: usize) -> String {
 
 // ── VS Code workspace files ─────────────────────────────────────────────────────
 
-fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str) -> Result<(), String> {
+/// Single-quote a string for safe inclusion in a POSIX shell command (the
+/// task's `command` runs through a shell). Wraps in single quotes and escapes
+/// any embedded single quote as `'\''`.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, session_title: &str) -> Result<(), String> {
     let vscode = work_dir.join(".vscode");
     std::fs::create_dir_all(&vscode).map_err(|e| e.to_string())?;
 
@@ -156,13 +163,18 @@ fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str) -> Result
 
     // Folder-open task that starts a real, user-facing Claude session in the
     // integrated terminal. --remote-control lets the user drive the session
-    // remotely; mAIestro still only launches it, it does not host it.
+    // remotely; mAIestro still only launches it, it does not host it. --name
+    // gives the session the same display name mAIestro tracks it by.
+    let command = format!(
+        "claude --remote-control --name {}",
+        shell_quote(session_title)
+    );
     let tasks = serde_json::json!({
         "version": "2.0.0",
         "tasks": [{
             "label": "Start Claude",
             "type": "shell",
-            "command": "claude --remote-control",
+            "command": command,
             "isBackground": true,
             "problemMatcher": [],
             "presentation": { "reveal": "always", "panel": "new", "focus": true },
@@ -400,7 +412,7 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
         Err(e) => warnings.push(format!("could not resolve token user for assignment: {e}")),
     }
 
-    write_vscode_files(&work_dir, &work_parent, color)?;
+    write_vscode_files(&work_dir, &work_parent, color, &session_title)?;
 
     // Record the session so mAIestro can track it (and so its color counts as
     // taken for the next spawn). Non-fatal: the worktree already exists.
