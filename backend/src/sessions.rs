@@ -89,12 +89,14 @@ pub fn used_colors() -> Vec<String> {
 
 #[tauri::command]
 pub fn sessions_list() -> Vec<Session> {
+    crate::log_invoke_debug!("sessions_list");
     load_all()
 }
 
 /// Set (or clear) a work item's hide/snooze state. `hidden = None` unhides.
 #[tauri::command]
 pub fn session_set_visibility(session_id: String, hidden: Option<HideState>) -> Result<(), String> {
+    crate::log_invoke!("session_set_visibility", session_id = %session_id);
     let mut session = get(&session_id).ok_or_else(|| format!("session not found: {session_id}"))?;
     session.hidden = hidden;
     save(&session).map_err(|e| e.to_string())

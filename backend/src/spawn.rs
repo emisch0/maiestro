@@ -411,6 +411,7 @@ return "notfound""#
 /// window for that folder if one is open, otherwise launch a new window.
 #[tauri::command]
 pub async fn open_in_editor(work_dir: String) -> Result<(), String> {
+    crate::log_invoke!("open_in_editor", work_dir = %work_dir);
     let path = PathBuf::from(&work_dir);
     if let Some(marker) = window_marker(&path) {
         if focus_editor_window(&marker).await {
@@ -474,6 +475,7 @@ struct SpawnDecision<'a> {
 /// Core worktree + session creation, shared by every spawn path. Resolves the
 /// repo's settings/identity/checkout itself; the caller supplies the issue facts
 /// and the (reviewed) label/theming. The slug is `<n>-<slug(short_label)>`.
+#[tracing::instrument(skip_all, fields(session = tracing::field::Empty))]
 async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     let SpawnDecision { repo, issue_number, issue_url, default_branch, short_label, color, emoji, force_new } = d;
 
@@ -505,10 +507,13 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     let base_workspace = format!("{issue_number}-{}", slugify(&short_label, 25));
     let base_branch = format!("feature/{base_workspace}");
     let base_dir = worktree_dir(&base_workspace);
+    // Tag this span (and so every log line it emits) with the workspace session id.
+    tracing::Span::current().record("session", base_workspace.as_str());
 
     // Reuse an existing workspace by default; --new forces a fresh one.
     if !force_new && base_dir.is_dir() {
         open_vscode(&base_dir)?;
+        tracing::info!(repo = %repo, issue = issue_number, branch = %base_branch, reused = true, "spawned workspace");
         return Ok(SpawnResult {
             work_dir: base_dir.display().to_string(),
             branch: base_branch,
@@ -531,15 +536,21 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         session_label = format!("{prefix}{short_label} ({n})");
         n += 1;
     }
+    // Re-record once the final (possibly suffixed) workspace id is resolved.
+    tracing::Span::current().record("session", workspace.as_str());
 
     let session_title = format!("{emoji} {session_label}");
 
     // Create the worktree from the repo's default branch.
     let work_parent = work_dir.parent().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     std::fs::create_dir_all(work_dir.parent().unwrap()).map_err(|e| e.to_string())?;
-    git(&checkout, &["fetch", "origin", "--quiet"]).ok();
+    if let Err(e) = git(&checkout, &["fetch", "origin", "--quiet"]) {
+        tracing::warn!(error = %e, "git fetch before spawn failed (continuing)");
+    }
     git(&checkout, &["worktree", "add", &work_dir.to_string_lossy(), "-b", &branch, &format!("origin/{default_branch}")])?;
-    git(&work_dir, &["branch", "--unset-upstream"]).ok();
+    if let Err(e) = git(&work_dir, &["branch", "--unset-upstream"]) {
+        tracing::warn!(error = %e, "git branch --unset-upstream failed (continuing)");
+    }
 
     // Copy configured env files (relative to checkout) into the worktree.
     let mut warnings = Vec::new();
@@ -604,6 +615,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
 
     open_vscode(&work_dir)?;
 
+    tracing::info!(repo = %repo, issue = issue_number, branch = %branch, reused = false, "spawned workspace");
     Ok(SpawnResult {
         work_dir: work_dir.display().to_string(),
         branch,
@@ -631,6 +643,7 @@ async fn issue_facts(gh: &GitHub, repo: &str, issue_number: u64) -> Result<(Stri
 /// through `prepare_spawn` + `confirm_spawn`.
 #[tauri::command]
 pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
+    crate::log_invoke!("spawn_work", repo = %repo, issue = issue_number, force_new);
     let settings = crate::repo_settings::repo_settings_get(repo.clone());
     let identity_id = settings
         .identity_id
@@ -839,6 +852,7 @@ pub async fn create_issue(
     idea: String,
     use_raw_fallback: bool,
 ) -> Result<CreateIssueOutcome, String> {
+    crate::log_invoke!("create_issue", repo = %repo, use_raw_fallback);
     let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
     let (title, body, warning) = match step {
         DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
@@ -861,6 +875,7 @@ pub async fn create_issue(
 /// Used by the create-issue preview's confirm button.
 #[tauri::command]
 pub async fn create_issue_direct(repo: String, title: String, body: String) -> Result<CreateIssueOutcome, String> {
+    crate::log_invoke!("create_issue_direct", repo = %repo);
     let title = title.trim();
     if title.is_empty() {
         return Err("Issue title can't be empty.".into());
@@ -888,6 +903,7 @@ pub async fn create_issue_and_spawn(
     use_raw_fallback: bool,
     force_new: bool,
 ) -> Result<CreateAndSpawnOutcome, String> {
+    crate::log_invoke!("create_issue_and_spawn", repo = %repo, use_raw_fallback, force_new);
     let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
     let (title, body, draft_warning) = match step {
         DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
@@ -926,6 +942,7 @@ pub struct SpawnPlan {
 /// pick theming, without touching the worktree or GitHub.
 #[tauri::command]
 pub async fn prepare_spawn(repo: String, issue_number: u64) -> Result<SpawnPlan, String> {
+    crate::log_invoke!("prepare_spawn", repo = %repo, issue = issue_number);
     let settings = crate::repo_settings::repo_settings_get(repo.clone());
     let identity_id = settings
         .identity_id
@@ -966,6 +983,7 @@ pub async fn draft_spawn_preview(
     idea: String,
     use_raw_fallback: bool,
 ) -> Result<DraftPreviewOutcome, String> {
+    crate::log_invoke!("draft_spawn_preview", repo = %repo, use_raw_fallback);
     let (_gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
     match step {
         DraftStep::Ready { title, body, short_title, .. } => {
@@ -1006,6 +1024,7 @@ pub struct SpawnEdits {
 /// build the worktree/session using the reviewed label and theming.
 #[tauri::command]
 pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> Result<SpawnResult, String> {
+    crate::log_invoke!("confirm_spawn", repo = %repo, force_new);
     let settings = crate::repo_settings::repo_settings_get(repo.clone());
     let identity_id = settings
         .identity_id
@@ -1126,6 +1145,7 @@ fn worktree_in_use(work_dir: &Path) -> bool {
 /// Triggered only by an explicit user click — we never launch it automatically.
 #[tauri::command]
 pub fn open_accessibility_settings() {
+    crate::log_invoke!("open_accessibility_settings");
     let _ = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         .spawn();
@@ -1152,7 +1172,9 @@ pub enum TeardownOutcome {
 /// removal failures), then the worktree, local branch, directory, and session
 /// record are removed.
 #[tauri::command]
+#[tracing::instrument(skip_all, fields(session = %session_id))]
 pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Result<TeardownOutcome, String> {
+    crate::log_invoke!("teardown", confirmed, force);
     let session = crate::sessions::get(&session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
     let work_dir = PathBuf::from(&session.work_dir);
@@ -1271,7 +1293,9 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     // 3. Delete the local branch (-D: spawn unset the upstream and -d checks the
     //    wrong base, so it would refuse even for merged branches).
     if local_branch_exists(&checkout, &branch) {
-        let _ = git(&checkout, &["branch", "-D", &branch]);
+        if let Err(e) = git(&checkout, &["branch", "-D", &branch]) {
+            tracing::warn!(branch = %branch, error = %e, "could not delete local branch during teardown");
+        }
     }
 
     // 4. Remove the leftover wrapper dir (`<prefix><workspace>`), gating removal
@@ -1282,14 +1306,19 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
         let expanded = expand_tilde(prefix);
         let under_prefix = parent.to_string_lossy().starts_with(&*expanded.to_string_lossy());
         if under_prefix && parent.exists() {
-            let _ = std::fs::remove_dir_all(parent);
+            if let Err(e) = std::fs::remove_dir_all(parent) {
+                tracing::warn!(dir = %parent.display(), error = %e, "could not remove worktree wrapper dir during teardown");
+            }
         }
     }
 
     // 5. Drop the session record and its live status file.
-    let _ = crate::sessions::delete(&session_id);
+    if let Err(e) = crate::sessions::delete(&session_id) {
+        tracing::warn!(error = %e, "could not delete session record during teardown");
+    }
     crate::status::remove(&session_id);
 
+    tracing::info!(branch = %branch, "tore down workspace");
     Ok(TeardownOutcome::Done)
 }
 
@@ -1330,7 +1359,9 @@ fn pr_state(pr: &serde_json::Value) -> String {
 /// the same: it simply renders no PR button. Only an actual API failure (e.g.
 /// auth/network) surfaces as `Err`, which the frontend also degrades silently.
 #[tauri::command]
+#[tracing::instrument(skip_all, fields(session = %session_id))]
 pub async fn session_pr(session_id: String) -> Result<Option<PrLink>, String> {
+    crate::log_invoke_debug!("session_pr");
     let Some(session) = crate::sessions::get(&session_id) else {
         return Ok(None);
     };
@@ -1391,7 +1422,9 @@ fn change_summary(work_dir: &Path, base: &str) -> String {
 /// separate), reuses an already-open PR instead of duplicating, and links the PR
 /// to the originating issue with `Closes #N`.
 #[tauri::command]
+#[tracing::instrument(skip_all, fields(session = %session_id))]
 pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
+    crate::log_invoke!("session_create_pr");
     let session = crate::sessions::get(&session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
     let work_dir = PathBuf::from(&session.work_dir);
@@ -1449,11 +1482,16 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
     );
 
     // Draft via Claude. If drafting fails (claude errored, or its reply had no
-    // parseable {title, body}), propagate the error and abort *before* pushing
-    // or opening the PR — we'd rather tell the user why than open a garbage PR.
-    // The PR draft reuses the issue-draft parser but only needs title + body.
-    let reply = claude_text(&work_dir, &prompt, "drafting the PR").await?;
-    let (title, body, _) = parse_issue_draft(&reply)?;
+    // parseable {title, body}), log and propagate the error and abort *before*
+    // pushing or opening the PR — we'd rather tell the user why than open a
+    // garbage PR. The PR draft reuses the issue-draft parser but only needs
+    // title + body.
+    let reply = claude_text(&work_dir, &prompt, "drafting the PR")
+        .await
+        .map_err(|e| { tracing::warn!(error = %e, "Claude PR draft failed"); e })?;
+    let (title, body, _) = parse_issue_draft(&reply)
+        .map_err(|e| { tracing::warn!(error = %e, "PR draft reply was unparseable"); e })?;
+
     let body = format!("{body}\n\nCloses #{}", session.issue_number);
 
     // Draft succeeded — now push the branch so GitHub can see the head ref. -u
@@ -1464,5 +1502,7 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
     let pr = gh
         .create_pull(&session.repo, &title, &branch, &base, &body, true)
         .await?;
-    Ok(pr_link_from(&pr))
+    let link = pr_link_from(&pr);
+    tracing::info!(repo = %session.repo, branch = %branch, pr = link.number, "created pull request");
+    Ok(link)
 }
