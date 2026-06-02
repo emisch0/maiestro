@@ -1293,14 +1293,9 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
         }
     }
 
-    // Push the branch so GitHub can see the head ref. -u sets upstream for the
-    // user's later pushes from the session.
-    git(&work_dir, &["push", "-u", "origin", &branch])
-        .map_err(|e| format!("could not push branch {branch}: {e}"))?;
-
     // Seed the draft with the issue title/body for context (best-effort).
     let issue = gh.issue(&session.repo, session.issue_number).await.unwrap_or_default();
-    let issue_title = issue["title"].as_str().unwrap_or("").to_string();
+    let issue_title = issue["title"].as_str().unwrap_or("");
     let issue_body = issue["body"].as_str().unwrap_or("");
 
     let summary = change_summary(&work_dir, &base);
@@ -1314,30 +1309,21 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
         number = session.issue_number,
     );
 
-    // Draft via Claude; fall back to the issue title + change summary if it fails
-    // so the action still produces a usable PR.
-    let (title, body) = match claude_text(&work_dir, &prompt, "drafting the PR").await {
-        // The PR draft reuses the issue-draft parser but only needs title + body.
-        Ok(reply) => parse_issue_draft(&reply)
-            .map(|(t, b, _)| (t, b))
-            .unwrap_or_else(|_| (fallback_title(&issue_title, &branch), summary.clone())),
-        Err(_) => (fallback_title(&issue_title, &branch), summary.clone()),
-    };
-
+    // Draft via Claude. If drafting fails (claude errored, or its reply had no
+    // parseable {title, body}), propagate the error and abort *before* pushing
+    // or opening the PR — we'd rather tell the user why than open a garbage PR.
+    // The PR draft reuses the issue-draft parser but only needs title + body.
+    let reply = claude_text(&work_dir, &prompt, "drafting the PR").await?;
+    let (title, body, _) = parse_issue_draft(&reply)?;
     let body = format!("{body}\n\nCloses #{}", session.issue_number);
+
+    // Draft succeeded — now push the branch so GitHub can see the head ref. -u
+    // sets upstream for the user's later pushes from the session.
+    git(&work_dir, &["push", "-u", "origin", &branch])
+        .map_err(|e| format!("could not push branch {branch}: {e}"))?;
 
     let pr = gh
         .create_pull(&session.repo, &title, &branch, &base, &body, true)
         .await?;
     Ok(pr_link_from(&pr))
-}
-
-/// Title to use when the AI draft is unavailable: the tracked issue title, or
-/// the branch name as a last resort.
-fn fallback_title(issue_title: &str, branch: &str) -> String {
-    if issue_title.trim().is_empty() {
-        branch.to_string()
-    } else {
-        issue_title.to_string()
-    }
 }
