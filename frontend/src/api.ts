@@ -31,6 +31,19 @@ export type CreateAndSpawnOutcome =
   | ({ status: "spawned" } & SpawnResult)
   | { status: "needs_confirmation"; message: string };
 
+export interface Session {
+  id: string;
+  repo: string;
+  issue_number: number;
+  issue_url: string;
+  branch: string;
+  work_dir: string;
+  checkout_dir: string;
+  session_title: string;
+  color: string;
+  emoji: string;
+}
+
 export type CredentialScope = { kind: "identity"; identity_id: string };
 
 export interface CredentialTypeDto {
@@ -83,9 +96,15 @@ export const api = {
   openUrl: (url: string) =>
     invoke<void>("open_url", { url }),
 
+  openPath: (path: string) =>
+    invoke<void>("open_path", { path }),
+
   spawnWork: (repo: string, issueNumber: number, forceNew = false) =>
     invoke<SpawnResult>("spawn_work", { repo, issueNumber, forceNew }),
 
   createIssueAndSpawn: (repo: string, idea: string, useRawFallback = false, forceNew = false) =>
     invoke<CreateAndSpawnOutcome>("create_issue_and_spawn", { repo, idea, useRawFallback, forceNew }),
+
+  sessionsList: () =>
+    invoke<Session[]>("sessions_list"),
 };

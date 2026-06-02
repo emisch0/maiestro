@@ -16,3 +16,17 @@ pub fn open_url(url: String) -> Result<(), String> {
         .map_err(|e| format!("failed to open {url}: {e}"))?;
     Ok(())
 }
+
+/// Opens a local path in Finder (a directory opens that folder).
+#[tauri::command]
+pub fn open_path(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("path does not exist: {path}"));
+    }
+    Command::new("open")
+        .arg(p)
+        .spawn()
+        .map_err(|e| format!("failed to open {path}: {e}"))?;
+    Ok(())
+}

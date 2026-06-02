@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, IssueNode, RepoSettings } from "./api";
+import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, IssueNode, RepoSettings, Session } from "./api";
 
 type Tab = "identity" | "repo";
 type SaveStatus = "idle" | "saving" | "saved" | "clearing" | "error";
@@ -589,14 +589,6 @@ async function openSettings() {
   }
 }
 
-// A spawned branch / worktree under a repo. None exist yet — spawning is a
-// later step — but the row-rendering path is here so adding them is trivial.
-interface Workspace {
-  branch: string;
-  issue?: number;
-  title?: string;
-}
-
 type Picker = {
   repo: string;
   loading: boolean;
@@ -703,12 +695,23 @@ function MainView() {
   // Which thing in the overlay is expanded: the idea box, one issue row, or none.
   const [expanded, setExpanded] = useState<Expand>(null);
 
-  // Keyed by repo full_name. Empty until branch spawning is wired up.
-  const workspaces: Record<string, Workspace[]> = {};
+  const [sessions, setSessions] = useState<Session[]>([]);
+
+  const refreshSessions = useCallback(() => {
+    api.sessionsList().then(setSessions).catch(() => {});
+  }, []);
 
   useEffect(() => {
     api.listRepos().then(setRepos);
-  }, []);
+    refreshSessions();
+  }, [refreshSessions]);
+
+  // Tracked sessions grouped by repo full_name.
+  const sessionsByRepo = useMemo(() => {
+    const grouped: Record<string, Session[]> = {};
+    for (const s of sessions) (grouped[s.repo] ??= []).push(s);
+    return grouped;
+  }, [sessions]);
 
   function closePicker() {
     setPicker(null);
@@ -742,6 +745,7 @@ function MainView() {
         : `Spawned #${node.number} on ${res.branch} → ${res.work_dir}`;
       const note = res.warnings.length ? `${summary}\n⚠ ${res.warnings.join("; ")}` : summary;
       setPicker((p) => (p ? { ...p, note } : p));
+      refreshSessions();
     } catch (e) {
       setPicker((p) => (p ? { ...p, note: `Failed to spawn #${node.number}: ${String(e)}` } : p));
     }
@@ -754,6 +758,7 @@ function MainView() {
       const summary = `Spawned ${res.issue_url} on ${res.branch} → ${res.work_dir}`;
       const note = res.warnings.length ? `${summary}\n⚠ ${res.warnings.join("; ")}` : summary;
       setPicker((p) => (p ? { ...p, note, confirm: undefined } : p));
+      refreshSessions();
     }
   }
 
@@ -803,7 +808,7 @@ function MainView() {
           </div>
         ) : (
           repos.map((repo) => {
-            const ws = workspaces[repo] ?? [];
+            const repoSessions = sessionsByRepo[repo] ?? [];
             return (
               <div key={repo} className="repo-group">
                 <div className="repo-group-header">
@@ -813,13 +818,38 @@ function MainView() {
                   </button>
                 </div>
 
-                {ws.length === 0 ? (
+                {repoSessions.length === 0 ? (
                   <p className="repo-group-empty">No active work</p>
                 ) : (
-                  ws.map((w) => (
-                    <div key={w.branch} className="workspace-row">
-                      <span className="workspace-branch">{w.branch}</span>
-                      {w.title && <span className="workspace-title">{w.title}</span>}
+                  repoSessions.map((s) => (
+                    <div
+                      key={s.id}
+                      className="workspace-row"
+                      style={{ borderLeft: `3px solid ${s.color}` }}
+                    >
+                      <span className="workspace-title">{s.session_title}</span>
+                      <div className="session-pill">
+                        <button
+                          className="pill-btn"
+                          onClick={() => api.openUrl(s.issue_url)}
+                          title={`Open issue #${s.issue_number} on GitHub`}
+                        >
+                          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+                          </svg>
+                          #{s.issue_number}
+                        </button>
+                        <button
+                          className="pill-btn"
+                          onClick={() => api.openPath(s.work_dir)}
+                          title={`Reveal in Finder: ${s.work_dir}`}
+                          aria-label="Open folder in Finder"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+                          </svg>
+                        </button>
+                      </div>
                     </div>
                   ))
                 )}

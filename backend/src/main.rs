@@ -67,6 +67,7 @@ fn main() {
             identities::identities_get_default,
             identities::identities_set_default,
             links::open_url,
+            links::open_path,
             spawn::spawn_work,
             spawn::create_issue_and_spawn,
             sessions::sessions_list,
