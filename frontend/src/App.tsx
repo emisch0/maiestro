@@ -747,6 +747,9 @@ function MainView() {
   const [commandsOpen, setCommandsOpen] = useState<string | null>(null);
   // Pending Clean Up confirmation: the session id and the warnings to show.
   const [cleanupConfirm, setCleanupConfirm] = useState<{ id: string; warnings: string[] } | null>(null);
+  // Create-PR progress/error per session id: `{ creating }` while in flight,
+  // `{ error }` after a failure. Absent = idle.
+  const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; error?: string }>>({});
 
   const refreshSessions = useCallback(() => {
     api.sessionsList().then((list) => {
@@ -887,6 +890,20 @@ function MainView() {
     }
   }
 
+  // "Create PR": push the branch, draft a description with Claude, and open a
+  // draft PR. On success the PR pill refreshes to link the new PR (we don't
+  // open it in the browser — the pill is the entry point).
+  async function createPr(s: Session) {
+    setPrCreate((prev) => ({ ...prev, [s.id]: { creating: true } }));
+    try {
+      const pr = await api.createPr(s.id);
+      setPrs((prev) => ({ ...prev, [s.id]: pr }));
+      setPrCreate((prev) => ({ ...prev, [s.id]: {} }));
+    } catch (e) {
+      setPrCreate((prev) => ({ ...prev, [s.id]: { error: String(e) } }));
+    }
+  }
+
   // "Clean Up": tear down the worktree. Confirms first unless the backend says
   // it's safe (PR merged, nothing new).
   async function cleanUp(s: Session) {
@@ -949,6 +966,10 @@ function MainView() {
                     const cmdOpen = commandsOpen === s.id;
                     const pr = prs[s.id];
                     const PrIcon = pr ? (PR_STATE_ICONS[pr.state] ?? PrOpenIcon) : null;
+                    // An active PR (open or still a draft) already covers this branch,
+                    // so disable Create PR; the pill links to it.
+                    const prOpen = pr?.state === "open" || pr?.state === "draft";
+                    const prc = prCreate[s.id];
                     return (
                     <div key={s.id} className="workspace-item">
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
@@ -1002,11 +1023,29 @@ function MainView() {
                         </button>
                       </div>
                       <div className={`command-strip ${cmdOpen ? "command-strip--open" : ""}`}>
-                        {/* Create PR / Merge PR are UI-only for now. */}
-                        <button className="command-btn" onClick={() => {}}>Create PR</button>
+                        <button
+                          className="command-btn"
+                          onClick={() => createPr(s)}
+                          disabled={prc?.creating || prOpen}
+                          title={prOpen ? `PR #${pr?.number} is already open` : undefined}
+                        >
+                          {prc?.creating ? "Creating PR…" : "Create PR"}
+                        </button>
+                        {/* Merge PR is UI-only for now. */}
                         <button className="command-btn" onClick={() => {}}>Merge PR</button>
                         <button className="command-btn" onClick={() => cleanUp(s)}>Clean Up</button>
                       </div>
+                      {prc?.error && (
+                        <div className="cleanup-confirm">
+                          <p className="cleanup-lead">Couldn't create the PR</p>
+                          <ul className="cleanup-warnings">
+                            <li>{prc.error}</li>
+                          </ul>
+                          <div className="issue-actions">
+                            <button className="btn-ghost" onClick={() => setPrCreate((prev) => ({ ...prev, [s.id]: {} }))}>Dismiss</button>
+                          </div>
+                        </div>
+                      )}
                       {cleanupConfirm?.id === s.id && (
                         <div className="cleanup-confirm">
                           <p className="cleanup-lead">Remove this workspace?</p>

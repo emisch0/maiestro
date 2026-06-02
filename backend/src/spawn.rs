@@ -612,30 +612,25 @@ fn parse_issue_draft(text: &str) -> Result<(String, String), String> {
     Ok((title, body))
 }
 
-/// Ask Claude (haiku), running in the repo checkout for context, to turn the
-/// user's free-text idea into an issue title + markdown body. Uses
-/// `--output-format json` so we parse a stable envelope rather than guessing at
-/// raw text, and surfaces stdout/stderr in errors when something goes wrong.
-async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String), String> {
-    let prompt = format!(
-        "Based on this idea for a change to this codebase, draft a GitHub issue. \
-         Reply with ONLY a JSON object of the form {{\"title\": string, \"body\": string}}. \
-         The title is a concise summary (max ~70 characters). The body is clear markdown \
-         describing the work. Idea: {idea}"
-    );
-    // `--tools ""` disables ALL tools: this call only needs to generate text, so
-    // it must not be able to read arbitrary files, run Bash, edit, or fetch URLs
-    // — even though it runs in the real checkout with the user's ambient
-    // permissions. That contains prompt injection from the idea text (or from
-    // repo files like CLAUDE.md, which is still loaded as context) to, at worst,
-    // a bad issue title/body the user reviews — not code execution or exfiltration.
+/// Run Claude (haiku) headlessly with `prompt`, in `dir` for repo context, and
+/// return its reply text. Uses `--output-format json` so we parse a stable
+/// envelope rather than guessing at raw text, and surfaces stdout/stderr in
+/// errors when something goes wrong.
+///
+/// `--tools ""` disables ALL tools: these calls only need to generate text, so
+/// the model must not be able to read arbitrary files, run Bash, edit, or fetch
+/// URLs — even though it runs in the real checkout/worktree with the user's
+/// ambient permissions. That contains prompt injection from the input text (or
+/// from repo files like CLAUDE.md, which is still loaded as context) to, at
+/// worst, a bad title/body the user reviews — not code execution or exfiltration.
+async fn claude_text(dir: &Path, prompt: &str, what: &str) -> Result<String, String> {
     let run = tokio::process::Command::new(claude_binary())
-        .current_dir(checkout)
-        .args(["-p", &prompt, "--model", "haiku", "--output-format", "json", "--tools", ""])
+        .current_dir(dir)
+        .args(["-p", prompt, "--model", "haiku", "--output-format", "json", "--tools", ""])
         .output();
     let output = tokio::time::timeout(std::time::Duration::from_secs(90), run)
         .await
-        .map_err(|_| "claude timed out while drafting the issue".to_string())?
+        .map_err(|_| format!("claude timed out while {what}"))?
         .map_err(|e| format!("could not run claude (is it installed and on PATH?): {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -651,7 +646,20 @@ async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String), St
     if envelope["is_error"].as_bool().unwrap_or(false) {
         return Err(format!("claude reported an error: {}", snippet(envelope["result"].as_str().unwrap_or(""))));
     }
-    parse_issue_draft(envelope["result"].as_str().unwrap_or(""))
+    Ok(envelope["result"].as_str().unwrap_or("").to_string())
+}
+
+/// Ask Claude (haiku), running in the repo checkout for context, to turn the
+/// user's free-text idea into an issue title + markdown body.
+async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String), String> {
+    let prompt = format!(
+        "Based on this idea for a change to this codebase, draft a GitHub issue. \
+         Reply with ONLY a JSON object of the form {{\"title\": string, \"body\": string}}. \
+         The title is a concise summary (max ~70 characters). The body is clear markdown \
+         describing the work. Idea: {idea}"
+    );
+    let reply = claude_text(checkout, &prompt, "drafting the issue").await?;
+    parse_issue_draft(&reply)
 }
 
 /// Draft an issue from the user's idea (via Claude), open it on GitHub, then
@@ -991,4 +999,127 @@ pub async fn session_pr(session_id: String) -> Result<Option<PrLink>, String> {
         title: pr["title"].as_str().unwrap_or("").to_string(),
         state: pr_state(pr),
     }))
+}
+
+// ── Create PR ───────────────────────────────────────────────────────────────────
+
+fn pr_link_from(pr: &serde_json::Value) -> PrLink {
+    PrLink {
+        number: pr["number"].as_u64().unwrap_or(0),
+        html_url: pr["html_url"].as_str().unwrap_or("").to_string(),
+        title: pr["title"].as_str().unwrap_or("").to_string(),
+        state: pr_state(pr),
+    }
+}
+
+/// Build a context blob describing the branch's changes for the PR drafter: the
+/// commit log plus the diff against the base, capped so a huge diff falls back
+/// to a file-level `--stat` rather than blowing past the prompt budget.
+fn change_summary(work_dir: &Path, base: &str) -> String {
+    let range = format!("origin/{base}..HEAD");
+    let log = git(work_dir, &["log", "--oneline", &range]).unwrap_or_default();
+    let diff = git(work_dir, &["diff", &format!("origin/{base}...HEAD")]).unwrap_or_default();
+    const MAX_DIFF: usize = 12_000;
+    let diff_section = if diff.chars().count() > MAX_DIFF {
+        let stat = git(work_dir, &["diff", "--stat", &format!("origin/{base}...HEAD")]).unwrap_or_default();
+        format!("Diff too large to include in full; file-level summary:\n{stat}")
+    } else {
+        diff
+    };
+    format!("Commits:\n{log}\n\nDiff:\n{diff_section}")
+}
+
+/// Create a draft pull request for a session's branch, with a Claude-drafted
+/// title and description. Pushes the branch to origin first (mAIestro's own
+/// local-git op, like `git worktree add` — the launched session's own pushes are
+/// separate), reuses an already-open PR instead of duplicating, and links the PR
+/// to the originating issue with `Closes #N`.
+#[tauri::command]
+pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
+    let session = crate::sessions::get(&session_id)
+        .ok_or_else(|| format!("session not found: {session_id}"))?;
+    let work_dir = PathBuf::from(&session.work_dir);
+    let base = session.default_branch.clone();
+    let branch = session.branch.clone();
+
+    // Guard: uncommitted changes wouldn't make it into the PR (it's built from the
+    // pushed branch), so block and ask the user to commit them first.
+    let dirty = git(&work_dir, &["status", "--porcelain"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if dirty {
+        return Err("This worktree has uncommitted changes. Commit them first, then create the PR.".to_string());
+    }
+
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let identity_id = settings
+        .identity_id
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
+
+    // Refresh the base ref so the ahead-count and diff compare against current origin.
+    git(&work_dir, &["fetch", "origin", &base, "--quiet"]).ok();
+
+    // Guard: nothing to open a PR for.
+    let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{base}..HEAD")])
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    if ahead == 0 {
+        return Err(format!("No commits on this branch ahead of {base} to open a PR for."));
+    }
+
+    // Reuse an existing open/draft PR instead of creating a duplicate.
+    if let Ok(prs) = gh.pulls_for_branch(&session.repo, &branch).await {
+        if let Some(open) = prs.iter().find(|p| p["state"].as_str() == Some("open")) {
+            return Ok(pr_link_from(open));
+        }
+    }
+
+    // Push the branch so GitHub can see the head ref. -u sets upstream for the
+    // user's later pushes from the session.
+    git(&work_dir, &["push", "-u", "origin", &branch])
+        .map_err(|e| format!("could not push branch {branch}: {e}"))?;
+
+    // Seed the draft with the issue title/body for context (best-effort).
+    let issue = gh.issue(&session.repo, session.issue_number).await.unwrap_or_default();
+    let issue_title = issue["title"].as_str().unwrap_or("").to_string();
+    let issue_body = issue["body"].as_str().unwrap_or("");
+
+    let summary = change_summary(&work_dir, &base);
+    let prompt = format!(
+        "Draft a GitHub pull request description for the changes below. Reply with ONLY a \
+         JSON object of the form {{\"title\": string, \"body\": string}}. The title is a \
+         concise summary of the overall change (max ~70 characters). The body is clear \
+         markdown explaining what changed and why; do not include a heading that repeats the \
+         title. This PR resolves issue #{number} (\"{issue_title}\"). \
+         \n\nOriginating issue body:\n{issue_body}\n\nChanges:\n{summary}",
+        number = session.issue_number,
+    );
+
+    // Draft via Claude; fall back to the issue title + change summary if it fails
+    // so the action still produces a usable PR.
+    let (title, body) = match claude_text(&work_dir, &prompt, "drafting the PR").await {
+        Ok(reply) => parse_issue_draft(&reply).unwrap_or_else(|_| {
+            (fallback_title(&issue_title, &branch), summary.clone())
+        }),
+        Err(_) => (fallback_title(&issue_title, &branch), summary.clone()),
+    };
+
+    let body = format!("{body}\n\nCloses #{}", session.issue_number);
+
+    let pr = gh
+        .create_pull(&session.repo, &title, &branch, &base, &body, true)
+        .await?;
+    Ok(pr_link_from(&pr))
+}
+
+/// Title to use when the AI draft is unavailable: the tracked issue title, or
+/// the branch name as a last resort.
+fn fallback_title(issue_title: &str, branch: &str) -> String {
+    if issue_title.trim().is_empty() {
+        branch.to_string()
+    } else {
+        issue_title.to_string()
+    }
 }
