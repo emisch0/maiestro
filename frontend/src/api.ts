@@ -128,4 +128,7 @@ export const api = {
 
   sessionPr: (sessionId: string) =>
     invoke<PrLink | null>("session_pr", { sessionId }),
+
+  createPr: (sessionId: string) =>
+    invoke<PrLink>("session_create_pr", { sessionId }),
 };
