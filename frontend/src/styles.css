@@ -36,6 +36,7 @@ body {
 /* ── Panel shell ─────────────────────────────────────────────────────── */
 
 .panel {
+  position: relative;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -84,12 +85,231 @@ body {
   color: var(--text);
 }
 
-.main-body {
+/* ── Main window: work list ──────────────────────────────────────────── */
+
+.work-list {
   flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+}
+
+.work-list .empty-state {
+  margin-top: 24px;
+}
+
+.repo-group {
+  margin-bottom: 6px;
+}
+
+.repo-group + .repo-group {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+
+.repo-group-header {
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 8px;
+  padding: 4px 6px;
+}
+
+.repo-group-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-group-header .btn-add {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.repo-group-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 2px 6px 4px 14px;
+}
+
+.workspace-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px 4px 14px;
+  border-radius: var(--radius);
+}
+
+.workspace-row:hover {
+  background: var(--surface-hover);
+}
+
+.workspace-branch {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.workspace-title {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Start Work overlay ──────────────────────────────────────────────── */
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.overlay-panel {
+  flex: 1;
+  margin: 10px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.overlay-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.overlay-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overlay-search-wrap {
+  padding: 8px 10px;
+  flex-shrink: 0;
+}
+
+.overlay-body {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  padding: 2px 6px 8px;
+}
+
+.issue-tree {
+  display: flex;
+  flex-direction: column;
+}
+
+.issue-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius);
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font);
+}
+
+.issue-row:hover {
+  background: var(--surface-hover);
+}
+
+.issue-number {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.issue-title {
+  font-size: 12.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.issue-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 6px 8px 2px;
+}
+
+/* Expanded issue row: full wrapped title plus Spawn/Cancel actions. */
+.issue-row--expanded {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px;
+  background: var(--surface-hover);
+  cursor: default;
+}
+
+.issue-expanded-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.issue-title-full {
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+.issue-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.btn-ghost {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--font);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.btn-ghost:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* The idea box reveals its create/cancel actions when focused. */
+.overlay-search-wrap.idea-open {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .panel-header h1 {

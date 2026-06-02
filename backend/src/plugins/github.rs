@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::credentials::{CredentialScope, CredentialStore};
 use crate::plugin::{CredentialTypeInfo, Plugin, ResolvedCredential};
 
@@ -90,4 +90,186 @@ pub async fn github_list_repos(identity_id: String) -> Result<Vec<RepoItem>, Str
     }
 
     Ok(repos)
+}
+
+/// An open issue plus its open sub-issues, nested recursively.
+#[derive(serde::Serialize)]
+pub struct IssueNode {
+    pub number: u64,
+    pub title: String,
+    pub html_url: String,
+    pub children: Vec<IssueNode>,
+}
+
+struct IssueMeta {
+    title: String,
+    html_url: String,
+    created_at: String, // ISO-8601; lexicographic order == chronological order
+}
+
+/// List a repo's open issues as a tree, nesting GitHub's native sub-issues under
+/// their parent. `repo` is "owner/name". Pull requests are excluded, and issues
+/// are ordered most-recently-created first at every level.
+#[tauri::command]
+pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec<IssueNode>, String> {
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| format!("invalid repo (expected owner/name): {repo}"))?;
+
+    let scope = CredentialScope::Identity { identity_id };
+    let token = CredentialStore::get("github_token", &scope)
+        .map_err(|_| "No GitHub token found for this identity. Set one in Settings.".to_string())?;
+
+    let client = reqwest::Client::builder()
+        .user_agent("maiestro/0.1")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // 1. Collect every open issue. The issues endpoint also returns PRs, so skip
+    //    anything carrying a `pull_request` field. Remember which ones have
+    //    sub-issues so we only make follow-up calls where needed.
+    let mut meta: HashMap<u64, IssueMeta> = HashMap::new();
+    let mut parents: Vec<u64> = Vec::new();
+    let mut page: u32 = 1;
+
+    loop {
+        let resp = client
+            .get(format!("https://api.github.com/repos/{owner}/{name}/issues"))
+            .query(&[
+                ("state", "open"),
+                ("sort", "created"),
+                ("direction", "desc"),
+                ("per_page", "100"),
+                ("page", &page.to_string()),
+            ])
+            .bearer_auth(&token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !resp.status().is_success() {
+            return Err(github_error(resp).await);
+        }
+
+        let data: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
+        let count = data.len();
+
+        for issue in data {
+            if issue.get("pull_request").is_some() {
+                continue;
+            }
+            let Some(number) = issue["number"].as_u64() else { continue };
+            meta.insert(number, issue_meta(&issue));
+            if issue["sub_issues_summary"]["total"].as_u64().unwrap_or(0) > 0 {
+                parents.push(number);
+            }
+        }
+
+        if count < 100 || page >= 10 {
+            break;
+        }
+        page += 1;
+    }
+
+    // 2. For each issue that has sub-issues, fetch them to learn the hierarchy.
+    let mut children_of: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut is_child: HashSet<u64> = HashSet::new();
+
+    for parent in parents {
+        let resp = client
+            .get(format!("https://api.github.com/repos/{owner}/{name}/issues/{parent}/sub_issues"))
+            .query(&[("per_page", "100")])
+            .bearer_auth(&token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // A repo without the sub-issues feature returns an error here; treat that
+        // as "no children" rather than failing the whole list.
+        if !resp.status().is_success() {
+            continue;
+        }
+
+        let subs: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
+        let mut kids = Vec::new();
+        for sub in subs {
+            let Some(n) = sub["number"].as_u64() else { continue };
+            if sub["state"].as_str() != Some("open") {
+                continue;
+            }
+            meta.entry(n).or_insert_with(|| issue_meta(&sub));
+            kids.push(n);
+            is_child.insert(n);
+        }
+        children_of.insert(parent, kids);
+    }
+
+    // 3. Order every sibling group most-recently-created first.
+    let by_recency = |a: &u64, b: &u64| {
+        let ca = meta.get(a).map(|m| m.created_at.as_str()).unwrap_or("");
+        let cb = meta.get(b).map(|m| m.created_at.as_str()).unwrap_or("");
+        cb.cmp(ca).then(b.cmp(a))
+    };
+    for kids in children_of.values_mut() {
+        kids.sort_by(by_recency);
+    }
+
+    // Roots are open issues that aren't anyone's sub-issue; build down from each.
+    let mut roots: Vec<u64> = meta.keys().copied().filter(|n| !is_child.contains(n)).collect();
+    roots.sort_by(by_recency);
+
+    let mut visited = HashSet::new();
+    let tree = roots
+        .iter()
+        .filter_map(|n| build_issue_node(*n, &meta, &children_of, &mut visited))
+        .collect();
+
+    Ok(tree)
+}
+
+fn issue_meta(issue: &serde_json::Value) -> IssueMeta {
+    IssueMeta {
+        title: issue["title"].as_str().unwrap_or("").to_string(),
+        html_url: issue["html_url"].as_str().unwrap_or("").to_string(),
+        created_at: issue["created_at"].as_str().unwrap_or("").to_string(),
+    }
+}
+
+fn build_issue_node(
+    number: u64,
+    meta: &HashMap<u64, IssueMeta>,
+    children_of: &HashMap<u64, Vec<u64>>,
+    visited: &mut HashSet<u64>,
+) -> Option<IssueNode> {
+    if !visited.insert(number) {
+        return None; // guard against unexpected cycles
+    }
+    let m = meta.get(&number)?;
+    let children = children_of
+        .get(&number)
+        .map(|kids| {
+            kids.iter()
+                .filter_map(|c| build_issue_node(*c, meta, children_of, visited))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(IssueNode {
+        number,
+        title: m.title.clone(),
+        html_url: m.html_url.clone(),
+        children,
+    })
+}
+
+async fn github_error(resp: reqwest::Response) -> String {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v["message"].as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()))
 }

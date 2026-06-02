@@ -12,6 +12,13 @@ export interface GHRepo {
   description: string | null;
 }
 
+export interface IssueNode {
+  number: number;
+  title: string;
+  html_url: string;
+  children: IssueNode[];
+}
+
 export type CredentialScope = { kind: "identity"; identity_id: string };
 
 export interface CredentialTypeDto {
@@ -57,4 +64,7 @@ export const api = {
 
   githubListRepos: (identityId: string) =>
     invoke<GHRepo[]>("github_list_repos", { identityId }),
+
+  githubListIssues: (identityId: string, repo: string) =>
+    invoke<IssueNode[]>("github_list_issues", { identityId, repo }),
 };

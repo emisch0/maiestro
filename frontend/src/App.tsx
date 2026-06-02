@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CredentialScope, CredentialTypeDto, GHRepo, RepoSettings } from "./api";
+import { api, CredentialScope, CredentialTypeDto, GHRepo, IssueNode, RepoSettings } from "./api";
 
 type Tab = "identity" | "repo";
 type SaveStatus = "idle" | "saving" | "saved" | "clearing" | "error";
@@ -589,7 +589,134 @@ async function openSettings() {
   }
 }
 
+// A spawned branch / worktree under a repo. None exist yet — spawning is a
+// later step — but the row-rendering path is here so adding them is trivial.
+interface Workspace {
+  branch: string;
+  issue?: number;
+  title?: string;
+}
+
+type Picker = {
+  repo: string;
+  loading: boolean;
+  issues: IssueNode[] | null;
+  error?: string;
+  query: string;
+  note?: string;
+};
+
+type Expand = { kind: "idea" } | { kind: "issue"; number: number } | null;
+
+// Prune the tree to nodes that match the query, keeping any ancestor that has a
+// matching descendant so hierarchy/context is preserved.
+function filterIssues(nodes: IssueNode[], query: string): IssueNode[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return nodes;
+  const keep = (n: IssueNode): IssueNode | null => {
+    const children = n.children.map(keep).filter((c): c is IssueNode => c !== null);
+    const self = n.title.toLowerCase().includes(q) || String(n.number).includes(q);
+    return self || children.length ? { ...n, children } : null;
+  };
+  return nodes.map(keep).filter((n): n is IssueNode => n !== null);
+}
+
+interface IssueRowProps {
+  node: IssueNode;
+  depth: number;
+  expandedNumber: number | null;
+  onExpand: (n: number) => void;
+  onCollapse: () => void;
+  onSpawn: (n: IssueNode) => void;
+}
+
+function IssueRow({ node, depth, expandedNumber, onExpand, onCollapse, onSpawn }: IssueRowProps) {
+  const indent = 10 + depth * 16;
+  const isExpanded = expandedNumber === node.number;
+  return (
+    <>
+      {isExpanded ? (
+        <div className="issue-row issue-row--expanded" style={{ paddingLeft: indent }}>
+          <div className="issue-expanded-head">
+            <span className="issue-number">#{node.number}</span>
+            <span className="issue-title-full">{node.title}</span>
+          </div>
+          <div className="issue-actions">
+            <button className="btn-save" onClick={() => onSpawn(node)}>Spawn Work</button>
+            <button className="btn-ghost" onClick={onCollapse}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button
+          className="issue-row"
+          style={{ paddingLeft: indent }}
+          onClick={() => onExpand(node.number)}
+          title={node.title}
+        >
+          <span className="issue-number">#{node.number}</span>
+          <span className="issue-title">{node.title}</span>
+        </button>
+      )}
+      {node.children.map((c) => (
+        <IssueRow
+          key={c.number}
+          node={c}
+          depth={depth + 1}
+          expandedNumber={expandedNumber}
+          onExpand={onExpand}
+          onCollapse={onCollapse}
+          onSpawn={onSpawn}
+        />
+      ))}
+    </>
+  );
+}
+
 function MainView() {
+  const [repos, setRepos] = useState<string[]>([]);
+  const [picker, setPicker] = useState<Picker | null>(null);
+  // Which thing in the overlay is expanded: the idea box, one issue row, or none.
+  const [expanded, setExpanded] = useState<Expand>(null);
+
+  // Keyed by repo full_name. Empty until branch spawning is wired up.
+  const workspaces: Record<string, Workspace[]> = {};
+
+  useEffect(() => {
+    api.listRepos().then(setRepos);
+  }, []);
+
+  function closePicker() {
+    setPicker(null);
+    setExpanded(null);
+  }
+
+  async function openStartWork(repo: string) {
+    setExpanded(null);
+    setPicker({ repo, loading: true, issues: null, query: "" });
+    try {
+      const settings = await api.getRepoSettings(repo);
+      if (!settings.identity_id) {
+        setPicker({ repo, loading: false, issues: null, query: "", error: "No identity assigned. Set one in Settings → Repo." });
+        return;
+      }
+      const issues = await api.githubListIssues(settings.identity_id, repo);
+      setPicker({ repo, loading: false, issues, query: "" });
+    } catch (e) {
+      setPicker({ repo, loading: false, issues: null, query: "", error: String(e) });
+    }
+  }
+
+  // Both spawn paths are stubs for now — branch/worktree creation comes next.
+  function spawnIssue(node: IssueNode) {
+    setPicker((p) => (p ? { ...p, note: `Would spawn work for #${node.number} — not wired up yet.` } : p));
+  }
+
+  function createAndSpawn() {
+    const idea = picker?.query.trim();
+    if (!idea) return;
+    setPicker((p) => (p ? { ...p, note: `Would create an issue for “${idea}” and spawn — not wired up yet.` } : p));
+  }
+
   return (
     <main className="panel">
       <header className="panel-header">
@@ -601,12 +728,100 @@ function MainView() {
           </svg>
         </button>
       </header>
-      <div className="main-body">
-        <div className="empty-state">
-          <p className="empty-state-title">No workspaces yet</p>
-          <p className="empty-state-body">Open Settings to configure an identity and repos, then spin up a worktree session.</p>
-        </div>
+
+      <div className="work-list">
+        {repos.length === 0 ? (
+          <div className="empty-state">
+            <p className="empty-state-title">No repos yet</p>
+            <p className="empty-state-body">Add a repo in Settings → Repo, then start work on its issues.</p>
+          </div>
+        ) : (
+          repos.map((repo) => {
+            const ws = workspaces[repo] ?? [];
+            return (
+              <div key={repo} className="repo-group">
+                <div className="repo-group-header">
+                  <span className="repo-group-name">{repo}</span>
+                  <button className="btn-add" onClick={() => openStartWork(repo)}>
+                    Start Work
+                  </button>
+                </div>
+
+                {ws.length === 0 ? (
+                  <p className="repo-group-empty">No active work</p>
+                ) : (
+                  ws.map((w) => (
+                    <div key={w.branch} className="workspace-row">
+                      <span className="workspace-branch">{w.branch}</span>
+                      {w.title && <span className="workspace-title">{w.title}</span>}
+                    </div>
+                  ))
+                )}
+              </div>
+            );
+          })
+        )}
       </div>
+
+      {picker && (() => {
+        const filtered = filterIssues(picker.issues ?? [], picker.query);
+        const ideaOpen = expanded?.kind === "idea";
+        return (
+          <div className="overlay" onClick={closePicker}>
+            <div className="overlay-panel" onClick={(e) => e.stopPropagation()}>
+              <div className="overlay-header">
+                <span className="overlay-title">Start work · {picker.repo}</span>
+                <button className="icon-btn" onClick={closePicker} aria-label="Close">✕</button>
+              </div>
+              <div className={`overlay-search-wrap ${ideaOpen ? "idea-open" : ""}`}>
+                <input
+                  className="text-input"
+                  type="text"
+                  placeholder="Write your own idea…"
+                  value={picker.query}
+                  onFocus={() => setExpanded({ kind: "idea" })}
+                  onChange={(e) => setPicker((p) => (p ? { ...p, query: e.target.value } : p))}
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                />
+                {ideaOpen && (
+                  <div className="issue-actions">
+                    <button className="btn-save" disabled={!picker.query.trim()} onClick={createAndSpawn}>
+                      Create Issue and Spawn
+                    </button>
+                    <button className="btn-ghost" onClick={() => setExpanded(null)}>Cancel</button>
+                  </div>
+                )}
+              </div>
+              <div className="overlay-body">
+                {picker.loading ? (
+                  <p className="repo-group-empty">Loading issues…</p>
+                ) : picker.error ? (
+                  <p className="cred-error">{picker.error}</p>
+                ) : filtered.length > 0 ? (
+                  <div className="issue-tree">
+                    {filtered.map((n) => (
+                      <IssueRow
+                        key={n.number}
+                        node={n}
+                        depth={0}
+                        expandedNumber={expanded?.kind === "issue" ? expanded.number : null}
+                        onExpand={(num) => setExpanded({ kind: "issue", number: num })}
+                        onCollapse={() => setExpanded(null)}
+                        onSpawn={spawnIssue}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <p className="repo-group-empty">{picker.query ? "No matching issues." : "No open issues."}</p>
+                )}
+                {picker.note && <p className="issue-note">{picker.note}</p>}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </main>
   );
 }
