@@ -838,14 +838,14 @@ function MainView() {
   }
 
   // "Create PR": push the branch, draft a description with Claude, and open a
-  // draft PR. On success the PR pill refreshes and the PR opens on GitHub.
+  // draft PR. On success the PR pill refreshes to link the new PR (we don't
+  // open it in the browser — the pill is the entry point).
   async function createPr(s: Session) {
     setPrCreate((prev) => ({ ...prev, [s.id]: { creating: true } }));
     try {
       const pr = await api.createPr(s.id);
       setPrs((prev) => ({ ...prev, [s.id]: pr }));
       setPrCreate((prev) => ({ ...prev, [s.id]: {} }));
-      api.openUrl(pr.html_url);
     } catch (e) {
       setPrCreate((prev) => ({ ...prev, [s.id]: { error: String(e) } }));
     }
