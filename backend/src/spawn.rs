@@ -222,9 +222,34 @@ fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, session_t
 /// Merges into any existing file rather than overwriting, so user/repo settings
 /// and unrelated hooks survive.
 fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
-    // The hook commands run through a shell, so quote the binary path (it may
-    // contain spaces, e.g. inside "/Applications/.../mAIestro.app") and the ws id.
     let bin = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+
+    let dir = work_dir.join(".claude");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("settings.local.json");
+
+    // Start from any existing settings, then merge ours in (replacing any prior
+    // entries of ours so a changed binary path heals rather than duplicating).
+    let root: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .filter(|v: &serde_json::Value| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let root = merge_hooks(root, &bin, ws_id);
+
+    std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap() + "\n")
+        .map_err(|e| e.to_string())?;
+
+    exclude_generated_files(work_dir);
+    Ok(())
+}
+
+/// Build mAIestro's status-hook entries (event name → hook group) for a worktree,
+/// using `bin` as the helper binary path. Shared by spawn (which writes them) and
+/// startup reconcile (which rewrites them at the current binary). The commands run
+/// through a shell, so the binary path (may contain spaces, e.g. inside
+/// "/Applications/.../mAIestro.app") and the ws id are single-quoted.
+fn maiestro_hook_groups(bin: &Path, ws_id: &str) -> Vec<(&'static str, serde_json::Value)> {
     let bin_q = shell_quote(&bin.to_string_lossy());
     let ws_q = shell_quote(ws_id);
     let cmd = |state: &str| format!("{bin_q} hook {state} --workspace {ws_q}");
@@ -243,7 +268,7 @@ fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
         })
     };
 
-    let ours: Vec<(&str, serde_json::Value)> = vec![
+    vec![
         ("SessionStart", group("running")),
         ("UserPromptSubmit", group("busy")),
         ("PreToolUse", matcher_group("busy")),
@@ -257,39 +282,92 @@ fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
         ("Notification", group("notification")),
         ("Stop", group("idle")),
         ("SessionEnd", group("ended")),
-    ];
+    ]
+}
 
-    let dir = work_dir.join(".claude");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("settings.local.json");
+/// True when `command` is one of mAIestro's status hooks for `ws_id` — matched by
+/// the trailing `--workspace '<ws-id>'` we always emit, so unrelated hooks (and
+/// other workspaces' hooks) in the same file are left untouched.
+fn is_maiestro_hook(command: &str, ws_id: &str) -> bool {
+    command.contains(" hook ") && command.contains(&format!("--workspace {}", shell_quote(ws_id)))
+}
 
-    // Start from any existing settings; ensure a top-level object with a `hooks` map.
-    let mut root: serde_json::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .filter(|v: &serde_json::Value| v.is_object())
-        .unwrap_or_else(|| serde_json::json!({}));
-    let hooks = root["hooks"].as_object().cloned().unwrap_or_default();
-    let mut hooks = serde_json::Value::Object(hooks);
+/// True when a hook *group* contains a command that's one of ours for `ws_id`.
+fn group_is_ours(group: &serde_json::Value, ws_id: &str) -> bool {
+    group["hooks"]
+        .as_array()
+        .is_some_and(|hooks| hooks.iter().any(|h| h["command"].as_str().is_some_and(|c| is_maiestro_hook(c, ws_id))))
+}
 
-    for (event, group) in ours {
-        let arr = hooks[event].as_array().cloned().unwrap_or_default();
-        // Idempotent: don't append if an identical group is already present.
-        if arr.iter().any(|g| g == &group) {
-            hooks[event] = serde_json::Value::Array(arr);
-            continue;
-        }
-        let mut arr = arr;
+/// True when a parsed settings root already carries any of our hooks for `ws_id`.
+fn has_maiestro_hooks(root: &serde_json::Value, ws_id: &str) -> bool {
+    root["hooks"].as_object().is_some_and(|events| {
+        events
+            .values()
+            .any(|arr| arr.as_array().is_some_and(|gs| gs.iter().any(|g| group_is_ours(g, ws_id))))
+    })
+}
+
+/// Merge mAIestro's hooks into a parsed settings `root`: for each event, drop any
+/// existing entries that are ours (stale paths from a prior spawner), then append
+/// a fresh group built from `bin`. Every other hook and setting is preserved.
+fn merge_hooks(mut root: serde_json::Value, bin: &Path, ws_id: &str) -> serde_json::Value {
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+    let mut hooks = serde_json::Value::Object(root["hooks"].as_object().cloned().unwrap_or_default());
+    for (event, group) in maiestro_hook_groups(bin, ws_id) {
+        let mut arr = hooks[event].as_array().cloned().unwrap_or_default();
+        arr.retain(|g| !group_is_ours(g, ws_id));
         arr.push(group);
         hooks[event] = serde_json::Value::Array(arr);
     }
     root["hooks"] = hooks;
+    root
+}
 
-    std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap() + "\n")
-        .map_err(|e| e.to_string())?;
+/// Rewrite a tracked session's status hooks to point at the *currently running*
+/// binary, healing a stale `current_exe()` path baked in by a spawner that has
+/// since been torn down or rebuilt (issue #35). Best-effort and quiet:
+///
+/// - No-op if the worktree or its `.claude/settings.local.json` is gone.
+/// - No-op if the file carries none of our hooks (we never inject into a worktree
+///   that didn't already have them).
+/// - Writes only when the resulting JSON actually changed, so it doesn't churn
+///   the file on every launch.
+///
+/// Returns true when it rewrote the file.
+fn reconcile_session_hooks(work_dir: &Path, ws_id: &str) -> bool {
+    let path = work_dir.join(".claude").join("settings.local.json");
+    let Ok(existing) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&existing) else {
+        return false;
+    };
+    if !root.is_object() || !has_maiestro_hooks(&root, ws_id) {
+        return false;
+    }
+    let Ok(bin) = std::env::current_exe() else {
+        return false;
+    };
+    let updated = serde_json::to_string_pretty(&merge_hooks(root, &bin, ws_id)).unwrap() + "\n";
+    if updated == existing {
+        return false;
+    }
+    std::fs::write(&path, updated).is_ok()
+}
 
-    exclude_generated_files(work_dir);
-    Ok(())
+/// At startup, heal stale hook binary paths across every tracked session (see
+/// `reconcile_session_hooks`). Logs how many sessions were rewritten.
+pub fn reconcile_all_session_hooks() {
+    let fixed = crate::sessions::load_all()
+        .into_iter()
+        .filter(|s| reconcile_session_hooks(Path::new(&s.work_dir), &s.id))
+        .count();
+    if fixed > 0 {
+        tracing::info!(sessions = fixed, "reconciled stale status-hook paths");
+    }
 }
 
 /// Append mAIestro's generated files to the worktree's shared git exclude file so
@@ -512,6 +590,9 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
 
     // Reuse an existing workspace by default; --new forces a fresh one.
     if !force_new && base_dir.is_dir() {
+        // Reopening doesn't rewrite hooks, so heal a stale binary path here too
+        // (without waiting for the next startup reconcile).
+        reconcile_session_hooks(&base_dir, &base_workspace);
         open_vscode(&base_dir)?;
         tracing::info!(repo = %repo, issue = issue_number, branch = %base_branch, reused = true, "spawned workspace");
         return Ok(SpawnResult {
@@ -1697,5 +1778,61 @@ pub async fn session_merge_pr(session_id: String) -> Result<PrLink, String> {
         // or gated on checks/review — return the PR as-is so the poll keeps
         // waiting; the frontend decides when a blocker is terminal.
         _ => Ok(pr_link_from(&pr)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Re-merging with a new binary rewrites only *our* hooks for this workspace,
+    /// leaving an unrelated user hook and another workspace's hook untouched.
+    #[test]
+    fn merge_replaces_only_our_hooks_for_this_ws() {
+        let ws = "35-status-hooks-fix";
+        let old_bin = Path::new("/old/work-8/backend/target/debug/maiestro");
+
+        // A settings file as a prior spawn wrote it, plus an unrelated user hook
+        // and a *different* workspace's status hook sharing the Stop event.
+        let mut root = merge_hooks(serde_json::json!({}), old_bin, ws);
+        let stop = root["hooks"]["Stop"].as_array_mut().unwrap();
+        stop.push(serde_json::json!({ "hooks": [{ "type": "command", "command": "echo hi" }] }));
+        stop.push(serde_json::json!({
+            "hooks": [{ "type": "command", "command": "'/x/maiestro' hook idle --workspace '99-other'" }]
+        }));
+
+        let new_bin = Path::new("/Applications/mAIestro.app/Contents/MacOS/maiestro");
+        let merged = merge_hooks(root, new_bin, ws);
+
+        let cmds: Vec<&str> = merged["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|g| g["hooks"][0]["command"].as_str())
+            .collect();
+
+        // Our stale entry was rewritten to the new binary; the old path is gone.
+        assert!(cmds.iter().any(|c| c.contains("/Applications/mAIestro.app") && c.contains("--workspace '35-status-hooks-fix'")));
+        assert!(!cmds.iter().any(|c| c.contains("/old/work-8")));
+        // Exactly one of our entries for this ws remains (no duplication).
+        assert_eq!(cmds.iter().filter(|c| is_maiestro_hook(c, ws)).count(), 1);
+        // Unrelated and other-workspace hooks survive untouched.
+        assert!(cmds.contains(&"echo hi"));
+        assert!(cmds.iter().any(|c| c.contains("--workspace '99-other'")));
+    }
+
+    /// A worktree carrying our hooks is detected; an unrelated-only file is not.
+    #[test]
+    fn detects_our_hooks() {
+        let ws = "12-foo";
+        let ours = merge_hooks(serde_json::json!({}), Path::new("/bin/maiestro"), ws);
+        assert!(has_maiestro_hooks(&ours, ws));
+
+        let unrelated = serde_json::json!({
+            "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "echo hi" }] }] }
+        });
+        assert!(!has_maiestro_hooks(&unrelated, ws));
+        // Our hooks for a *different* ws don't count as this ws's.
+        assert!(!has_maiestro_hooks(&ours, "99-other"));
     }
 }
