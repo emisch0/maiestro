@@ -77,6 +77,7 @@ fn main() {
             spawn::open_in_editor,
             spawn::teardown,
             spawn::session_pr,
+            spawn::session_create_pr,
             sessions::sessions_list,
         ])
         .setup(|app| {

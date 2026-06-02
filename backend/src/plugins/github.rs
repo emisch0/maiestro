@@ -118,6 +118,33 @@ impl GitHub {
             .send().await.map_err(|e| e.to_string())?;
         if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
     }
+
+    /// Open a pull request and return the created PR object. `repo` is
+    /// "owner/name"; `head` and `base` are branch names on that repo.
+    pub async fn create_pull(
+        &self,
+        repo: &str,
+        title: &str,
+        head: &str,
+        base: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<serde_json::Value, String> {
+        let url = format!("https://api.github.com/repos/{repo}/pulls");
+        let resp = self.req(reqwest::Method::POST, &url)
+            .json(&serde_json::json!({
+                "title": title,
+                "head": head,
+                "base": base,
+                "body": body,
+                "draft": draft,
+            }))
+            .send().await.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(error_message(resp).await);
+        }
+        resp.json().await.map_err(|e| e.to_string())
+    }
 }
 
 // ── Tauri commands ─────────────────────────────────────────────────────────────
