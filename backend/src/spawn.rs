@@ -739,6 +739,17 @@ pub async fn teardown(session_id: String, confirmed: bool) -> Result<TeardownOut
                     warnings.push(format!("PR #{} is still open", open["number"].as_u64().unwrap_or(0)));
                 }
             }
+            // Fallback: once a PR merges, GitHub deletes its head branch by
+            // default, after which the head-ref filter above returns nothing and
+            // we'd wrongly conclude "no work on this branch". Resolve by the
+            // branch's tip commit instead, which still points at the merged PR.
+            if !pr_merged {
+                if let Ok(sha) = git(&work_dir, &["rev-parse", "HEAD"]) {
+                    if let Ok(prs) = gh.pulls_for_commit(&session.repo, &sha).await {
+                        pr_merged = prs.iter().any(|p| p["merged_at"].is_string());
+                    }
+                }
+            }
         }
     }
 

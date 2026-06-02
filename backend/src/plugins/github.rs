@@ -90,6 +90,19 @@ impl GitHub {
         Ok(v.as_array().cloned().unwrap_or_default())
     }
 
+    /// All pull requests (any state) that contain commit `sha` on `repo`
+    /// ("owner/name"). Unlike `pulls_for_branch`, this resolves by commit rather
+    /// than head ref, so it still finds a merged PR after its head branch has
+    /// been deleted (GitHub's default on merge) — making it the reliable signal
+    /// for "this work already landed via a PR".
+    pub async fn pulls_for_commit(&self, repo: &str, sha: &str) -> Result<Vec<serde_json::Value>, String> {
+        let url = format!(
+            "https://api.github.com/repos/{repo}/commits/{sha}/pulls?per_page=100"
+        );
+        let v = self.get_json(&url).await?;
+        Ok(v.as_array().cloned().unwrap_or_default())
+    }
+
     /// Open a new issue and return its number. `repo` is "owner/name".
     pub async fn create_issue(&self, repo: &str, title: &str, body: &str) -> Result<u64, String> {
         let url = format!("https://api.github.com/repos/{repo}/issues");
