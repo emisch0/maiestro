@@ -107,6 +107,9 @@ export interface PrChecks {
   running: boolean;
   /** GitHub reports the PR mergeable (`mergeable_state == "clean"`). */
   ready_to_merge: boolean;
+  /** Raw GitHub mergeable_state: clean / dirty / behind / blocked / unstable /
+   *  draft / unknown. Used to stop the auto-merge loop on terminal blockers. */
+  mergeable_state: string;
 }
 
 /** Live per-session status, written by the `maiestro hook` helper and watched

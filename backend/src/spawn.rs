@@ -1481,6 +1481,10 @@ pub struct PrChecks {
     /// GitHub's `mergeable_state == "clean"`: required checks and (where branch
     /// protection requires them) approvals are satisfied, so a merge will land.
     pub ready_to_merge: bool,
+    /// Raw GitHub `mergeable_state` (clean / dirty / behind / blocked / unstable
+    /// / draft / unknown). Lets the UI stop the auto-merge loop on states that
+    /// won't self-resolve (behind, conflicts, required review) instead of waiting.
+    pub mergeable_state: String,
 }
 
 /// Collapse a commit's check runs into one label. Failure wins over running,
@@ -1552,7 +1556,8 @@ pub async fn session_pr_checks(session_id: String) -> Result<Option<PrChecks>, S
 
     // `mergeable_state` is only populated on the single-PR endpoint, not the list.
     let full = gh.pull(&session.repo, number).await?;
-    let ready_to_merge = full["mergeable_state"].as_str() == Some("clean");
+    let mergeable_state = full["mergeable_state"].as_str().unwrap_or("unknown").to_string();
+    let ready_to_merge = mergeable_state == "clean";
 
     let runs = if head_sha.is_empty() {
         Vec::new()
@@ -1565,32 +1570,63 @@ pub async fn session_pr_checks(session_id: String) -> Result<Option<PrChecks>, S
         state: aggregate_checks(&runs),
         running,
         ready_to_merge,
+        mergeable_state,
     }))
 }
 
-/// Merge a session's PR, creating it first if needed. Reuses `session_create_pr`
-/// for the create path, marks a draft ready for review (a draft can't be merged
-/// and its checks don't gate), then merges — but only once GitHub reports the PR
-/// `clean`. When it isn't mergeable yet, returns the PR unmerged so the frontend's
-/// poll can retry; a real conflict (`dirty`) or API failure surfaces as `Err`.
+/// Merge a session's PR, creating it first if needed. Before touching GitHub it
+/// reconciles the **local worktree** so the merge can't land a stale remote: it
+/// blocks on uncommitted changes and pushes any committed-but-unpushed local
+/// commits (so the PR head reflects local HEAD). Then it reuses/creates the PR,
+/// marks a draft ready for review (a draft can't be merged and its checks don't
+/// gate), and merges — but only once GitHub reports the PR `clean`.
+///
+/// States that won't self-resolve surface as `Err` so the UI can stop waiting:
+/// `dirty` (conflicts) and `behind` (out of date with base). Transient states
+/// (checks still running, GitHub recomputing) return the PR unmerged so the
+/// frontend poll retries.
 #[tauri::command]
 pub async fn session_merge_pr(session_id: String) -> Result<PrLink, String> {
     let session = crate::sessions::get(&session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
+    let work_dir = PathBuf::from(&session.work_dir);
+    let branch = session.branch.clone();
     let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
     let gh = GitHub::for_identity(&identity_id)?;
 
+    // Guard: uncommitted work would be silently excluded — the merge lands the
+    // pushed branch, not the worktree. Block and ask the user to commit first.
+    let dirty = git(&work_dir, &["status", "--porcelain"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if dirty {
+        return Err("This worktree has uncommitted changes. Commit them first, then merge.".to_string());
+    }
+
+    // Reconcile committed-but-unpushed local commits before merging: refresh the
+    // remote ref, and if local HEAD is ahead, push so the PR head includes them.
+    git(&work_dir, &["fetch", "origin", &branch, "--quiet"]).ok();
+    let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{branch}..HEAD")])
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    if ahead > 0 {
+        git(&work_dir, &["push", "origin", &branch])
+            .map_err(|e| format!("could not push local commits before merging: {e}"))?;
+    }
+
     // Ensure a PR exists: reuse an open one, else create (which drafts + pushes).
-    let prs = gh.pulls_for_branch(&session.repo, &session.branch).await?;
+    let prs = gh.pulls_for_branch(&session.repo, &branch).await?;
     let number = match prs.iter().find(|p| p["state"].as_str() == Some("open")) {
         Some(p) => p["number"].as_u64().unwrap_or(0),
         None => session_create_pr(session_id.clone()).await?.number,
     };
 
-    // Re-fetch so `draft` / `mergeable_state` reflect the (possibly just-created) PR.
+    // Re-fetch so `draft` / `mergeable_state` reflect the (possibly just-created)
+    // PR and any commits we just pushed.
     let mut pr = gh.pull(&session.repo, number).await?;
 
     // A draft can't be merged and its checks don't gate; promote it first.
@@ -1610,10 +1646,16 @@ pub async fn session_merge_pr(session_id: String) -> Result<PrLink, String> {
             Ok(pr_link_from(&merged))
         }
         "dirty" => Err(format!(
-            "PR #{number} has merge conflicts. Resolve them in the worktree and push, then merge."
+            "PR #{number} has merge conflicts with {base}. Resolve them in the worktree and push, then merge.",
+            base = session.default_branch,
         )),
-        // blocked / behind / unstable / unknown (null while GitHub recomputes):
-        // not an error — return the PR as-is so the frontend poll keeps waiting.
+        "behind" => Err(format!(
+            "PR #{number} is behind {base}. Update the branch (merge or rebase {base}) and push, then merge.",
+            base = session.default_branch,
+        )),
+        // blocked / unstable / unknown (null while GitHub recomputes): transient
+        // or gated on checks/review — return the PR as-is so the poll keeps
+        // waiting; the frontend decides when a blocker is terminal.
         _ => Ok(pr_link_from(&pr)),
     }
 }

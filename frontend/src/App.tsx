@@ -33,6 +33,19 @@ function checkLabel(checks: PrChecks): string {
   }
 }
 
+// A terminal reason the auto-merge can't proceed and won't self-resolve, or null
+// to keep waiting. Distinct from a transient wait (checks still running, GitHub
+// recomputing): these need the user to act, so the loop stops and surfaces them.
+// "blocked" is only terminal once checks are green (= a required review is the
+// holdout); while checks run, a blocked state is just the normal waiting path.
+function mergeBlocker(c: PrChecks): string | null {
+  if (c.state === "failed") return "A required check failed — fix it and push, then merge again.";
+  if (c.mergeable_state === "dirty") return "Merge conflicts with the base branch — resolve them and push, then merge again.";
+  if (c.mergeable_state === "behind") return "Branch is behind the base — update it (merge or rebase) and push, then merge again.";
+  if (c.mergeable_state === "blocked" && c.state === "passed") return "Blocked by a required review — get an approval, then merge again.";
+  return null;
+}
+
 // A pending Tear Down prompt: a warnings confirmation, or a "VS Code still open"
 // block (which may offer the Accessibility shortcut so mAIestro can close it).
 type TeardownPrompt =
@@ -1361,9 +1374,14 @@ function MainView() {
         .then((c) => {
           setPrChecks((prev) => ({ ...prev, [s.id]: c }));
           const m = pollRef.current.prMerge[s.id];
-          if (c?.ready_to_merge && m?.intent && !m.merging) {
+          if (!c || !m?.intent || m.merging) return;
+          if (c.ready_to_merge) {
             void runMerge(s.id);
+            return;
           }
+          // Stop waiting on a blocker the user must clear; otherwise keep polling.
+          const blocker = mergeBlocker(c);
+          if (blocker) setPrMerge((prev) => ({ ...prev, [s.id]: { error: blocker } }));
         })
         .catch(() => {});
     }
