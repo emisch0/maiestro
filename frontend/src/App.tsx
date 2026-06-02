@@ -21,6 +21,12 @@ const PR_STATE_ICONS: Record<string, typeof PrOpenIcon> = {
   closed: PrClosedIcon,
 };
 
+// A pending Tear Down prompt: a warnings confirmation, or a "VS Code still open"
+// block (which may offer the Accessibility shortcut so mAIestro can close it).
+type TeardownPrompt =
+  | { id: string; kind: "confirm"; warnings: string[] }
+  | { id: string; kind: "blocked"; message: string; accessibility: boolean };
+
 type Tab = "identity" | "repo";
 type SaveStatus = "idle" | "saving" | "saved" | "clearing" | "error";
 type RepoView =
@@ -944,8 +950,9 @@ function MainView() {
   const [prs, setPrs] = useState<Record<string, PrLink | null>>({});
   // Session id whose inline command strip is expanded (only one at a time).
   const [commandsOpen, setCommandsOpen] = useState<string | null>(null);
-  // Pending Tear Down confirmation: the session id and the warnings to show.
-  const [teardownConfirm, setTeardownConfirm] = useState<{ id: string; warnings: string[] } | null>(null);
+  // Pending Tear Down prompt for a session: either a warnings confirmation, or a
+  // "VS Code still open" block that can offer the Accessibility shortcut.
+  const [teardownConfirm, setTeardownConfirm] = useState<TeardownPrompt | null>(null);
   // Create-PR progress/error per session id: `{ creating }` while in flight,
   // `{ error }` after a failure. Absent = idle.
   const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; error?: string }>>({});
@@ -1229,32 +1236,31 @@ function MainView() {
     }
   }
 
-  // "Tear Down": remove the worktree. Confirms first unless the backend says
-  // it's safe (PR merged, nothing new).
-  async function tearDown(s: Session) {
-    setTeardownConfirm(null);
+  // Run teardown and route its outcome to the right prompt: a warnings
+  // confirmation, a "VS Code still open" block, or success (dismiss + refresh).
+  // `confirmed` skips the work-state checks; `force` skips closing the editor.
+  async function runTeardown(id: string, confirmed: boolean, force: boolean) {
     try {
-      const res = await api.teardown(s.id);
+      const res = await api.teardown(id, confirmed, force);
       if (res.status === "needs_confirmation") {
-        setTeardownConfirm({ id: s.id, warnings: res.warnings });
+        setTeardownConfirm({ id, kind: "confirm", warnings: res.warnings });
+      } else if (res.status === "blocked_by_editor") {
+        setTeardownConfirm({ id, kind: "blocked", message: res.message, accessibility: res.accessibility });
       } else {
+        setTeardownConfirm(null);
+        setCommandsOpen((open) => (open === id ? null : open));
         refreshSessions();
       }
     } catch (e) {
-      setTeardownConfirm({ id: s.id, warnings: [`Teardown failed: ${String(e)}`] });
+      setTeardownConfirm({ id, kind: "confirm", warnings: [`Teardown failed: ${String(e)}`] });
     }
   }
 
-  async function confirmTeardown(id: string) {
-    try {
-      await api.teardown(id, true);
-    } catch (e) {
-      setTeardownConfirm({ id, warnings: [`Teardown failed: ${String(e)}`] });
-      return;
-    }
+  // "Tear Down": remove the worktree. Confirms first unless the backend says
+  // it's safe (PR merged, nothing new).
+  function tearDown(s: Session) {
     setTeardownConfirm(null);
-    setCommandsOpen((open) => (open === id ? null : open));
-    refreshSessions();
+    runTeardown(s.id, false, false);
   }
 
   // Set or clear (hidden = null → unhide) hide/snooze state for a repo or work
@@ -1445,7 +1451,7 @@ function MainView() {
                           </div>
                         </div>
                       )}
-                      {teardownConfirm?.id === s.id && (
+                      {teardownConfirm?.id === s.id && teardownConfirm.kind === "confirm" && (
                         <div className="cleanup-confirm">
                           <p className="cleanup-lead">Remove this workspace?</p>
                           <ul className="cleanup-warnings">
@@ -1454,7 +1460,20 @@ function MainView() {
                             ))}
                           </ul>
                           <div className="issue-actions">
-                            <button className="btn-danger" onClick={() => confirmTeardown(s.id)}>Remove anyway</button>
+                            <button className="btn-danger" onClick={() => runTeardown(s.id, true, false)}>Remove anyway</button>
+                            <button className="btn-ghost" onClick={() => setTeardownConfirm(null)}>Cancel</button>
+                          </div>
+                        </div>
+                      )}
+                      {teardownConfirm?.id === s.id && teardownConfirm.kind === "blocked" && (
+                        <div className="cleanup-confirm">
+                          <p className="cleanup-lead" style={{ whiteSpace: "pre-line" }}>{teardownConfirm.message}</p>
+                          <div className="issue-actions">
+                            <button className="btn-ghost" onClick={() => api.openInEditor(s.work_dir)}>Open in VS Code</button>
+                            {teardownConfirm.accessibility && (
+                              <button className="btn-ghost" onClick={() => api.openAccessibilitySettings()}>Open Accessibility Options</button>
+                            )}
+                            <button className="btn-danger" onClick={() => runTeardown(s.id, true, true)}>Delete anyway</button>
                             <button className="btn-ghost" onClick={() => setTeardownConfirm(null)}>Cancel</button>
                           </div>
                         </div>

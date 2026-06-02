@@ -1001,7 +1001,9 @@ fn worktree_in_use(work_dir: &Path) -> bool {
 
 /// Open System Settings → Privacy & Security → Accessibility so the user can
 /// grant mAIestro the permission teardown needs to close VS Code windows.
-fn open_accessibility_settings() {
+/// Triggered only by an explicit user click — we never launch it automatically.
+#[tauri::command]
+pub fn open_accessibility_settings() {
     let _ = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         .spawn();
@@ -1014,6 +1016,11 @@ pub enum TeardownOutcome {
     /// Checks found unresolved work; `warnings` describes it so the UI can ask
     /// the user to confirm before destroying the worktree.
     NeedsConfirmation { warnings: Vec<String> },
+    /// VS Code still has the worktree open and we couldn't close it (no
+    /// Accessibility grant, or the close didn't take). `message` explains the
+    /// situation; `accessibility` is true when granting Accessibility would let
+    /// mAIestro close the window itself, so the UI can offer that shortcut.
+    BlockedByEditor { message: String, accessibility: bool },
 }
 
 /// Tear down a spawned session's worktree. Inspects the branch first
@@ -1023,7 +1030,7 @@ pub enum TeardownOutcome {
 /// removal failures), then the worktree, local branch, directory, and session
 /// record are removed.
 #[tauri::command]
-pub async fn teardown(session_id: String, confirmed: bool) -> Result<TeardownOutcome, String> {
+pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Result<TeardownOutcome, String> {
     let session = crate::sessions::get(&session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
     let work_dir = PathBuf::from(&session.work_dir);
@@ -1088,40 +1095,49 @@ pub async fn teardown(session_id: String, confirmed: bool) -> Result<TeardownOut
     // 1. Close VS Code FIRST and CONFIRM the worktree is free before touching the
     //    files. Removing it out from under a live VS Code crashes the editor, so
     //    we only proceed once we can show the window is gone — never on a guess.
-    if let Some(marker) = window_marker(&work_dir) {
-        close_editor_window(&marker).await;
-        let mut waited = 0u64;
-        loop {
-            match probe_editor_window(&marker).await {
-                // Window confirmed gone — safe to delete.
-                WinProbe::Absent => break,
-                // No Accessibility grant: we can neither close nor see the window.
-                // Fall back to the permission-free check — if nothing is using the
-                // worktree, proceed; otherwise stop and guide the user.
-                WinProbe::Denied => {
-                    if worktree_in_use(&work_dir) {
-                        open_accessibility_settings();
-                        return Err(
-                            "mAIestro needs Accessibility permission to close the VS Code window \
-                             before removing this worktree (without it, VS Code crashes). I opened \
-                             System Settings → Privacy & Security → Accessibility — enable mAIestro \
-                             there and try again, or just close the VS Code window yourself first."
-                                .to_string(),
-                        );
+    //    `force` skips this entirely: the user chose "Delete anyway" knowing the
+    //    open window may crash.
+    if !force {
+        if let Some(marker) = window_marker(&work_dir) {
+            close_editor_window(&marker).await;
+            let mut waited = 0u64;
+            loop {
+                match probe_editor_window(&marker).await {
+                    // Window confirmed gone — safe to delete.
+                    WinProbe::Absent => break,
+                    // No Accessibility grant: we can neither close nor see the
+                    // window. Fall back to the permission-free check — if nothing
+                    // is using the worktree, proceed; otherwise stop and let the
+                    // user close the window, grant Accessibility, or force it.
+                    WinProbe::Denied => {
+                        if worktree_in_use(&work_dir) {
+                            return Ok(TeardownOutcome::BlockedByEditor {
+                                message:
+                                    "I couldn't tear down because the Visual Studio Code window \
+                                     is still open.\n\nYou have two options: close the window \
+                                     yourself, or enable Accessibility for mAIestro so it can \
+                                     close the window for you."
+                                        .to_string(),
+                                accessibility: true,
+                            });
+                        }
+                        break;
                     }
-                    break;
-                }
-                // Window still open: the close is in flight (or we lack permission
-                // to close but the user may close it). Wait a bit, then give up.
-                WinProbe::Open => {
-                    if waited >= 4000 {
-                        return Err(
-                            "VS Code still has this worktree open — close its window, then try Tear Down again."
-                                .to_string(),
-                        );
+                    // Window still open with Accessibility granted: the close is in
+                    // flight (or the user may close it). Wait a bit, then give up.
+                    WinProbe::Open => {
+                        if waited >= 4000 {
+                            return Ok(TeardownOutcome::BlockedByEditor {
+                                message:
+                                    "I couldn't tear down because the Visual Studio Code window \
+                                     is still open. Close its window, then try Tear Down again."
+                                        .to_string(),
+                                accessibility: false,
+                            });
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        waited += 300;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    waited += 300;
                 }
             }
         }

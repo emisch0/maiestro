@@ -75,7 +75,8 @@ export interface SpawnEdits {
 
 export type TeardownOutcome =
   | { status: "done" }
-  | { status: "needs_confirmation"; warnings: string[] };
+  | { status: "needs_confirmation"; warnings: string[] }
+  | { status: "blocked_by_editor"; message: string; accessibility: boolean };
 
 export interface Session {
   id: string;
@@ -187,8 +188,11 @@ export const api = {
   sessionsList: () =>
     invoke<Session[]>("sessions_list"),
 
-  teardown: (sessionId: string, confirmed = false) =>
-    invoke<TeardownOutcome>("teardown", { sessionId, confirmed }),
+  teardown: (sessionId: string, confirmed = false, force = false) =>
+    invoke<TeardownOutcome>("teardown", { sessionId, confirmed, force }),
+
+  openAccessibilitySettings: () =>
+    invoke<void>("open_accessibility_settings"),
 
   sessionPr: (sessionId: string) =>
     invoke<PrLink | null>("session_pr", { sessionId }),
