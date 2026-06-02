@@ -735,10 +735,22 @@ function MainView() {
     }).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    api.listRepos().then(setRepos);
+  const refreshAll = useCallback(() => {
+    api.listRepos().then(setRepos).catch(() => {});
     refreshSessions();
   }, [refreshSessions]);
+
+  useEffect(() => {
+    refreshAll();
+  }, [refreshAll]);
+
+  // The popover hides on blur, so each tray-icon click is a fresh open. Re-fetch
+  // on the backend's "popover-shown" event so it never displays stale sessions
+  // or PR state after work happened (or windows closed) while it was hidden.
+  useEffect(() => {
+    const unlisten = getCurrentWindow().listen("popover-shown", refreshAll);
+    return () => { unlisten.then((f) => f()); };
+  }, [refreshAll]);
 
   // Tracked sessions grouped by repo full_name.
   const sessionsByRepo = useMemo(() => {
