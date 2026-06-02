@@ -120,6 +120,10 @@ fn main() {
             // `session-status` events. The watcher must outlive setup(), so park
             // it in managed state (dropping it would stop the watch).
             status::sweep_stale();
+            // Heal any worktree hooks still pointing at a now-stale binary path
+            // (a torn-down/rebuilt spawner), so live status survives across
+            // teardowns and `tauri dev` rebuilds. See spawn.rs / issue #35.
+            spawn::reconcile_all_session_hooks();
             match status::start_watcher(app.handle().clone()) {
                 Ok(watcher) => {
                     app.manage(Mutex::new(watcher));
