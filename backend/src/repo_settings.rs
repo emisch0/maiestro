@@ -1,6 +1,17 @@
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
+/// Hide/snooze state for a repo or a work item. The presence of this value means
+/// "hidden"; its absence means "visible".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HideState {
+    /// Unix-epoch millis until which the item stays hidden. `None` = hidden
+    /// indefinitely. Expiry (now past `snooze_until`) is resolved on the frontend
+    /// at render time; the backend stores the timestamp verbatim.
+    #[serde(default)]
+    pub snooze_until: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoSettings {
     /// Canonical "owner/name" string. Stored inside the file so repos_list can
@@ -13,6 +24,10 @@ pub struct RepoSettings {
     pub checkout_dir: Option<String>,
     /// Env files relative to checkout_dir to source when launching user-facing tools.
     pub env_files: Vec<String>,
+    /// Repo-level hide/snooze state. `None` = visible. A hidden repo hides its
+    /// work items too. Per-work-item state lives on the session record, not here.
+    #[serde(default)]
+    pub hidden: Option<HideState>,
 }
 
 impl RepoSettings {
@@ -24,6 +39,7 @@ impl RepoSettings {
             identity_id: None,
             checkout_dir: Some(format!("{home}/src/{name}")),
             env_files: Vec::new(),
+            hidden: None,
         }
     }
 }
@@ -106,6 +122,14 @@ pub fn repo_settings_get(repo: String) -> RepoSettings {
 #[tauri::command]
 pub fn repo_settings_set(repo: String, mut settings: RepoSettings) -> Result<(), String> {
     settings.repo = repo.clone();
+    save(&repo, &settings).map_err(|e| e.to_string())
+}
+
+/// Set (or clear) a repo's hide/snooze state. `hidden = None` unhides.
+#[tauri::command]
+pub fn repo_set_visibility(repo: String, hidden: Option<HideState>) -> Result<(), String> {
+    let mut settings = load(&repo).unwrap_or_else(|| RepoSettings::default_for(&repo));
+    settings.hidden = hidden;
     save(&repo, &settings).map_err(|e| e.to_string())
 }
 

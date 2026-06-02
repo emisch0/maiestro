@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, IssueNode, PrLink, RepoSettings, Session, StatusRecord } from "./api";
+import { api, CreateAndSpawnOutcome, CredentialScope, CredentialTypeDto, GHRepo, HideState, IssueNode, PrLink, RepoSettings, Session, StatusRecord } from "./api";
 import GearIcon from "./icons/gear.svg?react";
+import EyeIcon from "./icons/eye.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
 import FolderIcon from "./icons/folder.svg?react";
 import VSCodeIcon from "./icons/vscode.svg?react";
@@ -44,7 +45,7 @@ function Settings() {
   const [repoView, setRepoView] = useState<RepoView>({ mode: "list" });
   const [credTypes, setCredTypes] = useState<CredentialTypeDto[]>([]);
   const [credStates, setCredStates] = useState<Record<string, CredState>>({});
-  const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, env_files: [], identity_id: null });
+  const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, env_files: [], identity_id: null, hidden: null });
   const [checkoutDraft, setCheckoutDraft] = useState("");
   const [addingEnvFile, setAddingEnvFile] = useState(false);
   const [envFileInput, setEnvFileInput] = useState("");
@@ -730,6 +731,126 @@ function StatusIndicator({ status }: { status?: StatusRecord }) {
   );
 }
 
+// ── Hide / snooze ──────────────────────────────────────────────────────────
+
+type HideTarget =
+  | { kind: "repo"; repo: string }
+  | { kind: "session"; session: Session };
+
+// An item is effectively hidden when it has a HideState that is either indefinite
+// (no snooze) or a snooze whose deadline hasn't passed. An expired snooze reads as
+// visible — that's the automatic un-snooze, resolved at render time (no live tick).
+function effectiveHidden(h: HideState | null | undefined, now: number): boolean {
+  if (!h) return false;
+  return h.snooze_until == null || h.snooze_until > now;
+}
+
+// Remaining-time label for a snooze: days + hours normally, dropping to minutes
+// only under an hour. Empty string once expired.
+function formatSnoozeRemaining(snoozeUntil: number, now: number): string {
+  const ms = snoozeUntil - now;
+  if (ms <= 0) return "";
+  const mins = Math.floor(ms / 60000);
+  if (mins < 60) return `${Math.max(1, mins)}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours ? `${days}d ${remHours}h` : `${days}d`;
+}
+
+// Default the snooze picker to ~24h out, formatted for a datetime-local input
+// (local time, no timezone suffix).
+function defaultSnoozeLocal(): string {
+  const d = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Quick snooze presets, resolved against `now`: 1 hour out, tomorrow at 8am
+// local, and next Monday at 8am local. Anything else uses the custom picker.
+function snoozePresets(now: number): { label: string; hint: string; at: number }[] {
+  const timeFmt = (d: Date) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const dayTimeFmt = (d: Date) => d.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+
+  const oneHour = new Date(now + 60 * 60 * 1000);
+
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(8, 0, 0, 0);
+
+  const nextWeek = new Date(now);
+  // Days until the *next* Monday — always strictly in the future (1–7).
+  const daysUntilMon = ((8 - nextWeek.getDay()) % 7) || 7;
+  nextWeek.setDate(nextWeek.getDate() + daysUntilMon);
+  nextWeek.setHours(8, 0, 0, 0);
+
+  return [
+    { label: "Snooze for 1 hour", hint: timeFmt(oneHour), at: oneHour.getTime() },
+    { label: "Snooze until tomorrow", hint: dayTimeFmt(tomorrow), at: tomorrow.getTime() },
+    { label: "Snooze until next week", hint: dayTimeFmt(nextWeek), at: nextWeek.getTime() },
+  ];
+}
+
+function HideSnoozeDialog({ title, onConfirm, onClose }: {
+  title: string;
+  onConfirm: (hidden: HideState) => void;
+  onClose: () => void;
+}) {
+  const [custom, setCustom] = useState(false);
+  const [until, setUntil] = useState(defaultSnoozeLocal);
+  const presets = useMemo(() => snoozePresets(Date.now()), []);
+
+  function confirmCustom() {
+    const ms = new Date(until).getTime();
+    if (Number.isNaN(ms)) return;
+    onConfirm({ snooze_until: ms });
+  }
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="overlay-panel hide-dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="overlay-header">
+          <span className="overlay-title">Hide · {title}</span>
+          <button className="icon-btn" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <div className="hide-dialog-body">
+          <button className="hide-choice" onClick={() => onConfirm({ snooze_until: null })}>
+            <span className="hide-choice-label">Hide</span>
+            <span className="hide-choice-hint">Until you unhide it</span>
+          </button>
+          {presets.map((p) => (
+            <button key={p.label} className="hide-choice" onClick={() => onConfirm({ snooze_until: p.at })}>
+              <span className="hide-choice-label">{p.label}</span>
+              <span className="hide-choice-hint">{p.hint}</span>
+            </button>
+          ))}
+          {custom ? (
+            <div className="hide-custom">
+              <input
+                className="text-input"
+                type="datetime-local"
+                value={until}
+                autoFocus
+                onChange={(e) => setUntil(e.target.value)}
+              />
+              <div className="issue-actions">
+                <button className="btn-save" onClick={confirmCustom}>Confirm</button>
+                <button className="btn-ghost" onClick={() => setCustom(false)}>Back</button>
+              </div>
+            </div>
+          ) : (
+            <button className="hide-choice" onClick={() => setCustom(true)}>
+              <span className="hide-choice-label">Custom…</span>
+              <span className="hide-choice-hint">Pick a date &amp; time</span>
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MainView() {
   const [repos, setRepos] = useState<string[]>([]);
   const [picker, setPicker] = useState<Picker | null>(null);
@@ -750,6 +871,14 @@ function MainView() {
   // Create-PR progress/error per session id: `{ creating }` while in flight,
   // `{ error }` after a failure. Absent = idle.
   const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; error?: string }>>({});
+  // Global toggle: reveal hidden/snoozed repos and work items (dimmed).
+  const [showHidden, setShowHidden] = useState(false);
+  // Per-repo settings, keyed by repo full_name — the source of repo-level hide state.
+  const [repoSettings, setRepoSettings] = useState<Record<string, RepoSettings>>({});
+  // Open repo options menu (repo full_name); at most one at a time.
+  const [repoMenuOpen, setRepoMenuOpen] = useState<string | null>(null);
+  // Target of the hide/snooze dialog, or null when closed.
+  const [hideTarget, setHideTarget] = useState<HideTarget | null>(null);
 
   const refreshSessions = useCallback(() => {
     api.sessionsList().then((list) => {
@@ -775,7 +904,16 @@ function MainView() {
   }, []);
 
   const refreshAll = useCallback(() => {
-    api.listRepos().then(setRepos).catch(() => {});
+    api.listRepos().then((list) => {
+      setRepos(list);
+      // Fan out per-repo settings so repo-level hide state lands as each settles,
+      // mirroring how PR lookups are fired in refreshSessions.
+      for (const repo of list) {
+        api.getRepoSettings(repo)
+          .then((s) => setRepoSettings((prev) => ({ ...prev, [repo]: s })))
+          .catch(() => {});
+      }
+    }).catch(() => {});
     refreshSessions();
     refreshStatuses();
   }, [refreshSessions, refreshStatuses]);
@@ -932,10 +1070,36 @@ function MainView() {
     refreshSessions();
   }
 
+  // Set or clear (hidden = null → unhide) hide/snooze state for a repo or work
+  // item, then refresh so the dimming/filtering reflects the new state.
+  async function applyVisibility(target: HideTarget, hidden: HideState | null) {
+    try {
+      if (target.kind === "repo") {
+        await api.setRepoVisibility(target.repo, hidden);
+      } else {
+        await api.setSessionVisibility(target.session.id, hidden);
+      }
+    } catch { /* best-effort; the refresh below reflects the real state */ }
+    setHideTarget(null);
+    setRepoMenuOpen(null);
+    refreshAll();
+  }
+
+  const now = Date.now();
+
   return (
     <main className="panel">
       <header className="panel-header">
         <h1>m<span className="ai">AI</span>estro</h1>
+        <button
+          className={`icon-btn ${showHidden ? "icon-btn--active" : ""}`}
+          onClick={() => setShowHidden((v) => !v)}
+          title={showHidden ? "Hide hidden items" : "Show hidden items"}
+          aria-label="Toggle hidden items"
+          aria-pressed={showHidden}
+        >
+          <EyeIcon />
+        </button>
         <button className="icon-btn" onClick={openSettings} title="Settings" aria-label="Settings">
           <GearIcon />
         </button>
@@ -950,31 +1114,75 @@ function MainView() {
         ) : (
           repos.map((repo) => {
             const repoSessions = sessionsByRepo[repo] ?? [];
+            const repoHide = repoSettings[repo]?.hidden ?? null;
+            const repoHidden = effectiveHidden(repoHide, now);
+            // With "Show hidden" off, a hidden repo drops out entirely (its work
+            // items go with it). With it on, the repo and its items render dimmed.
+            if (repoHidden && !showHidden) return null;
+            const repoSnoozeLabel = repoHide?.snooze_until
+              ? formatSnoozeRemaining(repoHide.snooze_until, now)
+              : "";
+            const repoMenu = repoMenuOpen === repo;
+            const visibleSessions = showHidden
+              ? repoSessions
+              : repoSessions.filter((s) => !effectiveHidden(s.hidden, now));
             return (
-              <div key={repo} className="repo-group">
+              <div key={repo} className={`repo-group ${repoHidden ? "repo-group--hidden" : ""}`}>
                 <div className="repo-group-header">
                   <span className="repo-group-name">{repo}</span>
+                  {repoHidden && (
+                    <span className="snooze-label">
+                      {repoSnoozeLabel ? `Snoozed · ${repoSnoozeLabel}` : "Hidden"}
+                    </span>
+                  )}
                   <button className="btn-add" onClick={() => openStartWork(repo)}>
                     Start Work
                   </button>
+                  <button
+                    className={`row-expander ${repoMenu ? "row-expander--open" : ""}`}
+                    onClick={() => setRepoMenuOpen((r) => (r === repo ? null : repo))}
+                    title="Repo options"
+                    aria-label="Repo options"
+                    aria-expanded={repoMenu}
+                  >
+                    <ChevronRightIcon />
+                  </button>
+                </div>
+                <div className={`command-strip ${repoMenu ? "command-strip--open" : ""}`}>
+                  {repoHidden ? (
+                    <button className="command-btn" onClick={() => applyVisibility({ kind: "repo", repo }, null)}>
+                      Unhide
+                    </button>
+                  ) : (
+                    <button className="command-btn" onClick={() => { setRepoMenuOpen(null); setHideTarget({ kind: "repo", repo }); }}>
+                      Hide…
+                    </button>
+                  )}
                 </div>
 
-                {repoSessions.length === 0 ? (
+                {visibleSessions.length === 0 ? (
                   <p className="repo-group-empty">No active work</p>
                 ) : (
-                  repoSessions.map((s) => {
+                  visibleSessions.map((s) => {
                     const cmdOpen = commandsOpen === s.id;
                     const pr = prs[s.id];
                     const PrIcon = pr ? (PR_STATE_ICONS[pr.state] ?? PrOpenIcon) : null;
+                    const sessHidden = effectiveHidden(s.hidden, now);
+                    const sessSnoozeLabel = s.hidden?.snooze_until
+                      ? formatSnoozeRemaining(s.hidden.snooze_until, now)
+                      : "";
                     // An active PR (open or still a draft) already covers this branch,
                     // so disable Create PR; the pill links to it.
                     const prOpen = pr?.state === "open" || pr?.state === "draft";
                     const prc = prCreate[s.id];
                     return (
-                    <div key={s.id} className="workspace-item">
+                    <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
                         <span className="workspace-title">{s.session_title}</span>
                         <StatusIndicator status={statuses[s.id]} />
+                        {sessHidden && sessSnoozeLabel && (
+                          <span className="snooze-label">Snoozed · {sessSnoozeLabel}</span>
+                        )}
                         <div className="session-pill">
                           {pr && PrIcon && (
                             <button
@@ -1033,6 +1241,11 @@ function MainView() {
                         </button>
                         {/* Merge PR is UI-only for now. */}
                         <button className="command-btn" onClick={() => {}}>Merge PR</button>
+                        {sessHidden ? (
+                          <button className="command-btn" onClick={() => applyVisibility({ kind: "session", session: s }, null)}>Unhide</button>
+                        ) : (
+                          <button className="command-btn" onClick={() => { setCommandsOpen(null); setHideTarget({ kind: "session", session: s }); }}>Hide…</button>
+                        )}
                         <button className="command-btn" onClick={() => cleanUp(s)}>Clean Up</button>
                       </div>
                       {prc?.error && (
@@ -1144,6 +1357,14 @@ function MainView() {
           </div>
         );
       })()}
+
+      {hideTarget && (
+        <HideSnoozeDialog
+          title={hideTarget.kind === "repo" ? hideTarget.repo : hideTarget.session.session_title}
+          onConfirm={(hidden) => applyVisibility(hideTarget, hidden)}
+          onClose={() => setHideTarget(null)}
+        />
+      )}
     </main>
   );
 }
