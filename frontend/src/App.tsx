@@ -728,9 +728,20 @@ function MainView() {
     }
   }
 
-  // Both spawn paths are stubs for now — branch/worktree creation comes next.
-  function spawnIssue(node: IssueNode) {
-    setPicker((p) => (p ? { ...p, note: `Would spawn work for #${node.number} — not wired up yet.` } : p));
+  async function spawnIssue(node: IssueNode) {
+    if (!picker) return;
+    const repo = picker.repo;
+    setPicker((p) => (p ? { ...p, note: `Spawning #${node.number}…` } : p));
+    try {
+      const res = await api.spawnWork(repo, node.number);
+      const summary = res.reused
+        ? `Reused workspace for #${node.number} → ${res.work_dir}`
+        : `Spawned #${node.number} on ${res.branch} → ${res.work_dir}`;
+      const note = res.warnings.length ? `${summary}\n⚠ ${res.warnings.join("; ")}` : summary;
+      setPicker((p) => (p ? { ...p, note } : p));
+    } catch (e) {
+      setPicker((p) => (p ? { ...p, note: `Failed to spawn #${node.number}: ${String(e)}` } : p));
+    }
   }
 
   function createAndSpawn() {

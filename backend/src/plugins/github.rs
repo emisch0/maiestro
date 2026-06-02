@@ -23,6 +23,80 @@ impl Plugin for GitHubPlugin {
     }
 }
 
+// ── Reusable REST client ────────────────────────────────────────────────────────
+
+/// Authenticated GitHub REST client, scoped to a single identity's token.
+/// Holds the token and a shared `reqwest::Client`; methods are thin wrappers
+/// over the v3 API so callers (issue listing, spawning, …) don't re-implement
+/// auth, headers, and error decoding.
+pub struct GitHub {
+    client: reqwest::Client,
+    token: String,
+}
+
+impl GitHub {
+    pub fn for_identity(identity_id: &str) -> Result<Self, String> {
+        let scope = CredentialScope::Identity { identity_id: identity_id.to_string() };
+        let token = CredentialStore::get("github_token", &scope)
+            .map_err(|_| "No GitHub token found for this identity. Set one in Settings.".to_string())?;
+        let client = reqwest::Client::builder()
+            .user_agent("maiestro/0.1")
+            .build()
+            .map_err(|e| e.to_string())?;
+        Ok(Self { client, token })
+    }
+
+    /// A request builder pre-loaded with auth and the standard GitHub headers.
+    pub fn req(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        self.client
+            .request(method, url)
+            .bearer_auth(&self.token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+    }
+
+    /// GET a URL and parse the JSON body, mapping non-2xx to a GitHub error message.
+    pub async fn get_json(&self, url: &str) -> Result<serde_json::Value, String> {
+        let resp = self.req(reqwest::Method::GET, url).send().await.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(error_message(resp).await);
+        }
+        resp.json().await.map_err(|e| e.to_string())
+    }
+
+    /// Login of the token's owner (`GET /user`).
+    pub async fn authenticated_login(&self) -> Result<String, String> {
+        let v = self.get_json("https://api.github.com/user").await?;
+        v["login"].as_str().map(str::to_string).ok_or_else(|| "could not resolve token user".to_string())
+    }
+
+    /// Repository metadata, including `default_branch`. `repo` is "owner/name".
+    pub async fn repo(&self, repo: &str) -> Result<serde_json::Value, String> {
+        self.get_json(&format!("https://api.github.com/repos/{repo}")).await
+    }
+
+    /// A single issue. `repo` is "owner/name".
+    pub async fn issue(&self, repo: &str, number: u64) -> Result<serde_json::Value, String> {
+        self.get_json(&format!("https://api.github.com/repos/{repo}/issues/{number}")).await
+    }
+
+    pub async fn add_assignees(&self, repo: &str, number: u64, assignees: &[String]) -> Result<(), String> {
+        let url = format!("https://api.github.com/repos/{repo}/issues/{number}/assignees");
+        let resp = self.req(reqwest::Method::POST, &url)
+            .json(&serde_json::json!({ "assignees": assignees }))
+            .send().await.map_err(|e| e.to_string())?;
+        if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
+    }
+
+    pub async fn create_comment(&self, repo: &str, number: u64, body: &str) -> Result<(), String> {
+        let url = format!("https://api.github.com/repos/{repo}/issues/{number}/comments");
+        let resp = self.req(reqwest::Method::POST, &url)
+            .json(&serde_json::json!({ "body": body }))
+            .send().await.map_err(|e| e.to_string())?;
+        if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
+    }
+}
+
 // ── Tauri commands ─────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
@@ -34,42 +108,26 @@ pub struct RepoItem {
 
 #[tauri::command]
 pub async fn github_list_repos(identity_id: String) -> Result<Vec<RepoItem>, String> {
-    let scope = CredentialScope::Identity { identity_id };
-    let token = CredentialStore::get("github_token", &scope)
-        .map_err(|_| "No GitHub token found for this profile. Set one in the Profile tab first.".to_string())?;
-
-    let client = reqwest::Client::builder()
-        .user_agent("maiestro/0.1")
-        .build()
-        .map_err(|e| e.to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
 
     let mut repos = Vec::new();
     let mut page: u32 = 1;
 
     loop {
-        let resp = client
-            .get("https://api.github.com/user/repos")
+        let resp = gh
+            .req(reqwest::Method::GET, "https://api.github.com/user/repos")
             .query(&[
                 ("per_page", "100"),
                 ("page", &page.to_string()),
                 ("sort", "pushed"),
                 ("affiliation", "owner,collaborator,organization_member"),
             ])
-            .bearer_auth(&token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
             .await
             .map_err(|e| e.to_string())?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let msg = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| v["message"].as_str().map(|s| s.to_string()))
-                .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-            return Err(msg);
+        if !resp.status().is_success() {
+            return Err(error_message(resp).await);
         }
 
         let page_data: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
@@ -116,14 +174,7 @@ pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec
         .split_once('/')
         .ok_or_else(|| format!("invalid repo (expected owner/name): {repo}"))?;
 
-    let scope = CredentialScope::Identity { identity_id };
-    let token = CredentialStore::get("github_token", &scope)
-        .map_err(|_| "No GitHub token found for this identity. Set one in Settings.".to_string())?;
-
-    let client = reqwest::Client::builder()
-        .user_agent("maiestro/0.1")
-        .build()
-        .map_err(|e| e.to_string())?;
+    let gh = GitHub::for_identity(&identity_id)?;
 
     // 1. Collect every open issue. The issues endpoint also returns PRs, so skip
     //    anything carrying a `pull_request` field. Remember which ones have
@@ -133,8 +184,8 @@ pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec
     let mut page: u32 = 1;
 
     loop {
-        let resp = client
-            .get(format!("https://api.github.com/repos/{owner}/{name}/issues"))
+        let resp = gh
+            .req(reqwest::Method::GET, &format!("https://api.github.com/repos/{owner}/{name}/issues"))
             .query(&[
                 ("state", "open"),
                 ("sort", "created"),
@@ -142,15 +193,12 @@ pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec
                 ("per_page", "100"),
                 ("page", &page.to_string()),
             ])
-            .bearer_auth(&token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
             .await
             .map_err(|e| e.to_string())?;
 
         if !resp.status().is_success() {
-            return Err(github_error(resp).await);
+            return Err(error_message(resp).await);
         }
 
         let data: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
@@ -178,12 +226,9 @@ pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec
     let mut is_child: HashSet<u64> = HashSet::new();
 
     for parent in parents {
-        let resp = client
-            .get(format!("https://api.github.com/repos/{owner}/{name}/issues/{parent}/sub_issues"))
+        let resp = gh
+            .req(reqwest::Method::GET, &format!("https://api.github.com/repos/{owner}/{name}/issues/{parent}/sub_issues"))
             .query(&[("per_page", "100")])
-            .bearer_auth(&token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -265,7 +310,7 @@ fn build_issue_node(
     })
 }
 
-async fn github_error(resp: reqwest::Response) -> String {
+async fn error_message(resp: reqwest::Response) -> String {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     serde_json::from_str::<serde_json::Value>(&body)

@@ -19,6 +19,14 @@ export interface IssueNode {
   children: IssueNode[];
 }
 
+export interface SpawnResult {
+  work_dir: string;
+  branch: string;
+  issue_url: string;
+  reused: boolean;
+  warnings: string[];
+}
+
 export type CredentialScope = { kind: "identity"; identity_id: string };
 
 export interface CredentialTypeDto {
@@ -70,4 +78,7 @@ export const api = {
 
   openUrl: (url: string) =>
     invoke<void>("open_url", { url }),
+
+  spawnWork: (repo: string, issueNumber: number, forceNew = false) =>
+    invoke<SpawnResult>("spawn_work", { repo, issueNumber, forceNew }),
 };

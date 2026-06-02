@@ -7,6 +7,8 @@ mod links;
 mod plugin;
 mod plugins;
 mod repo_settings;
+mod sessions;
+mod spawn;
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -65,6 +67,8 @@ fn main() {
             identities::identities_get_default,
             identities::identities_set_default,
             links::open_url,
+            spawn::spawn_work,
+            sessions::sessions_list,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
