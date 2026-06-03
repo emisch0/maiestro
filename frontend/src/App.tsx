@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord } from "./api";
+import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
@@ -48,6 +48,58 @@ function mergeBlocker(c: PrChecks): string | null {
     case "blocked": return "Blocked by a required review or status check — resolve it, then merge again.";
     default: return null;
   }
+}
+
+// The work-lifecycle phase of a session, an axis distinct from the live Claude
+// busy/idle status. A merged PR wins outright; otherwise any local work (commits
+// ahead of base or an uncommitted change) means Implementing, and a pristine
+// branch is still Planning. Returns null while the work state is unresolved so a
+// working branch isn't briefly mislabeled "Planning".
+type LifecyclePhase = "planning" | "implementing" | "merged";
+function lifecyclePhase(pr: PrLink | null | undefined, work: WorkState | null | undefined): LifecyclePhase | null {
+  if (pr?.state === "merged") return "merged";
+  if (work === undefined) return null;
+  if (work && (work.ahead > 0 || work.dirty)) return "implementing";
+  return "planning";
+}
+
+const LIFECYCLE_LABELS: Record<LifecyclePhase, string> = {
+  planning: "Planning",
+  implementing: "Implementing",
+  merged: "Merged",
+};
+
+// Top-to-bottom order of the lifecycle zones within a repo group. Work items live
+// in the zone matching their phase and slide between zones as the phase changes.
+const ZONES: LifecyclePhase[] = ["planning", "implementing", "merged"];
+
+// How far along each phase is, used to collapse several sessions on one issue down
+// to the single most-advanced phase for that issue's pill.
+const PHASE_RANK: Record<LifecyclePhase, number> = { planning: 0, implementing: 1, merged: 2 };
+function furtherPhase(a: LifecyclePhase | null, b: LifecyclePhase | null): LifecyclePhase | null {
+  if (a == null) return b;
+  if (b == null) return a;
+  return PHASE_RANK[a] >= PHASE_RANK[b] ? a : b;
+}
+
+// The workspace palette colors are dark (they're VS Code title-bar backgrounds),
+// so as a thin border or an icon tint on the dark popover they read as muddy and
+// hard to tell apart. Keep each color's hue but pin it to a bright, uniform
+// lightness/saturation so the eight hues separate cleanly. Falls back to the raw
+// value for greys or anything unparseable.
+function accentColor(hex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  if (d === 0) return hex;
+  let h: number;
+  if (max === r) h = ((g - b) / d) % 6;
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  h = (h * 60 + 360) % 360;
+  return `hsl(${Math.round(h)}, 68%, 62%)`;
 }
 
 // A pending Tear Down prompt: a warnings confirmation, or a "VS Code still open"
@@ -754,7 +806,7 @@ function filterIssues(nodes: IssueNode[], query: string): IssueNode[] {
 
 // Issue number → its active session(s): the workspace color (for the dot) and a
 // title to surface on hover. Issues present here have a spawned worktree.
-type ActiveSessions = Record<number, { color: string; title: string }>;
+type ActiveSessions = Record<number, { color: string; title: string; phase: LifecyclePhase | null }>;
 
 interface IssueRowProps {
   node: IssueNode;
@@ -776,8 +828,12 @@ function IssueRow({ node, depth, expandedNumber, preparingNumber, active, onExpa
   // already have a session. Such issues can't be spawned again, so they don't
   // expand into the Spawn Work action; the hover explains why.
   const workingHint = "There is already a work session for this issue";
+  // The pill is tinted with the workspace color (its identity) and labelled with
+  // the work's lifecycle phase, falling back to "working" until the phase loads.
   const workingPill = session && (
-    <span className="issue-working-pill" style={{ background: session.color }} title={workingHint}>working</span>
+    <span className="issue-working-pill" style={{ background: session.color }} title={workingHint}>
+      {session.phase ? LIFECYCLE_LABELS[session.phase] : "working"}
+    </span>
   );
   return (
     <>
@@ -1073,6 +1129,9 @@ function MainView() {
   // PR link per session id, discovered live from GitHub. `null` = looked up, none
   // found (or the lookup failed); absent key = not looked up yet.
   const [prs, setPrs] = useState<Record<string, PrLink | null>>({});
+  // Local git state per session id (commits ahead / dirty), used to derive the
+  // work-lifecycle phase. Refreshed alongside the PR lookup on popover open.
+  const [workStates, setWorkStates] = useState<Record<string, WorkState | null>>({});
   // Live status per workspace id (busy / needs_you / idle / …), seeded on open
   // and kept current by the backend's `session-status` event.
   const [statuses, setStatuses] = useState<Record<string, StatusRecord>>({});
@@ -1114,6 +1173,9 @@ function MainView() {
         api.sessionPr(s.id)
           .then((pr) => setPrs((prev) => ({ ...prev, [s.id]: pr })))
           .catch(() => setPrs((prev) => ({ ...prev, [s.id]: null })));
+        api.sessionWorkState(s.id)
+          .then((ws) => setWorkStates((prev) => ({ ...prev, [s.id]: ws })))
+          .catch(() => setWorkStates((prev) => ({ ...prev, [s.id]: null })));
       }
     }).catch(() => {});
   }, []);
@@ -1524,6 +1586,11 @@ function MainView() {
 
   const now = Date.now();
 
+  // The lifecycle zone a session sorts into. An unresolved work state defaults to
+  // Planning until the local-git lookup lands (then the item slides if it moved).
+  const zoneOf = (s: Session): LifecyclePhase =>
+    lifecyclePhase(prs[s.id], workStates[s.id]) ?? "planning";
+
   return (
     <main className="panel">
       <ResizeGrips />
@@ -1601,7 +1668,17 @@ function MainView() {
                 {visibleSessions.length === 0 ? (
                   <p className="repo-group-empty">No active work</p>
                 ) : (
-                  visibleSessions.map((s) => {
+                  ZONES.map((zone) => {
+                    const zoneItems = visibleSessions.filter((s) => zoneOf(s) === zone);
+                    if (zoneItems.length === 0) return null;
+                    return (
+                      <div key={zone} className={`lifecycle-zone lifecycle-zone--${zone}`}>
+                        <div className="lifecycle-zone-header">
+                          <span className="lifecycle-zone-dot" />
+                          <span className="lifecycle-zone-name">{LIFECYCLE_LABELS[zone]}</span>
+                          <span className="lifecycle-zone-count">{zoneItems.length}</span>
+                        </div>
+                        {zoneItems.map((s) => {
                     const cmdOpen = commandsOpen === s.id;
                     const toolErr = statuses[s.id]?.last_error;
                     const pr = prs[s.id];
@@ -1618,7 +1695,7 @@ function MainView() {
                     const pm = prMerge[s.id];
                     return (
                     <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
-                      <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
+                      <div className="workspace-row" style={{ borderLeft: `3px solid ${accentColor(s.color)}` }}>
                         <ClaudePill status={statuses[s.id]} onClick={() => api.openInEditor(s.work_dir)} />
                         <span className="workspace-title">{s.session_title}</span>
                         {sessHidden && sessSnoozeLabel && (
@@ -1665,7 +1742,7 @@ function MainView() {
                             title="Open in VS Code"
                             aria-label="Open in VS Code"
                           >
-                            <VSCodeIcon style={{ color: s.color }} />
+                            <VSCodeIcon style={{ color: accentColor(s.color) }} />
                           </button>
                         </div>
                         <button
@@ -1784,6 +1861,9 @@ function MainView() {
                       )}
                     </div>
                     );
+                        })}
+                      </div>
+                    );
                   })
                 )}
               </div>
@@ -1800,9 +1880,11 @@ function MainView() {
         // carrying the workspace color and (joined) session title(s).
         const active: ActiveSessions = {};
         for (const s of sessionsByRepo[picker.repo] ?? []) {
-          active[s.issue_number] = active[s.issue_number]
-            ? { color: active[s.issue_number].color, title: `${active[s.issue_number].title}, ${s.session_title}` }
-            : { color: s.color, title: s.session_title };
+          const phase = lifecyclePhase(prs[s.id], workStates[s.id]);
+          const existing = active[s.issue_number];
+          active[s.issue_number] = existing
+            ? { color: existing.color, title: `${existing.title}, ${s.session_title}`, phase: furtherPhase(existing.phase, phase) }
+            : { color: s.color, title: s.session_title, phase };
         }
         // Issues already being worked on sink to the end (stable sort keeps the
         // backend's most-recently-modified order within each group).

@@ -152,6 +152,7 @@ fn main() {
             spawn::session_pr,
             spawn::session_create_pr,
             spawn::session_pr_checks,
+            spawn::session_work_state,
             spawn::session_merge_pr,
             sessions::sessions_list,
             sessions::session_set_visibility,

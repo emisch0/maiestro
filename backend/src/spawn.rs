@@ -1674,6 +1674,48 @@ pub async fn session_pr_checks(session_id: String) -> Result<Option<PrChecks>, S
     Ok(Some(PrChecks { state, running, ready_to_merge, mergeable_state }))
 }
 
+// ── Work lifecycle (local git facts) ────────────────────────────────────────────
+
+/// Local git facts about a session's worktree, used by the UI to derive the
+/// work-lifecycle phase (Planning → Implementing → Merged). The "Merged" phase
+/// comes from the PR state the row already has, so this stays purely local —
+/// no GitHub round-trip on a polled command.
+#[derive(serde::Serialize)]
+pub struct WorkState {
+    /// Commits in `origin/<default_branch>..HEAD` (measured against the local
+    /// remote-tracking ref — no fetch, so it can lag origin slightly).
+    pub ahead: u32,
+    /// Whether the worktree has uncommitted changes (`git status --porcelain`).
+    pub dirty: bool,
+}
+
+/// Local git state of a session's worktree. Soft-fails to `Ok(None)` when the
+/// session record or its worktree is gone (e.g. torn down mid-poll), matching
+/// `session_pr` / `session_pr_checks`; the UI then renders no lifecycle pill.
+/// Deliberately local-only (no `git fetch`) to stay cheap on the poll path.
+#[tauri::command]
+pub async fn session_work_state(session_id: String) -> Result<Option<WorkState>, String> {
+    crate::log_invoke_debug!("session_work_state");
+    let Some(session) = crate::sessions::get(&session_id) else {
+        return Ok(None);
+    };
+    let work_dir = PathBuf::from(&session.work_dir);
+    if !work_dir.exists() {
+        return Ok(None);
+    }
+    let base = session.default_branch;
+
+    let dirty = git(&work_dir, &["status", "--porcelain"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{base}..HEAD")])
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+
+    Ok(Some(WorkState { ahead, dirty }))
+}
+
 /// Merge a session's PR, creating it first if needed. Before touching GitHub it
 /// reconciles the **local worktree** so the merge can't land a stale remote: it
 /// blocks on uncommitted changes and pushes any committed-but-unpushed local

@@ -14,6 +14,10 @@
   --red: #f87171;
   --red-bg: rgba(248, 113, 113, 0.12);
   --red-border: rgba(248, 113, 113, 0.28);
+  --blue: #60a5fa;
+  --blue-bg: rgba(96, 165, 250, 0.12);
+  --purple: #a371f7;
+  --purple-bg: rgba(163, 113, 247, 0.14);
   --radius: 7px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 }
@@ -290,6 +294,46 @@ body {
 .claude-pill--idle .claude-pill-mark {
   color: var(--muted);
 }
+
+/* Lifecycle zones: within a repo group, work items are bucketed under Planning →
+   Implementing → Merged headings, moving between buckets as their phase changes.
+   Empty zones aren't rendered. */
+.lifecycle-zone + .lifecycle-zone {
+  margin-top: 2px;
+}
+
+.lifecycle-zone-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 0 3px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.lifecycle-zone-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--muted);
+}
+
+/* The count sits at the far right, dimmed. */
+.lifecycle-zone-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+
+/* Per-phase accent on the heading + its dot. Planning stays muted. */
+.lifecycle-zone--implementing .lifecycle-zone-name { color: var(--blue); }
+.lifecycle-zone--implementing .lifecycle-zone-dot { background: var(--blue); }
+.lifecycle-zone--merged .lifecycle-zone-name { color: var(--purple); }
+.lifecycle-zone--merged .lifecycle-zone-dot { background: var(--purple); }
 
 /* A failed tool call: red mark/border, regardless of the underlying state
    (e.g. still "busy", which draws the rainbow ring). The full error shows in
