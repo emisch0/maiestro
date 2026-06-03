@@ -110,3 +110,17 @@ Current schema:
 - **`worktree_prefix`**: prefix for spawned worktree locations. The full worktree path is `<worktree_prefix><workspace>/<repo>` — a string concatenation, so the trailing `work-` is part of the directory name, not a separate path component (e.g. `~/src/work-12-add-foo/repo-name`). Absent or `null` defaults to `~/src/work-`, preserving the original behavior. Tilde-expanded. Changing it affects future spawns only; it does not move existing worktrees.
 - **`env_files`**: ordered list of `.env` files to source when launching user-facing tools (VSCode, Terminal) for this repo. Populated via a "Scan" action that walks the checkout directory (up to 4 levels, skipping `node_modules`, `.git`, `target`, etc.) looking for files whose name starts with `.env`. Users can also add or remove entries manually.
 - **`hidden`**: repo-level hide/snooze state. Absent (or `null`) means visible. When present, the repo and all its work items are hidden from the dashboard unless "Show hidden" is toggled on. `snooze_until` is a Unix-epoch-millis timestamp the repo stays hidden until (`null` = hidden indefinitely); once that time passes the repo renders as visible again. Per-work-item hide state is **not** stored here — it lives on each session record (`~/.maiestro/sessions/<id>.json`).
+
+### Global app settings
+
+App-wide settings that are neither a credential nor repo-scoped live in `~/.maiestro/settings.json` (`backend/src/app_settings.rs`), a sibling of `profiles.json`. Like the other `~/.maiestro/` files it is human-editable and dotfile-manageable; every field is optional, so a missing or partial file falls back to defaults.
+
+Current schema:
+
+```json
+{
+  "window": { "width": 680, "height": 460 }
+}
+```
+
+- **`window`**: persisted size (logical pixels) of the menu-bar popover (the `main` window). The popover is undecorated/transparent and `resizable: true`; the user drags invisible edge/corner grips (`ResizeGrips` in the frontend, forwarding to Tauri's `startResizeDragging`). The backend restores this size in `setup()` *before* the first show (so there's no resize flash) and saves the current size in the blur handler when the popover hides — a low-churn save point versus writing on every drag frame. A restored size is clamped to the `minWidth`/`minHeight` in `tauri.conf.json` (mirrored as `MIN_POPOVER_*` constants in `main.rs`). Absent `window` means "use the `tauri.conf.json` default size." Window **position** is not persisted — the popover is always re-centered under the tray icon.
