@@ -255,8 +255,8 @@ body {
 }
 
 /* Lifecycle zones: within a repo group, work items are bucketed under Planning →
-   Implementing → Merged headings and slide between buckets (FLIP) as their phase
-   changes. Empty zones aren't rendered. */
+   Implementing → Merged headings, moving between buckets as their phase changes.
+   Empty zones aren't rendered. */
 .lifecycle-zone + .lifecycle-zone {
   margin-top: 2px;
 }

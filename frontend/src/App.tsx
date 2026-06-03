@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
 import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
 import GearIcon from "./icons/gear.svg?react";
@@ -68,6 +68,35 @@ const LIFECYCLE_LABELS: Record<LifecyclePhase, string> = {
 // Top-to-bottom order of the lifecycle zones within a repo group. Work items live
 // in the zone matching their phase and slide between zones as the phase changes.
 const ZONES: LifecyclePhase[] = ["planning", "implementing", "merged"];
+
+// How far along each phase is, used to collapse several sessions on one issue down
+// to the single most-advanced phase for that issue's pill.
+const PHASE_RANK: Record<LifecyclePhase, number> = { planning: 0, implementing: 1, merged: 2 };
+function furtherPhase(a: LifecyclePhase | null, b: LifecyclePhase | null): LifecyclePhase | null {
+  if (a == null) return b;
+  if (b == null) return a;
+  return PHASE_RANK[a] >= PHASE_RANK[b] ? a : b;
+}
+
+// The workspace palette colors are dark (they're VS Code title-bar backgrounds),
+// so as a thin border or an icon tint on the dark popover they read as muddy and
+// hard to tell apart. Keep each color's hue but pin it to a bright, uniform
+// lightness/saturation so the eight hues separate cleanly. Falls back to the raw
+// value for greys or anything unparseable.
+function accentColor(hex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  if (d === 0) return hex;
+  let h: number;
+  if (max === r) h = ((g - b) / d) % 6;
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  h = (h * 60 + 360) % 360;
+  return `hsl(${Math.round(h)}, 68%, 62%)`;
+}
 
 // A pending Tear Down prompt: a warnings confirmation, or a "VS Code still open"
 // block (which may offer the Accessibility shortcut so mAIestro can close it).
@@ -773,7 +802,7 @@ function filterIssues(nodes: IssueNode[], query: string): IssueNode[] {
 
 // Issue number → its active session(s): the workspace color (for the dot) and a
 // title to surface on hover. Issues present here have a spawned worktree.
-type ActiveSessions = Record<number, { color: string; title: string }>;
+type ActiveSessions = Record<number, { color: string; title: string; phase: LifecyclePhase | null }>;
 
 interface IssueRowProps {
   node: IssueNode;
@@ -795,8 +824,12 @@ function IssueRow({ node, depth, expandedNumber, preparingNumber, active, onExpa
   // already have a session. Such issues can't be spawned again, so they don't
   // expand into the Spawn Work action; the hover explains why.
   const workingHint = "There is already a work session for this issue";
+  // The pill is tinted with the workspace color (its identity) and labelled with
+  // the work's lifecycle phase, falling back to "working" until the phase loads.
   const workingPill = session && (
-    <span className="issue-working-pill" style={{ background: session.color }} title={workingHint}>working</span>
+    <span className="issue-working-pill" style={{ background: session.color }} title={workingHint}>
+      {session.phase ? LIFECYCLE_LABELS[session.phase] : "working"}
+    </span>
   );
   return (
     <>
@@ -1036,11 +1069,6 @@ function MainView() {
   const [expanded, setExpanded] = useState<Expand>(null);
   // The multi-line idea box; resized to fit its content (capped in CSS).
   const ideaRef = useRef<HTMLTextAreaElement | null>(null);
-  // The work-list container, scanned by the FLIP effect for `[data-flip-id]` rows.
-  const listRef = useRef<HTMLDivElement | null>(null);
-  // Last-known viewport rect of each work item, keyed by session id. Drives the
-  // FLIP slide when an item lands in a different zone on the next render.
-  const flipRects = useRef(new Map<string, DOMRect>());
 
   const [sessions, setSessions] = useState<Session[]>([]);
   // PR link per session id, discovered live from GitHub. `null` = looked up, none
@@ -1508,41 +1536,6 @@ function MainView() {
   const zoneOf = (s: Session): LifecyclePhase =>
     lifecyclePhase(prs[s.id], workStates[s.id]) ?? "planning";
 
-  // FLIP: after each render, compare every work item's new position against the
-  // one we recorded last time. If it moved (it changed zones), jump it back to the
-  // old spot with a transform, then release the transform on the next frame so it
-  // glides into place. Runs before paint, so there's no flash. Items track by
-  // session id, so a row remounting into a different zone's container still slides.
-  useLayoutEffect(() => {
-    const container = listRef.current;
-    if (!container) return;
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const rows = container.querySelectorAll<HTMLElement>("[data-flip-id]");
-    const next = new Map<string, DOMRect>();
-    rows.forEach((el) => {
-      const id = el.dataset.flipId!;
-      const rect = el.getBoundingClientRect();
-      // Skip rows that aren't laid out (e.g. the popover is hidden) so we keep the
-      // last good rect and don't fly every item in from 0,0 on the next open.
-      if (rect.height === 0) return;
-      next.set(id, rect);
-      if (reduce) return;
-      const prev = flipRects.current.get(id);
-      if (!prev || prev.height === 0) return;
-      const dx = prev.left - rect.left;
-      const dy = prev.top - rect.top;
-      if (!dx && !dy) return;
-      el.style.transition = "none";
-      el.style.transform = `translate(${dx}px, ${dy}px)`;
-      void el.getBoundingClientRect(); // force the inverted position to commit
-      requestAnimationFrame(() => {
-        el.style.transition = "transform 320ms cubic-bezier(0.22, 1, 0.36, 1)";
-        el.style.transform = "";
-      });
-    });
-    flipRects.current = next;
-  });
-
   return (
     <main className="panel">
       <header className="panel-header">
@@ -1561,7 +1554,7 @@ function MainView() {
         </button>
       </header>
 
-      <div className="work-list" ref={listRef}>
+      <div className="work-list">
         {repos.length === 0 ? (
           <div className="empty-state">
             <p className="empty-state-title">No repos yet</p>
@@ -1644,8 +1637,8 @@ function MainView() {
                     const checks = prChecks[s.id];
                     const pm = prMerge[s.id];
                     return (
-                    <div key={s.id} data-flip-id={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
-                      <div className="workspace-row" style={{ borderLeft: `3px solid ${s.color}` }}>
+                    <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
+                      <div className="workspace-row" style={{ borderLeft: `3px solid ${accentColor(s.color)}` }}>
                         <ClaudePill status={statuses[s.id]} onClick={() => api.openInEditor(s.work_dir)} />
                         <span className="workspace-title">{s.session_title}</span>
                         {sessHidden && sessSnoozeLabel && (
@@ -1692,7 +1685,7 @@ function MainView() {
                             title="Open in VS Code"
                             aria-label="Open in VS Code"
                           >
-                            <VSCodeIcon style={{ color: s.color }} />
+                            <VSCodeIcon style={{ color: accentColor(s.color) }} />
                           </button>
                         </div>
                         <button
@@ -1821,9 +1814,11 @@ function MainView() {
         // carrying the workspace color and (joined) session title(s).
         const active: ActiveSessions = {};
         for (const s of sessionsByRepo[picker.repo] ?? []) {
-          active[s.issue_number] = active[s.issue_number]
-            ? { color: active[s.issue_number].color, title: `${active[s.issue_number].title}, ${s.session_title}` }
-            : { color: s.color, title: s.session_title };
+          const phase = lifecyclePhase(prs[s.id], workStates[s.id]);
+          const existing = active[s.issue_number];
+          active[s.issue_number] = existing
+            ? { color: existing.color, title: `${existing.title}, ${s.session_title}`, phase: furtherPhase(existing.phase, phase) }
+            : { color: s.color, title: s.session_title, phase };
         }
         // Issues already being worked on sink to the end (stable sort keeps the
         // backend's most-recently-modified order within each group).
