@@ -31,7 +31,26 @@ pub struct StatusRecord {
     /// notification message).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// The most recent failed tool call, if any. Unlike `state`/`detail` (which
+    /// the next hook overwrites within seconds), this is preserved across writes
+    /// until the user dismisses it or starts a new turn — so a failure stays
+    /// visible long enough to be read. See `run_hook_cli`'s lifecycle rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<ToolError>,
     /// RFC-3339 timestamp of the transition.
+    pub ts: String,
+}
+
+/// One failed tool call, surfaced to the popover as a dismissible error and
+/// appended to `~/.maiestro/logs/<ws>.log`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolError {
+    /// The tool that failed (from the hook payload's `tool_name`), when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// The error message extracted from the `PostToolUseFailure` payload.
+    pub message: String,
+    /// RFC-3339 timestamp of the failure.
     pub ts: String,
 }
 
@@ -56,8 +75,17 @@ fn status_path(ws: &str) -> PathBuf {
 fn resolve_state(arg: &str, payload: &serde_json::Value) -> (String, Option<String>) {
     match arg {
         "running" => ("running".into(), None),
+        // UserPromptSubmit: a fresh turn. Same `busy` state as a running tool,
+        // but its own verb so the helper can clear a stale `last_error`.
+        "prompt" => ("busy".into(), None),
         "busy" => {
             // PreToolUse carries the tool name; UserPromptSubmit does not.
+            let detail = payload["tool_name"].as_str().map(|t| t.to_string());
+            ("busy".into(), detail)
+        }
+        // A failed tool call. Claude keeps working after it, so the *state* stays
+        // `busy`; the failure itself rides on `last_error` (set in run_hook_cli).
+        "tool_failed" => {
             let detail = payload["tool_name"].as_str().map(|t| t.to_string());
             ("busy".into(), detail)
         }
@@ -97,16 +125,67 @@ pub fn run_hook_cli(args: &[String]) {
     let payload: serde_json::Value = serde_json::from_str(&buf).unwrap_or(serde_json::Value::Null);
 
     let (state, detail) = resolve_state(state_arg, &payload);
+    let ts = chrono::Utc::now().to_rfc3339();
+
+    // `last_error` lifecycle. The status file is last-write-wins and the next
+    // hook (`busy`/`idle`) lands within seconds, so a failure can't live in
+    // `state`. Instead: a failed tool *sets* it; a new turn/session *clears* it;
+    // every other event *carries the prior value forward* so it survives until
+    // the user dismisses it (see `clear_session_error`) or submits a new prompt.
+    let last_error = match state_arg {
+        "tool_failed" => {
+            let err = ToolError {
+                tool: payload["tool_name"].as_str().map(|t| t.to_string()),
+                message: extract_error_message(&payload),
+                ts: ts.clone(),
+            };
+            crate::logging::append_line(&format!(
+                "session={workspace} tool call failed [{}]: {}",
+                err.tool.as_deref().unwrap_or("?"),
+                err.message
+            ));
+            Some(err)
+        }
+        "prompt" | "running" => None,
+        _ => read_record(&workspace).and_then(|r| r.last_error),
+    };
+
     let record = StatusRecord {
         workspace: workspace.clone(),
         state,
         session_id: payload["session_id"].as_str().map(|s| s.to_string()),
         cwd: payload["cwd"].as_str().map(|s| s.to_string()),
         detail,
-        ts: chrono::Utc::now().to_rfc3339(),
+        last_error,
+        ts,
     };
 
     let _ = write_record_atomic(&record);
+}
+
+/// Pull a human-readable failure message out of a `PostToolUseFailure` payload.
+/// The exact field isn't pinned down in the docs, so try the likely ones in
+/// order and fall back to a generic message rather than dropping the failure.
+fn extract_error_message(payload: &serde_json::Value) -> String {
+    let candidates = [
+        payload["error"].as_str(),
+        payload["tool_response"]["error"].as_str(),
+        payload["tool_response"]["stderr"].as_str(),
+        payload["message"].as_str(),
+    ];
+    for c in candidates.into_iter().flatten() {
+        let trimmed = c.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "Tool call failed".to_string()
+}
+
+/// Read a workspace's current status record from disk, if present and valid.
+fn read_record(ws: &str) -> Option<StatusRecord> {
+    let data = std::fs::read_to_string(status_path(ws)).ok()?;
+    serde_json::from_str(&data).ok()
 }
 
 /// Write `~/.maiestro/status/<ws>.json` atomically (temp file + rename) so the
@@ -149,6 +228,23 @@ pub fn remove(ws: &str) {
 #[tauri::command]
 pub fn sessions_status_list() -> Vec<StatusRecord> {
     load_all()
+}
+
+/// Clear a session's `last_error` (the dismissible failed-tool block in the
+/// popover). Rewrites the record without it — so a reopened popover doesn't
+/// re-show a dismissed error — and the watcher re-emits the change. No-op if the
+/// record is missing or already clear.
+#[tauri::command]
+pub fn clear_session_error(workspace: String) {
+    let Some(mut record) = read_record(&workspace) else {
+        return;
+    };
+    if record.last_error.is_none() {
+        return;
+    }
+    record.last_error = None;
+    record.ts = chrono::Utc::now().to_rfc3339();
+    let _ = write_record_atomic(&record);
 }
 
 /// Remove status files with no matching session record (e.g. left over from a
@@ -217,6 +313,7 @@ pub fn start_watcher(app: tauri::AppHandle) -> notify::Result<notify::Recommende
                         session_id: None,
                         cwd: None,
                         detail: None,
+                        last_error: None,
                         ts: chrono::Utc::now().to_rfc3339(),
                     };
                     let _ = app.emit("session-status", &record);

@@ -105,6 +105,19 @@ pub fn init() {
         .try_init();
 }
 
+/// Append a single error line to today's log file WITHOUT installing a global
+/// `tracing` subscriber. For the `maiestro hook` helper subprocess, which is too
+/// short-lived to set up tracing (see `main()`) but should still record failures
+/// in the same place as the main app, with the same UTC-dated path scheme.
+/// Best-effort: a write failure is dropped, like the rest of the hook helper.
+pub fn append_line(message: &str) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    let mut writer = DailyRollingWriter::new(log_root());
+    // Shaped like a `tracing` fmt line (`<ts>  LEVEL target: msg`) so it reads
+    // naturally alongside the subscriber's output in the in-app log viewer.
+    let _ = writeln!(writer, "{ts}  ERROR maiestro::hook: {message}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

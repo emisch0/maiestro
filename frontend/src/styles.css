@@ -250,6 +250,16 @@ body {
   color: var(--muted);
 }
 
+/* A failed tool call: red mark/border, regardless of the underlying state
+   (e.g. still "busy", which draws the rainbow ring). The full error shows in
+   the dismissible block below the row. */
+.claude-pill--error {
+  border-color: var(--red-border);
+}
+.claude-pill--error .claude-pill-mark {
+  color: var(--red);
+}
+
 /* Right-aligned segmented pill of icon actions on a session row. */
 .session-pill {
   display: inline-flex;
@@ -417,6 +427,24 @@ body {
   padding-left: 16px;
   font-size: 11.5px;
   color: var(--muted);
+}
+
+/* Full, untruncated failed-tool output: monospace, wrapped, and scrollable so a
+   long error stays readable inside the narrow popover. */
+.tool-error-message {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  max-height: 180px;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--red-border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .btn-danger {
