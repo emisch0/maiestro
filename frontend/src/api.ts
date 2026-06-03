@@ -101,9 +101,10 @@ export interface PrLink {
 }
 
 export interface PrChecks {
-  /** One of "passed", "failed", "running", "pending", "none". */
+  /** Pill indicator derived from mergeable_state: "passed" (mergeable),
+   *  "failed" (conflicts), "pending" (behind/blocked/computing), "none" (draft). */
   state: string;
-  /** Any check actively in_progress — animate the indicator only when true. */
+  /** Mergeability still being computed by GitHub — animate the indicator. */
   running: boolean;
   /** GitHub reports the PR mergeable (`mergeable_state == "clean"`). */
   ready_to_merge: boolean;
@@ -124,6 +125,15 @@ export interface StatusRecord {
   cwd?: string;
   /** Short human detail, e.g. "permission: Bash" or a tool name. */
   detail?: string;
+  /** The most recent failed tool call, kept until dismissed or a new turn. */
+  last_error?: ToolError;
+  ts: string;
+}
+
+/** A failed tool call surfaced from a `PostToolUseFailure` hook. */
+export interface ToolError {
+  tool?: string;
+  message: string;
   ts: string;
 }
 
@@ -226,6 +236,9 @@ export const api = {
 
   sessionsStatusList: () =>
     invoke<StatusRecord[]>("sessions_status_list"),
+
+  clearSessionError: (workspace: string) =>
+    invoke<void>("clear_session_error", { workspace }),
 
   teardown: (sessionId: string, confirmed = false, force = false) =>
     invoke<TeardownOutcome>("teardown", { sessionId, confirmed, force }),

@@ -22,28 +22,32 @@ const PR_STATE_ICONS: Record<string, typeof PrOpenIcon> = {
   closed: PrClosedIcon,
 };
 
-// Tooltip text for the PR pill's check indicator.
+// Tooltip text for the PR pill's merge indicator, off GitHub's mergeable_state
+// (we can't read the Checks API with a fine-grained token).
 function checkLabel(checks: PrChecks): string {
-  switch (checks.state) {
-    case "running": return "Checks running…";
-    case "pending": return "Checks queued";
-    case "passed": return checks.ready_to_merge ? "Checks passed — ready to merge" : "Checks passed";
-    case "failed": return "A required check failed";
-    default: return "";
+  switch (checks.mergeable_state) {
+    case "clean":
+    case "has_hooks": return "Ready to merge";
+    case "unstable": return "Mergeable — a non-required check is failing";
+    case "dirty": return "Merge conflicts with the base branch";
+    case "behind": return "Branch is behind the base — update it";
+    case "blocked": return "Blocked by a required review or status check";
+    case "draft": return "Draft — mark ready for review to merge";
+    default: return "Checking mergeability…"; // unknown / not yet computed
   }
 }
 
 // A terminal reason the auto-merge can't proceed and won't self-resolve, or null
-// to keep waiting. Distinct from a transient wait (checks still running, GitHub
-// recomputing): these need the user to act, so the loop stops and surfaces them.
-// "blocked" is only terminal once checks are green (= a required review is the
-// holdout); while checks run, a blocked state is just the normal waiting path.
+// to keep waiting (e.g. mergeability still computing, or a required check still
+// running which GitHub will clear to "clean"). These need the user to act, so
+// the loop stops and surfaces them. Driven purely by mergeable_state now.
 function mergeBlocker(c: PrChecks): string | null {
-  if (c.state === "failed") return "A required check failed — fix it and push, then merge again.";
-  if (c.mergeable_state === "dirty") return "Merge conflicts with the base branch — resolve them and push, then merge again.";
-  if (c.mergeable_state === "behind") return "Branch is behind the base — update it (merge or rebase) and push, then merge again.";
-  if (c.mergeable_state === "blocked" && c.state === "passed") return "Blocked by a required review — get an approval, then merge again.";
-  return null;
+  switch (c.mergeable_state) {
+    case "dirty": return "Merge conflicts with the base branch — resolve them and push, then merge again.";
+    case "behind": return "Branch is behind the base — update it (merge or rebase) and push, then merge again.";
+    case "blocked": return "Blocked by a required review or status check — resolve it, then merge again.";
+    default: return null;
+  }
 }
 
 // The work-lifecycle phase of a session, an axis distinct from the live Claude
@@ -929,9 +933,12 @@ function ClaudePill({ status, onClick }: { status?: StatusRecord; onClick: () =>
   if (!label) return null;
   // `needs_you` carries the reason (e.g. the permission request) in `detail`.
   const title = status.detail ? `Claude · ${label} — ${status.detail}` : `Claude · ${label}`;
+  // A failed tool tints the pill red; the error itself lives in the dismissible
+  // row block, not this tooltip.
+  const cls = `claude-pill claude-pill--${status.state}${status.last_error ? " claude-pill--error" : ""}`;
   return (
     <button
-      className={`claude-pill claude-pill--${status.state}`}
+      className={cls}
       onClick={onClick}
       title={title}
       aria-label={title}
@@ -1059,6 +1066,54 @@ function HideSnoozeDialog({ title, onConfirm, onClose }: {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Invisible drag grips along the popover's edges and corners. The `main` window
+ * is undecorated and transparent (see tauri.conf.json), so the OS draws no resize
+ * border — these thin overlays give the user something to grab, forwarding to
+ * Tauri's `startResizeDragging`. Backend persists the resulting size on blur.
+ */
+// Tauri's `startResizeDragging` direction. The enum is declared but not exported
+// from @tauri-apps/api/window, so we mirror its string union locally.
+type ResizeDirection =
+  | "North"
+  | "South"
+  | "East"
+  | "West"
+  | "NorthEast"
+  | "NorthWest"
+  | "SouthEast"
+  | "SouthWest";
+
+function ResizeGrips() {
+  const startResize = (direction: ResizeDirection) => (e: React.PointerEvent) => {
+    // Only the primary button starts a resize; ignore right/middle clicks.
+    if (e.button !== 0) return;
+    e.preventDefault();
+    void getCurrentWindow().startResizeDragging(direction);
+  };
+  const grips: { cls: string; dir: ResizeDirection }[] = [
+    { cls: "resize-grip--n", dir: "North" },
+    { cls: "resize-grip--s", dir: "South" },
+    { cls: "resize-grip--e", dir: "East" },
+    { cls: "resize-grip--w", dir: "West" },
+    { cls: "resize-grip--ne", dir: "NorthEast" },
+    { cls: "resize-grip--nw", dir: "NorthWest" },
+    { cls: "resize-grip--se", dir: "SouthEast" },
+    { cls: "resize-grip--sw", dir: "SouthWest" },
+  ];
+  return (
+    <>
+      {grips.map((g) => (
+        <div
+          key={g.cls}
+          className={`resize-grip ${g.cls}`}
+          onPointerDown={startResize(g.dir)}
+        />
+      ))}
+    </>
   );
 }
 
@@ -1538,6 +1593,7 @@ function MainView() {
 
   return (
     <main className="panel">
+      <ResizeGrips />
       <header className="panel-header">
         <h1>m<span className="ai">AI</span>estro</h1>
         <button
@@ -1624,6 +1680,7 @@ function MainView() {
                         </div>
                         {zoneItems.map((s) => {
                     const cmdOpen = commandsOpen === s.id;
+                    const toolErr = statuses[s.id]?.last_error;
                     const pr = prs[s.id];
                     const PrIcon = pr ? (PR_STATE_ICONS[pr.state] ?? PrOpenIcon) : null;
                     const sessHidden = effectiveHidden(s.hidden, now);
@@ -1751,6 +1808,15 @@ function MainView() {
                           </ul>
                           <div className="issue-actions">
                             <button className="btn-ghost" onClick={() => setPrMerge((prev) => ({ ...prev, [s.id]: {} }))}>Dismiss</button>
+                          </div>
+                        </div>
+                      )}
+                      {toolErr && (
+                        <div className="cleanup-confirm">
+                          <p className="cleanup-lead">{toolErr.tool ? `${toolErr.tool} failed` : "A tool call failed"}</p>
+                          <pre className="tool-error-message">{toolErr.message}</pre>
+                          <div className="issue-actions">
+                            <button className="btn-ghost" onClick={() => api.clearSessionError(s.id)}>Dismiss</button>
                           </div>
                         </div>
                       )}

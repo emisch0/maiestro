@@ -1,6 +1,7 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_settings;
 mod credentials;
 mod identities;
 mod links;
@@ -18,7 +19,7 @@ use std::time::{Duration, Instant};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, WindowEvent,
+    Emitter, LogicalSize, Manager, WindowEvent,
 };
 use tauri_plugin_positioner::{Position, WindowExt};
 
@@ -31,6 +32,55 @@ use plugins::{GitHubPlugin, github_list_issues, github_list_repos};
 #[derive(Default)]
 struct PopoverState {
     last_auto_hide: Mutex<Option<Instant>>,
+}
+
+/// Minimum popover size, in logical pixels. Mirrors `minWidth`/`minHeight` on the
+/// `main` window in `tauri.conf.json`; used to clamp a restored size so a hand-edited
+/// or stale `settings.json` can't shrink the popover into an unusable sliver.
+const MIN_POPOVER_WIDTH: f64 = 480.0;
+const MIN_POPOVER_HEIGHT: f64 = 360.0;
+
+/// Apply the persisted popover size (if any) to the `main` window. Called in
+/// `setup()` while the window is still hidden, so the first show already has the
+/// user's chosen dimensions — no resize flash.
+fn restore_popover_size(app: &tauri::AppHandle) {
+    let Some(size) = app_settings::load().window else {
+        return;
+    };
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let width = size.width.max(MIN_POPOVER_WIDTH);
+    let height = size.height.max(MIN_POPOVER_HEIGHT);
+    if let Err(e) = window.set_size(LogicalSize::new(width, height)) {
+        tracing::warn!(error = %e, "failed to restore popover size");
+    }
+}
+
+/// Save the popover's current logical size to the global settings file. Called
+/// from the blur handler (the popover always hides on blur), so it captures the
+/// final size after a resize drag without writing on every drag frame.
+fn persist_popover_size(window: &tauri::Window) {
+    let Ok(physical) = window.inner_size() else {
+        return;
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let logical = physical.to_logical::<f64>(scale);
+    let settings = app_settings::AppSettings {
+        window: Some(app_settings::WindowSize {
+            width: logical.width,
+            height: logical.height,
+        }),
+    };
+    if let Err(e) = app_settings::save(&settings) {
+        tracing::warn!(error = %e, "failed to persist popover size");
+    } else {
+        tracing::debug!(
+            width = logical.width,
+            height = logical.height,
+            "persisted popover size"
+        );
+    }
 }
 
 fn show_popover(app: &tauri::AppHandle) {
@@ -109,11 +159,16 @@ fn main() {
             status::sessions_status_list,
             logging::logs_read,
             logging::logs_reveal,
+            status::clear_session_error,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Apply the user's persisted popover size before the first show, so
+            // the popover opens at their chosen dimensions with no resize flash.
+            restore_popover_size(app.handle());
 
             // Live per-session status: drop orphaned status files, then watch
             // ~/.maiestro/status/ and forward changes to the popover as
@@ -202,6 +257,9 @@ fn main() {
                 if let Some(state) = app.try_state::<PopoverState>() {
                     *state.last_auto_hide.lock().unwrap() = Some(Instant::now());
                 }
+                // Capture the (possibly just-resized) size before hiding, so it
+                // survives the next launch.
+                persist_popover_size(window);
                 let _ = window.hide();
             }
         })

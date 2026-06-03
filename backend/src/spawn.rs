@@ -270,7 +270,9 @@ fn maiestro_hook_groups(bin: &Path, ws_id: &str) -> Vec<(&'static str, serde_jso
 
     vec![
         ("SessionStart", group("running")),
-        ("UserPromptSubmit", group("busy")),
+        // Its own `prompt` verb (not `busy`) so a fresh turn clears a stale
+        // failed-tool error while still reading as working.
+        ("UserPromptSubmit", group("prompt")),
         ("PreToolUse", matcher_group("busy")),
         // PostToolUse is the event that fires *after* an approved permission
         // prompt's tool completes — the only signal that Claude has resumed
@@ -279,6 +281,9 @@ fn maiestro_hook_groups(bin: &Path, ws_id: &str) -> Vec<(&'static str, serde_jso
         // Claude is actively thinking. PreToolUse alone can't cover this: it
         // fires *before* the prompt, not after approval.
         ("PostToolUse", matcher_group("busy")),
+        // A failed tool call: captures the error into `last_error` (kept until
+        // dismissed) and logs it. State stays `busy` — Claude works on past it.
+        ("PostToolUseFailure", matcher_group("tool_failed")),
         ("Notification", group("notification")),
         ("Stop", group("idle")),
         ("SessionEnd", group("ended")),
@@ -1594,10 +1599,12 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
 /// pill's check indicator and gate auto-merge.
 #[derive(serde::Serialize)]
 pub struct PrChecks {
-    /// One of "passed" / "failed" / "running" / "pending" / "none".
+    /// Pill indicator derived from `mergeable_state`: "passed" (mergeable),
+    /// "failed" (conflicts), "pending" (behind/blocked/computing), or "none"
+    /// (draft). See `merge_pill_state`.
     pub state: String,
-    /// Whether any check is actively `in_progress` — drives the spinner so it
-    /// animates only during active runs, not while checks are merely queued.
+    /// Whether mergeability is still being computed by GitHub (`mergeable_state`
+    /// == "unknown") — drives the spinner.
     pub running: bool,
     /// GitHub's `mergeable_state == "clean"`: required checks and (where branch
     /// protection requires them) approvals are satisfied, so a merge will land.
@@ -1608,41 +1615,22 @@ pub struct PrChecks {
     pub mergeable_state: String,
 }
 
-/// Collapse a commit's check runs into one label. Failure wins over running,
-/// running over pending; "none" means the head commit has no checks at all.
-fn aggregate_checks(runs: &[serde_json::Value]) -> String {
-    if runs.is_empty() {
-        return "none".to_string();
-    }
-    let mut any_running = false;
-    let mut any_failed = false;
-    let mut all_complete = true;
-    for r in runs {
-        match r["status"].as_str().unwrap_or("") {
-            "completed" => {
-                let ok = matches!(
-                    r["conclusion"].as_str(),
-                    Some("success") | Some("neutral") | Some("skipped")
-                );
-                if !ok {
-                    any_failed = true;
-                }
-            }
-            "in_progress" => {
-                any_running = true;
-                all_complete = false;
-            }
-            _ => all_complete = false, // queued / waiting / pending
-        }
-    }
-    if any_failed {
-        "failed".to_string()
-    } else if any_running {
-        "running".to_string()
-    } else if all_complete {
-        "passed".to_string()
-    } else {
-        "pending".to_string()
+/// Map GitHub's `mergeable_state` to the pill's indicator vocabulary
+/// (`passed`/`failed`/`pending`/`none`) plus whether to show the computing
+/// spinner. We can't read the Checks API with a fine-grained token, so
+/// merge-readiness — which only needs "Pull requests: read" — is the signal the
+/// pill reflects. `mergeable_state` still folds in required-check results
+/// (`blocked`/`unstable`) without us touching the Checks API.
+fn merge_pill_state(mergeable_state: &str) -> (String, bool) {
+    match mergeable_state {
+        // Mergeable: clean is fully green; unstable/has_hooks are mergeable too
+        // (a non-required check may be red, but the merge will land).
+        "clean" | "unstable" | "has_hooks" => ("passed".to_string(), false),
+        "dirty" => ("failed".to_string(), false), // conflicts with base
+        "behind" | "blocked" => ("pending".to_string(), false), // needs update / review
+        "draft" => ("none".to_string(), false),
+        // "unknown" / "" — GitHub is still computing mergeability; spin.
+        _ => ("pending".to_string(), true),
     }
 }
 
@@ -1673,26 +1661,17 @@ pub async fn session_pr_checks(session_id: String) -> Result<Option<PrChecks>, S
     let Some(number) = pr["number"].as_u64() else {
         return Ok(None);
     };
-    let head_sha = pr["head"]["sha"].as_str().unwrap_or("").to_string();
 
-    // `mergeable_state` is only populated on the single-PR endpoint, not the list.
+    // `mergeable_state` is only populated on the single-PR endpoint, not the
+    // list. It needs just "Pull requests: read" — no Checks API (which a
+    // fine-grained PAT can't access) — and it already reflects required-check
+    // results via `blocked`/`unstable`.
     let full = gh.pull(&session.repo, number).await?;
     let mergeable_state = full["mergeable_state"].as_str().unwrap_or("unknown").to_string();
     let ready_to_merge = mergeable_state == "clean";
+    let (state, running) = merge_pill_state(&mergeable_state);
 
-    let runs = if head_sha.is_empty() {
-        Vec::new()
-    } else {
-        gh.check_runs(&session.repo, &head_sha).await.unwrap_or_default()
-    };
-    let running = runs.iter().any(|r| r["status"].as_str() == Some("in_progress"));
-
-    Ok(Some(PrChecks {
-        state: aggregate_checks(&runs),
-        running,
-        ready_to_merge,
-        mergeable_state,
-    }))
+    Ok(Some(PrChecks { state, running, ready_to_merge, mergeable_state }))
 }
 
 // ── Work lifecycle (local git facts) ────────────────────────────────────────────

@@ -58,6 +58,47 @@ body {
   border-radius: 0;
 }
 
+/* ── Resize grips ──────────────────────────────────────────────────────────
+   Invisible drag targets for the undecorated, transparent popover (the OS draws
+   no resize border). Edge strips are inset by the corner size so the corner
+   grips own the corners; everything sits above content via z-index. The grips
+   stay clear of the header buttons: the top strip is only 6px tall while the
+   header has 14px top padding, and the corner grips (14px) fall inside the
+   header's 20px side padding — so button clicks still land. */
+.resize-grip {
+  position: absolute;
+  z-index: 50;
+}
+.resize-grip--n,
+.resize-grip--s {
+  left: 14px;
+  right: 14px;
+  height: 6px;
+  cursor: ns-resize;
+}
+.resize-grip--e,
+.resize-grip--w {
+  top: 14px;
+  bottom: 14px;
+  width: 6px;
+  cursor: ew-resize;
+}
+.resize-grip--n { top: 0; }
+.resize-grip--s { bottom: 0; }
+.resize-grip--e { right: 0; }
+.resize-grip--w { left: 0; }
+.resize-grip--ne,
+.resize-grip--nw,
+.resize-grip--se,
+.resize-grip--sw {
+  width: 14px;
+  height: 14px;
+}
+.resize-grip--ne { top: 0; right: 0; cursor: nesw-resize; }
+.resize-grip--nw { top: 0; left: 0; cursor: nwse-resize; }
+.resize-grip--se { bottom: 0; right: 0; cursor: nwse-resize; }
+.resize-grip--sw { bottom: 0; left: 0; cursor: nesw-resize; }
+
 /* ── Header ──────────────────────────────────────────────────────────── */
 
 .panel-header {
@@ -294,6 +335,16 @@ body {
 .lifecycle-zone--merged .lifecycle-zone-name { color: var(--purple); }
 .lifecycle-zone--merged .lifecycle-zone-dot { background: var(--purple); }
 
+/* A failed tool call: red mark/border, regardless of the underlying state
+   (e.g. still "busy", which draws the rainbow ring). The full error shows in
+   the dismissible block below the row. */
+.claude-pill--error {
+  border-color: var(--red-border);
+}
+.claude-pill--error .claude-pill-mark {
+  color: var(--red);
+}
+
 /* Right-aligned segmented pill of icon actions on a session row. */
 .session-pill {
   display: inline-flex;
@@ -461,6 +512,24 @@ body {
   padding-left: 16px;
   font-size: 11.5px;
   color: var(--muted);
+}
+
+/* Full, untruncated failed-tool output: monospace, wrapped, and scrollable so a
+   long error stays readable inside the narrow popover. */
+.tool-error-message {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  max-height: 180px;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--red-border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .btn-danger {
