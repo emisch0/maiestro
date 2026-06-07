@@ -1581,6 +1581,7 @@ function MainView() {
     } catch { /* best-effort; the refresh below reflects the real state */ }
     setHideTarget(null);
     setRepoMenuOpen(null);
+    setCommandsOpen(null);
     refreshAll();
   }
 
@@ -1636,9 +1637,14 @@ function MainView() {
                 <div className="repo-group-header">
                   <span className="repo-group-name">{repo}</span>
                   {repoHidden && (
-                    <span className="snooze-label">
+                    <button
+                      className="snooze-label"
+                      onClick={() => setRepoMenuOpen((r) => (r === repo ? null : repo))}
+                      title="Manage visibility"
+                      aria-expanded={repoMenu}
+                    >
                       {repoSnoozeLabel ? `Snoozed · ${repoSnoozeLabel}` : "Hidden"}
-                    </span>
+                    </button>
                   )}
                   <button className="btn-add" onClick={() => openStartWork(repo)}>
                     Start Work
@@ -1698,8 +1704,15 @@ function MainView() {
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${accentColor(s.color)}` }}>
                         <ClaudePill status={statuses[s.id]} onClick={() => api.openInEditor(s.work_dir)} />
                         <span className="workspace-title">{s.session_title}</span>
-                        {sessHidden && sessSnoozeLabel && (
-                          <span className="snooze-label">Snoozed · {sessSnoozeLabel}</span>
+                        {sessHidden && (
+                          <button
+                            className="snooze-label"
+                            onClick={() => setCommandsOpen((id) => (id === s.id ? null : s.id))}
+                            title="Manage visibility"
+                            aria-expanded={cmdOpen}
+                          >
+                            {sessSnoozeLabel ? `Snoozed · ${sessSnoozeLabel}` : "Hidden"}
+                          </button>
                         )}
                         <div className="session-pill">
                           {pr && PrIcon && (
@@ -1758,7 +1771,7 @@ function MainView() {
                       <div className={`command-strip ${cmdOpen ? "command-strip--open" : ""}`}>
                         <button
                           className={`command-btn ${prc?.creating ? "btn-busy" : ""}`}
-                          onClick={() => createPr(s)}
+                          onClick={() => { setCommandsOpen(null); createPr(s); }}
                           disabled={prc?.creating || prOpen}
                           title={prOpen ? `PR #${pr?.number} is already open` : undefined}
                         >
@@ -1766,7 +1779,7 @@ function MainView() {
                         </button>
                         <button
                           className={`command-btn ${pm?.intent && pr?.state !== "merged" ? "btn-busy" : ""}`}
-                          onClick={() => startMerge(s)}
+                          onClick={() => { setCommandsOpen(null); startMerge(s); }}
                           disabled={pm?.intent || pr?.state === "merged"}
                           title={
                             pr?.state === "merged"
@@ -1784,7 +1797,7 @@ function MainView() {
                         <button
                           className={`command-btn ${teardownBusy[s.id] ? "btn-busy" : ""}`}
                           disabled={teardownBusy[s.id]}
-                          onClick={() => tearDown(s)}
+                          onClick={() => { setCommandsOpen(null); tearDown(s); }}
                         >
                           Tear Down
                         </button>

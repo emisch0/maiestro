@@ -1448,18 +1448,26 @@ body {
   opacity: 0.45;
 }
 
-/* Remaining-time / hidden chip shown on a revealed hidden repo or work item. */
+/* Remaining-time / hidden chip shown on a revealed hidden repo or work item.
+   A button: clicking it toggles the row's command strip (where Unhide lives). */
 .snooze-label {
   flex-shrink: 0;
+  font-family: var(--font);
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.3px;
   padding: 2px 7px;
+  border: none;
   border-radius: 999px;
   background: var(--accent-bg);
   color: var(--accent);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  cursor: pointer;
+}
+
+.snooze-label:hover {
+  background: rgba(250, 204, 21, 0.2);
 }
 
 /* Hide/snooze dialog: a compact, vertically-centered overlay panel. */
