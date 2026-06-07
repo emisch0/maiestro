@@ -866,6 +866,69 @@ async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String, Str
     parse_issue_draft(&reply)
 }
 
+/// Pull a usable short label out of Claude's reply to `suggest_short_label`.
+/// The prompt asks for the bare label, but the model may still wrap it in
+/// quotes, backticks, or a code fence — strip those. A multi-line or over-long
+/// reply means it rambled instead of labeling: error, the caller keeps the
+/// heuristic label.
+fn parse_short_label(text: &str) -> Result<String, String> {
+    let mut lines = text.trim().lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("```"));
+    let Some(line) = lines.next() else {
+        return Err("claude returned an empty label".into());
+    };
+    if lines.next().is_some() {
+        return Err(format!("claude replied with prose, not a label: {}", snippet(text)));
+    }
+    let label = line.trim_matches(|c| matches!(c, '"' | '\'' | '`')).trim();
+    let label = label.trim_end_matches(|c: char| !c.is_alphanumeric()).trim();
+    if label.is_empty() {
+        return Err("claude returned an empty label".into());
+    }
+    if label.chars().count() > 60 {
+        return Err(format!("claude's label is too long: {}", snippet(label)));
+    }
+    Ok(label.to_string())
+}
+
+/// Ask Claude (haiku), running in the repo checkout for context, to compress an
+/// existing issue's title + body into a short session label. The spawn preview
+/// opens immediately with the heuristic label and swaps this in when it
+/// arrives; any error here just leaves the heuristic in place.
+async fn suggest_short_label(checkout: &Path, title: &str, body: &str) -> Result<String, String> {
+    // Issue bodies can be arbitrarily long; the label only needs the gist.
+    let body: String = body.chars().take(4000).collect();
+    let prompt = format!(
+        "Summarize this GitHub issue as a short workspace label. Reply with ONLY \
+         the label, nothing else. The label is a short, human-readable session \
+         label — plain words with normal spaces and capitalization (NOT a slug or \
+         branch name, so no dashes/underscores), 2-4 words, at most 40 characters, \
+         no issue number, no trailing punctuation. Prefer concrete keywords from \
+         the issue (component names, actions) over a generic rephrasing.\n\n\
+         Issue title: {title}\n\nIssue body:\n{body}"
+    );
+    let reply = claude_text(checkout, &prompt, "summarizing the issue").await?;
+    parse_short_label(&reply)
+}
+
+/// Suggest an AI short label for an existing issue (title + body via Claude).
+/// Called fire-and-forget by the spawn preview after it opens with the
+/// heuristic label; the frontend swallows errors, so failures here are benign.
+#[tauri::command]
+pub async fn suggest_short_title(repo: String, issue_number: u64) -> Result<String, String> {
+    crate::log_invoke!("suggest_short_title", repo = %repo, issue = issue_number);
+    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let identity_id = settings
+        .identity_id
+        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
+    let checkout = expand_tilde(settings.checkout_dir.as_deref().unwrap_or_default());
+    if !checkout.join(".git").exists() {
+        return Err(format!("checkout dir is not a git repo: {}", checkout.display()));
+    }
+    let gh = GitHub::for_identity(&identity_id)?;
+    let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
+    suggest_short_label(&checkout, &issue_title, &issue_body).await
+}
+
 /// A drafted issue ready to create, or a signal that Claude couldn't produce a
 /// clear draft and the user must confirm creating from raw text.
 enum DraftStep {
@@ -1855,5 +1918,25 @@ mod tests {
         assert!(!has_maiestro_hooks(&unrelated, ws));
         // Our hooks for a *different* ws don't count as this ws's.
         assert!(!has_maiestro_hooks(&ours, "99-other"));
+    }
+
+    /// A bare label parses; quote/backtick/fence wrapping and trailing
+    /// punctuation are stripped.
+    #[test]
+    fn short_label_parses_and_unwraps() {
+        assert_eq!(parse_short_label("Auth token refresh").unwrap(), "Auth token refresh");
+        assert_eq!(parse_short_label("  \"Auth token refresh.\"  ").unwrap(), "Auth token refresh");
+        assert_eq!(parse_short_label("`Resizable popover`").unwrap(), "Resizable popover");
+        assert_eq!(parse_short_label("```\nAI workspace labels\n```").unwrap(), "AI workspace labels");
+    }
+
+    /// Empty, multi-line (prose), and over-long replies are rejected — the
+    /// caller falls back to the heuristic label.
+    #[test]
+    fn short_label_rejects_prose() {
+        assert!(parse_short_label("").is_err());
+        assert!(parse_short_label("\"\"").is_err());
+        assert!(parse_short_label("Here are some options:\n- Auth refresh\n- Token renewal").is_err());
+        assert!(parse_short_label(&"long ".repeat(20)).is_err());
     }
 }

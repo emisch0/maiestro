@@ -141,6 +141,7 @@ fn main() {
             links::open_path,
             spawn::spawn_work,
             spawn::prepare_spawn,
+            spawn::suggest_short_title,
             spawn::draft_spawn_preview,
             spawn::confirm_spawn,
             spawn::create_issue,

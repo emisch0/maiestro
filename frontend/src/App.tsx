@@ -1329,9 +1329,29 @@ function MainView() {
     try {
       const plan = await api.prepareSpawn(repo, node.number);
       setPicker((p) => (p ? { ...p, preparing: undefined, note: undefined, preview: planToPreview(plan, "spawn") } : p));
+      // Fire-and-forget: upgrade the heuristic label to an AI suggestion once
+      // Claude replies. The preview is already open and usable meanwhile.
+      void suggestLabel(repo, node.number, plan.short_title);
     } catch (e) {
       setPicker((p) => (p ? { ...p, preparing: undefined, note: `Failed to prepare #${node.number}: ${String(e)}` } : p));
     }
+  }
+
+  // Swap the spawn preview's short label for Claude's suggestion — only if the
+  // preview is still open for this same issue and the field still holds the
+  // heuristic value (the user hasn't typed). Failures are silent: the
+  // heuristic label is a fine fallback.
+  async function suggestLabel(repo: string, issueNumber: number, heuristic: string) {
+    try {
+      const suggestion = await api.suggestShortTitle(repo, issueNumber);
+      if (!suggestion.trim()) return;
+      setPicker((p) => {
+        const pv = p?.preview;
+        if (!p || !pv || p.repo !== repo) return p;
+        if (pv.mode !== "spawn" || pv.issueNumber !== issueNumber || pv.shortTitle !== heuristic) return p;
+        return { ...p, preview: { ...pv, shortTitle: suggestion } };
+      });
+    } catch { /* keep the heuristic label */ }
   }
 
   function applyDraftPreview(res: DraftPreviewOutcome, idea: string, mode: "spawn" | "create") {

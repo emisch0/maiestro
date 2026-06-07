@@ -216,6 +216,9 @@ export const api = {
   prepareSpawn: (repo: string, issueNumber: number) =>
     invoke<SpawnPlan>("prepare_spawn", { repo, issueNumber }),
 
+  suggestShortTitle: (repo: string, issueNumber: number) =>
+    invoke<string>("suggest_short_title", { repo, issueNumber }),
+
   draftSpawnPreview: (repo: string, idea: string, useRawFallback = false) =>
     invoke<DraftPreviewOutcome>("draft_spawn_preview", { repo, idea, useRawFallback }),
 
