@@ -279,8 +279,11 @@ fn maiestro_hook_groups(bin: &Path, ws_id: &str) -> Vec<(&'static str, serde_jso
         // working. Without it, a session sticks on `needs_you` (from the prompt's
         // Notification) all the way through the rest of the turn, even while
         // Claude is actively thinking. PreToolUse alone can't cover this: it
-        // fires *before* the prompt, not after approval.
-        ("PostToolUse", matcher_group("busy")),
+        // fires *before* the prompt, not after approval. The distinct `tool_ok`
+        // verb (vs PreToolUse's `busy`) also marks a tool *succeeding*, which
+        // clears a pending transient `last_error` (issue #48); it still reads as
+        // `busy`.
+        ("PostToolUse", matcher_group("tool_ok")),
         // A failed tool call: captures the error into `last_error` (kept until
         // dismissed) and logs it. State stays `busy` — Claude works on past it.
         ("PostToolUseFailure", matcher_group("tool_failed")),
