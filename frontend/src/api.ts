@@ -146,6 +146,9 @@ export interface WorkState {
   dirty: boolean;
 }
 
+/** Chosen UI appearance. "system" follows the macOS dark/light setting. */
+export type Theme = "light" | "dark" | "system";
+
 export type CredentialScope = { kind: "identity"; identity_id: string };
 
 export interface CredentialTypeDto {
@@ -269,4 +272,10 @@ export const api = {
 
   logsReveal: () =>
     invoke<void>("logs_reveal"),
+
+  getTheme: () =>
+    invoke<Theme>("app_settings_get_theme"),
+
+  setTheme: (theme: Theme) =>
+    invoke<void>("app_settings_set_theme", { theme }),
 };
