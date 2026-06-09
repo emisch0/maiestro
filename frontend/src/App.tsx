@@ -975,9 +975,10 @@ function ClaudePill({ status, onClick }: { status?: StatusRecord; onClick: () =>
   if (!label) return null;
   // `needs_you` carries the reason (e.g. the permission request) in `detail`.
   const title = status.detail ? `Claude · ${label} — ${status.detail}` : `Claude · ${label}`;
-  // A failed tool tints the pill red; the error itself lives in the dismissible
-  // row block, not this tooltip.
-  const cls = `claude-pill claude-pill--${status.state}${status.last_error ? " claude-pill--error" : ""}`;
+  // A *surfaced* failed tool tints the pill red; a pending/transient one Claude
+  // may still recover from doesn't. The error itself lives in the dismissible row
+  // block, not this tooltip.
+  const cls = `claude-pill claude-pill--${status.state}${status.last_error?.surfaced ? " claude-pill--error" : ""}`;
   return (
     <button
       className={cls}
@@ -1748,7 +1749,11 @@ function MainView() {
                         </div>
                         {zoneItems.map((s) => {
                     const cmdOpen = commandsOpen === s.id;
-                    const toolErr = statuses[s.id]?.last_error;
+                    // Only surfaced errors render; pending/transient ones (Claude
+                    // may still recover) stay hidden until promoted (issue #48).
+                    const toolErr = statuses[s.id]?.last_error?.surfaced
+                      ? statuses[s.id]?.last_error
+                      : undefined;
                     const pr = prs[s.id];
                     const PrIcon = pr ? (PR_STATE_ICONS[pr.state] ?? PrOpenIcon) : null;
                     const sessHidden = effectiveHidden(s.hidden, now);

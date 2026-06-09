@@ -41,8 +41,8 @@ pub struct StatusRecord {
     pub ts: String,
 }
 
-/// One failed tool call, surfaced to the popover as a dismissible error and
-/// appended to `~/.maiestro/logs/<ws>.log`.
+/// One failed tool call. Logged on every failure, but only shown in the popover
+/// once `surfaced` is true — see the `last_error` lifecycle in `run_hook_cli`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolError {
     /// The tool that failed (from the hook payload's `tool_name`), when present.
@@ -50,9 +50,23 @@ pub struct ToolError {
     pub tool: Option<String>,
     /// The error message extracted from the `PostToolUseFailure` payload.
     pub message: String,
-    /// RFC-3339 timestamp of the failure.
+    /// RFC-3339 timestamp of the (most recent) failure.
     pub ts: String,
+    /// Consecutive failures of this same tool. A second strike (>=
+    /// `RETRY_SURFACE_THRESHOLD`) marks the error persistent and surfaces it.
+    #[serde(default)]
+    pub count: u32,
+    /// Whether this error has been promoted to prominent popover display. While
+    /// false the failure is logged and tracked but hidden — Claude may still
+    /// recover. Promoted on Stop/idle (Claude stopped without recovering) or a
+    /// repeated same-tool failure; cleared when a later tool succeeds.
+    #[serde(default)]
+    pub surfaced: bool,
 }
+
+/// Number of consecutive same-tool failures at which a still-pending error is
+/// promoted to prominent display (the second strike). Not user-configurable.
+const RETRY_SURFACE_THRESHOLD: u32 = 2;
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -89,6 +103,13 @@ fn resolve_state(arg: &str, payload: &serde_json::Value) -> (String, Option<Stri
             let detail = payload["tool_name"].as_str().map(|t| t.to_string());
             ("busy".into(), detail)
         }
+        // PostToolUse: a tool *completed successfully*. Reads as `busy` like any
+        // other working signal; its own verb (vs `busy`/PreToolUse) lets the
+        // helper clear a pending `last_error` — Claude recovered and moved on.
+        "tool_ok" => {
+            let detail = payload["tool_name"].as_str().map(|t| t.to_string());
+            ("busy".into(), detail)
+        }
         "notification" => {
             let msg = payload["message"].as_str().unwrap_or("").trim();
             let detail = if msg.is_empty() { None } else { Some(msg.to_string()) };
@@ -98,6 +119,54 @@ fn resolve_state(arg: &str, payload: &serde_json::Value) -> (String, Option<Stri
         "ended" => ("ended".into(), None),
         // Unknown verb: record it verbatim rather than guessing.
         other => (other.into(), None),
+    }
+}
+
+/// Decide a workspace's next `last_error` from the incoming event and the carried
+/// prior value. Pure (no I/O) so the surfacing rules can be unit-tested.
+///
+/// The status file is last-write-wins and the next hook lands within seconds, so
+/// a failure can't live in `state`. The error is logged on every failure but only
+/// *surfaced* (shown in the popover) once it proves to matter — Claude often
+/// recovers and works straight past a transient failure (issue #48):
+///
+/// - `tool_failed` → set/refresh it (pending). A repeated same-tool failure
+///   (`count >= RETRY_SURFACE_THRESHOLD`) is persistent → surface.
+/// - `tool_ok` → a tool succeeded; clear a still-*pending* error (Claude
+///   recovered). A surfaced one stays (user dismisses it).
+/// - `idle` → Claude stopped without recovering → surface a pending error.
+/// - `prompt`/`running` → new turn/session clears it.
+/// - everything else → carry the prior value forward (survives until dismissed).
+///
+/// `failure` carries the freshly-parsed `(tool, message)` on a `tool_failed`
+/// event and is `None` otherwise.
+fn next_last_error(
+    state_arg: &str,
+    prior: Option<ToolError>,
+    failure: Option<(Option<String>, String)>,
+    ts: &str,
+) -> Option<ToolError> {
+    match state_arg {
+        "tool_failed" => {
+            let (tool, message) = failure?;
+            // A consecutive failure of the *same* tool bumps the count; a different
+            // tool (or first failure) resets to 1.
+            let count = prior.filter(|e| e.tool == tool).map_or(1, |e| e.count + 1);
+            Some(ToolError {
+                tool,
+                message,
+                ts: ts.to_string(),
+                count,
+                surfaced: count >= RETRY_SURFACE_THRESHOLD,
+            })
+        }
+        "tool_ok" => prior.filter(|e| e.surfaced),
+        "idle" => prior.map(|mut e| {
+            e.surfaced = true;
+            e
+        }),
+        "prompt" | "running" => None,
+        _ => prior,
     }
 }
 
@@ -127,28 +196,23 @@ pub fn run_hook_cli(args: &[String]) {
     let (state, detail) = resolve_state(state_arg, &payload);
     let ts = chrono::Utc::now().to_rfc3339();
 
-    // `last_error` lifecycle. The status file is last-write-wins and the next
-    // hook (`busy`/`idle`) lands within seconds, so a failure can't live in
-    // `state`. Instead: a failed tool *sets* it; a new turn/session *clears* it;
-    // every other event *carries the prior value forward* so it survives until
-    // the user dismisses it (see `clear_session_error`) or submits a new prompt.
-    let last_error = match state_arg {
-        "tool_failed" => {
-            let err = ToolError {
-                tool: payload["tool_name"].as_str().map(|t| t.to_string()),
-                message: extract_error_message(&payload),
-                ts: ts.clone(),
-            };
+    // `last_error` lifecycle (see `next_last_error`). On a failure, hand the raw
+    // tool+message to the decision fn (it computes the count and surfacing) and
+    // then log the result — surfacing is gated, logging is not.
+    let prior = read_record(&workspace).and_then(|r| r.last_error);
+    let failure = (state_arg == "tool_failed")
+        .then(|| (payload["tool_name"].as_str().map(|t| t.to_string()), extract_error_message(&payload)));
+    let last_error = next_last_error(state_arg, prior, failure, &ts);
+    if state_arg == "tool_failed" {
+        if let Some(err) = &last_error {
             crate::logging::append_line(&format!(
-                "session={workspace} tool call failed [{}]: {}",
+                "session={workspace} tool call failed [{}] (#{}): {}",
                 err.tool.as_deref().unwrap_or("?"),
+                err.count,
                 err.message
             ));
-            Some(err)
         }
-        "prompt" | "running" => None,
-        _ => read_record(&workspace).and_then(|r| r.last_error),
-    };
+    }
 
     let record = StatusRecord {
         workspace: workspace.clone(),
@@ -324,4 +388,80 @@ pub fn start_watcher(app: tauri::AppHandle) -> notify::Result<notify::Recommende
 
     watcher.watch(&dir, RecursiveMode::NonRecursive)?;
     Ok(watcher)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err(tool: &str, count: u32, surfaced: bool) -> ToolError {
+        ToolError {
+            tool: Some(tool.into()),
+            message: "boom".into(),
+            ts: "t".into(),
+            count,
+            surfaced,
+        }
+    }
+
+    fn fail(tool: &str) -> Option<(Option<String>, String)> {
+        Some((Some(tool.into()), "boom".into()))
+    }
+
+    // A first failure is recorded but stays pending (hidden) — Claude may recover.
+    #[test]
+    fn first_failure_is_pending() {
+        let e = next_last_error("tool_failed", None, fail("Bash"), "t").unwrap();
+        assert_eq!(e.count, 1);
+        assert!(!e.surfaced);
+    }
+
+    // A second consecutive failure of the *same* tool is persistent → surfaced.
+    #[test]
+    fn repeated_same_tool_surfaces() {
+        let prior = Some(err("Bash", 1, false));
+        let e = next_last_error("tool_failed", prior, fail("Bash"), "t").unwrap();
+        assert_eq!(e.count, 2);
+        assert!(e.surfaced);
+    }
+
+    // A failure of a *different* tool resets the count (not the same retry).
+    #[test]
+    fn different_tool_resets_count() {
+        let prior = Some(err("Bash", 1, false));
+        let e = next_last_error("tool_failed", prior, fail("WebFetch"), "t").unwrap();
+        assert_eq!(e.count, 1);
+        assert!(!e.surfaced);
+    }
+
+    // A tool succeeding after a pending failure clears it — Claude recovered.
+    #[test]
+    fn tool_ok_clears_pending() {
+        let prior = Some(err("Bash", 1, false));
+        assert!(next_last_error("tool_ok", prior, None, "t").is_none());
+    }
+
+    // A tool succeeding does NOT clear an already-surfaced error (user dismisses).
+    #[test]
+    fn tool_ok_keeps_surfaced() {
+        let prior = Some(err("Bash", 2, true));
+        assert!(next_last_error("tool_ok", prior, None, "t").is_some());
+    }
+
+    // Claude stopping with a pending error promotes it to surfaced.
+    #[test]
+    fn idle_surfaces_pending() {
+        let prior = Some(err("Bash", 1, false));
+        let e = next_last_error("idle", prior, None, "t").unwrap();
+        assert!(e.surfaced);
+    }
+
+    // A new turn/session clears any error; other events carry it forward.
+    #[test]
+    fn prompt_clears_and_busy_carries() {
+        let prior = Some(err("Bash", 1, false));
+        assert!(next_last_error("prompt", prior.clone(), None, "t").is_none());
+        assert!(next_last_error("running", prior.clone(), None, "t").is_none());
+        assert!(next_last_error("busy", prior, None, "t").is_some());
+    }
 }

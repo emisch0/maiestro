@@ -130,11 +130,17 @@ export interface StatusRecord {
   ts: string;
 }
 
-/** A failed tool call surfaced from a `PostToolUseFailure` hook. */
+/** A failed tool call from a `PostToolUseFailure` hook. Logged on every failure
+ *  but only shown in the popover once `surfaced` is true (issue #48). */
 export interface ToolError {
   tool?: string;
   message: string;
   ts: string;
+  /** Consecutive failures of this same tool. */
+  count: number;
+  /** Whether to show this error prominently. False = pending/transient (hidden);
+   *  true = Claude stopped without recovering, or the tool failed repeatedly. */
+  surfaced: boolean;
 }
 
 /** Local git facts about a session's worktree, used to derive the work-lifecycle
