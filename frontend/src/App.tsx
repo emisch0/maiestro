@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
+import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, Theme, WorkState } from "./api";
+import { applyTheme, initTheme } from "./theme";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
@@ -108,7 +109,7 @@ type TeardownPrompt =
   | { id: string; kind: "confirm"; warnings: string[] }
   | { id: string; kind: "blocked"; message: string; accessibility: boolean };
 
-type Tab = "identity" | "repo";
+type Tab = "identity" | "repo" | "appearance";
 type SaveStatus = "idle" | "saving" | "saved" | "clearing" | "error";
 type RepoView =
   | { mode: "list" }
@@ -138,6 +139,7 @@ function Settings() {
   const [addingEnvFile, setAddingEnvFile] = useState(false);
   const [envFileInput, setEnvFileInput] = useState("");
   const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "done">("idle");
+  const [theme, setThemeState] = useState<Theme>("system");
 
   useEffect(() => {
     api.listCredentialTypes().then((types) => {
@@ -149,7 +151,17 @@ function Settings() {
     api.listRepos().then(setRepos);
     api.identitiesList().then(setKnownIdentities);
     api.getDefaultIdentity().then((id) => { if (id) setIdentityId(id); });
+    api.getTheme().then(setThemeState);
   }, []);
+
+  // Persist and apply the picked theme. We apply locally for immediacy; the
+  // backend also broadcasts `theme-changed` so the popover and logs windows
+  // update too.
+  async function chooseTheme(next: Theme) {
+    setThemeState(next);
+    applyTheme(next);
+    await api.setTheme(next);
+  }
 
   // Closing the Settings window hides it (keeping it alive for reuse) rather
   // than destroying it, so the gear icon can reopen the same window.
@@ -384,9 +396,39 @@ function Settings() {
         >
           Repo
         </button>
+        <button
+          className={`tab ${tab === "appearance" ? "active" : ""}`}
+          onClick={() => setTab("appearance")}
+        >
+          Appearance
+        </button>
       </div>
 
-      {tab === "identity" ? (
+      {tab === "appearance" ? (
+        <div className="cred-list">
+          <div className="settings-group">
+            <div className="settings-group-header">
+              <span className="field-label" style={{ marginBottom: 0 }}>Theme</span>
+            </div>
+            <div className="theme-options" role="radiogroup" aria-label="Theme">
+              {(["light", "dark", "system"] as Theme[]).map((opt) => (
+                <button
+                  key={opt}
+                  className={`theme-option ${theme === opt ? "active" : ""}`}
+                  role="radio"
+                  aria-checked={theme === opt}
+                  onClick={() => chooseTheme(opt)}
+                >
+                  {opt === "light" ? "Light" : opt === "dark" ? "Dark" : "System"}
+                </button>
+              ))}
+            </div>
+            <p className="session-hint" style={{ paddingTop: 2 }}>
+              System follows your macOS appearance.
+            </p>
+          </div>
+        </div>
+      ) : tab === "identity" ? (
         <>
           <div className="context-section">
             <label className="field-label">Identity</label>
@@ -2260,6 +2302,14 @@ function LogsView() {
 }
 
 export default function App() {
+  // Apply the persisted theme to this window and keep it in sync with the
+  // backend's `theme-changed` broadcast. Runs in every window (popover,
+  // settings, logs) since each is a separate webview rendering this bundle.
+  useEffect(() => {
+    const unlisten = initTheme();
+    return () => { unlisten.then((f) => f()); };
+  }, []);
+
   const label = getCurrentWindow().label;
   if (label === "settings") return <Settings />;
   if (label === "logs") return <LogsView />;

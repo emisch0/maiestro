@@ -66,12 +66,12 @@ fn persist_popover_size(window: &tauri::Window) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical = physical.to_logical::<f64>(scale);
-    let settings = app_settings::AppSettings {
-        window: Some(app_settings::WindowSize {
-            width: logical.width,
-            height: logical.height,
-        }),
-    };
+    // Load-merge so we don't clobber other fields (e.g. the chosen theme).
+    let mut settings = app_settings::load();
+    settings.window = Some(app_settings::WindowSize {
+        width: logical.width,
+        height: logical.height,
+    });
     if let Err(e) = app_settings::save(&settings) {
         tracing::warn!(error = %e, "failed to persist popover size");
     } else {
@@ -161,6 +161,8 @@ fn main() {
             logging::logs_read,
             logging::logs_reveal,
             status::clear_session_error,
+            app_settings::app_settings_get_theme,
+            app_settings::app_settings_set_theme,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
