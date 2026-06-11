@@ -795,6 +795,9 @@ type Picker = {
   // Which create button is in flight, so we can disable both and spin the
   // active one. Undefined when idle.
   creating?: "create" | "spawn";
+  // Request id of the in-flight draft, correlating `claude-activity` events so
+  // the busy glow turns rainbow exactly while Claude is drafting.
+  creatingRequestId?: string;
   // True while the issue list is being re-fetched via the refresh button.
   refreshing?: boolean;
   // Issue number whose spawn preview is currently being prepared (the row's
@@ -1187,14 +1190,21 @@ function MainView() {
   // button glows while the backend removes the worktree.
   const [teardownBusy, setTeardownBusy] = useState<Record<string, boolean>>({});
   // Create-PR progress/error per session id: `{ creating }` while in flight,
-  // `{ error }` after a failure. Absent = idle.
-  const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; error?: string }>>({});
+  // `{ error }` after a failure. Absent = idle. `requestId` correlates
+  // `claude-activity` events to this action's busy glow.
+  const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; requestId?: string; error?: string }>>({});
   // PR check status per session id, polled from GitHub while the popover is open.
   // Absent = not yet fetched; null = no open PR (or lookup failed).
   const [prChecks, setPrChecks] = useState<Record<string, PrChecks | null>>({});
   // Merge-PR state per session id. `intent` keeps the auto-merge watcher armed
   // until the PR lands; `merging` guards against overlapping merge attempts.
-  const [prMerge, setPrMerge] = useState<Record<string, { intent?: boolean; merging?: boolean; error?: string }>>({});
+  // `requestId` correlates `claude-activity` events (the merge drafts the PR
+  // via Claude when none exists yet) to this action's busy glow.
+  const [prMerge, setPrMerge] = useState<Record<string, { intent?: boolean; merging?: boolean; requestId?: string; error?: string }>>({});
+  // Request ids with a Claude call currently in flight (`claude-activity`
+  // events). A busy button whose request id is here glows rainbow instead of
+  // the monochrome sweep; absent = plain. Missed events degrade to monochrome.
+  const [aiActive, setAiActive] = useState<Record<string, boolean>>({});
   // Whether the menu-bar popover is currently open. Gates check polling so we
   // don't hit GitHub while the window is hidden.
   const [popoverOpen, setPopoverOpen] = useState(true);
@@ -1277,6 +1287,28 @@ function MainView() {
     });
     return () => { unlisten.then((f) => f()); };
   }, []);
+
+  // Live Claude-call signal from the backend: while a request id is active its
+  // button's busy glow turns rainbow (AI), reverting to the monochrome sweep
+  // when the call ends — so mixed script/AI actions change color mid-flight.
+  useEffect(() => {
+    const unlisten = getCurrentWindow().listen<{ request_id: string; active: boolean }>("claude-activity", (e) => {
+      const { request_id, active } = e.payload;
+      setAiActive((prev) => {
+        if (!active) {
+          const { [request_id]: _drop, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, [request_id]: true };
+      });
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, []);
+
+  // Busy classes for a button whose backend command can run Claude: rainbow
+  // while its request id has a Claude call in flight, monochrome otherwise.
+  const busyCls = (requestId?: string) =>
+    requestId && aiActive[requestId] ? "btn-busy btn-busy--ai" : "btn-busy";
 
   // Also refresh whenever the window itself regains focus — covers any path that
   // re-focuses the popover without a fresh "popover-shown" emit. Refresh is
@@ -1401,9 +1433,9 @@ function MainView() {
 
   function applyDraftPreview(res: DraftPreviewOutcome, idea: string, mode: "spawn" | "create") {
     if (res.status === "needs_confirmation") {
-      setPicker((p) => (p ? { ...p, creating: undefined, note: undefined, confirm: { idea, message: res.message, action: mode } } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, creatingRequestId: undefined, note: undefined, confirm: { idea, message: res.message, action: mode } } : p));
     } else {
-      setPicker((p) => (p ? { ...p, creating: undefined, note: undefined, confirm: undefined, preview: planToPreview(res, mode) } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, creatingRequestId: undefined, note: undefined, confirm: undefined, preview: planToPreview(res, mode) } : p));
     }
   }
 
@@ -1480,11 +1512,12 @@ function MainView() {
     const repo = picker.repo;
     const idea = picker.query.trim();
     if (!idea) return;
-    setPicker((p) => (p ? { ...p, creating: "create", note: `Drafting an issue for “${idea}”…`, confirm: undefined } : p));
+    const requestId = crypto.randomUUID();
+    setPicker((p) => (p ? { ...p, creating: "create", creatingRequestId: requestId, note: `Drafting an issue for “${idea}”…`, confirm: undefined } : p));
     try {
-      applyDraftPreview(await api.draftSpawnPreview(repo, idea), idea, "create");
+      applyDraftPreview(await api.draftSpawnPreview(repo, idea, requestId), idea, "create");
     } catch (e) {
-      setPicker((p) => (p ? { ...p, creating: undefined, note: `Failed to draft issue: ${String(e)}` } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, creatingRequestId: undefined, note: `Failed to draft issue: ${String(e)}` } : p));
     }
   }
 
@@ -1494,11 +1527,12 @@ function MainView() {
     const repo = picker.repo;
     const idea = picker.query.trim();
     if (!idea) return;
-    setPicker((p) => (p ? { ...p, creating: "spawn", note: `Drafting an issue for “${idea}”…`, confirm: undefined } : p));
+    const requestId = crypto.randomUUID();
+    setPicker((p) => (p ? { ...p, creating: "spawn", creatingRequestId: requestId, note: `Drafting an issue for “${idea}”…`, confirm: undefined } : p));
     try {
-      applyDraftPreview(await api.draftSpawnPreview(repo, idea), idea, "spawn");
+      applyDraftPreview(await api.draftSpawnPreview(repo, idea, requestId), idea, "spawn");
     } catch (e) {
-      setPicker((p) => (p ? { ...p, creating: undefined, note: `Failed to draft issue: ${String(e)}` } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, creatingRequestId: undefined, note: `Failed to draft issue: ${String(e)}` } : p));
     }
   }
 
@@ -1508,11 +1542,12 @@ function MainView() {
     if (!picker?.confirm) return;
     const repo = picker.repo;
     const { idea, action } = picker.confirm;
-    setPicker((p) => (p ? { ...p, creating: action, note: "Drafting from your text…", confirm: undefined } : p));
+    const requestId = crypto.randomUUID();
+    setPicker((p) => (p ? { ...p, creating: action, creatingRequestId: requestId, note: "Drafting from your text…", confirm: undefined } : p));
     try {
-      applyDraftPreview(await api.draftSpawnPreview(repo, idea, true), idea, action);
+      applyDraftPreview(await api.draftSpawnPreview(repo, idea, requestId, true), idea, action);
     } catch (e) {
-      setPicker((p) => (p ? { ...p, creating: undefined, note: `Failed: ${String(e)}` } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, creatingRequestId: undefined, note: `Failed: ${String(e)}` } : p));
     }
   }
 
@@ -1520,9 +1555,10 @@ function MainView() {
   // draft PR. On success the PR pill refreshes to link the new PR (we don't
   // open it in the browser — the pill is the entry point).
   async function createPr(s: Session) {
-    setPrCreate((prev) => ({ ...prev, [s.id]: { creating: true } }));
+    const requestId = crypto.randomUUID();
+    setPrCreate((prev) => ({ ...prev, [s.id]: { creating: true, requestId } }));
     try {
-      const pr = await api.createPr(s.id);
+      const pr = await api.createPr(s.id, requestId);
       setPrs((prev) => ({ ...prev, [s.id]: pr }));
       setPrCreate((prev) => ({ ...prev, [s.id]: {} }));
     } catch (e) {
@@ -1535,9 +1571,10 @@ function MainView() {
   // a PR that isn't mergeable yet comes back unmerged and stays armed for the
   // next poll to retry; a hard failure (conflict, auth) surfaces in the panel.
   const runMerge = useCallback(async (id: string) => {
-    setPrMerge((prev) => ({ ...prev, [id]: { ...prev[id], intent: true, merging: true, error: undefined } }));
+    const requestId = crypto.randomUUID();
+    setPrMerge((prev) => ({ ...prev, [id]: { ...prev[id], intent: true, merging: true, requestId, error: undefined } }));
     try {
-      const pr = await api.mergePr(id);
+      const pr = await api.mergePr(id, requestId);
       setPrs((prev) => ({ ...prev, [id]: pr }));
       setPrMerge((prev) =>
         pr.state === "merged"
@@ -1868,7 +1905,7 @@ function MainView() {
                       </div>
                       <div className={`command-strip ${cmdOpen ? "command-strip--open" : ""}`}>
                         <button
-                          className={`command-btn ${prc?.creating ? "btn-busy" : ""}`}
+                          className={`command-btn ${prc?.creating ? busyCls(prc.requestId) : ""}`}
                           onClick={() => { setCommandsOpen(null); createPr(s); }}
                           disabled={prc?.creating || prOpen}
                           title={prOpen ? `PR #${pr?.number} is already open` : undefined}
@@ -1876,7 +1913,7 @@ function MainView() {
                           {prc?.creating ? "Creating PR…" : "Create PR"}
                         </button>
                         <button
-                          className={`command-btn ${pm?.intent && pr?.state !== "merged" ? "btn-busy" : ""}`}
+                          className={`command-btn ${pm?.intent && pr?.state !== "merged" ? busyCls(pm.requestId) : ""}`}
                           onClick={() => { setCommandsOpen(null); startMerge(s); }}
                           disabled={pm?.intent || pr?.state === "merged"}
                           title={
@@ -2126,14 +2163,14 @@ function MainView() {
                     {ideaOpen && (
                       <div className="issue-actions">
                         <button
-                          className={`btn-ghost ${picker.creating === "create" ? "btn-busy" : ""}`}
+                          className={`btn-ghost ${picker.creating === "create" ? busyCls(picker.creatingRequestId) : ""}`}
                           disabled={!picker.query.trim() || busy}
                           onClick={createIssueOnly}
                         >
                           Create Issue
                         </button>
                         <button
-                          className={`btn-save ${picker.creating === "spawn" ? "btn-busy" : ""}`}
+                          className={`btn-save ${picker.creating === "spawn" ? busyCls(picker.creatingRequestId) : ""}`}
                           disabled={!picker.query.trim() || busy}
                           onClick={createAndSpawn}
                         >

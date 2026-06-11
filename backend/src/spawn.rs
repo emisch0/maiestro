@@ -827,6 +827,46 @@ fn parse_issue_draft(text: &str) -> Result<(String, String, String), String> {
     Ok((title, body, short_title))
 }
 
+/// Correlates a Claude run with the UI action that initiated it. The frontend
+/// generates a `request_id` per command invocation and listens for the
+/// `claude-activity` event: while a run is in flight for that id, the action's
+/// busy glow switches to the rainbow (AI) variant, and back to the monochrome
+/// one when it ends — so a mixed script/AI action changes color mid-flight.
+pub struct ClaudeActivity {
+    app: tauri::AppHandle,
+    request_id: String,
+}
+
+impl ClaudeActivity {
+    pub fn new(app: tauri::AppHandle, request_id: String) -> Self {
+        Self { app, request_id }
+    }
+
+    /// Emit `active: true` now and `active: false` when the returned guard
+    /// drops — every exit path (success, error, cancellation) ends the
+    /// activity, so a failed draft never leaves a button stuck rainbow.
+    fn begin(&self) -> ClaudeActivityGuard<'_> {
+        self.emit(true);
+        ClaudeActivityGuard(self)
+    }
+
+    fn emit(&self, active: bool) {
+        use tauri::Emitter;
+        let _ = self.app.emit(
+            "claude-activity",
+            serde_json::json!({ "request_id": self.request_id, "active": active }),
+        );
+    }
+}
+
+struct ClaudeActivityGuard<'a>(&'a ClaudeActivity);
+
+impl Drop for ClaudeActivityGuard<'_> {
+    fn drop(&mut self) {
+        self.0.emit(false);
+    }
+}
+
 /// Run Claude (haiku) headlessly with `prompt`, in `dir` for repo context, and
 /// return its reply text. Uses `--output-format json` so we parse a stable
 /// envelope rather than guessing at raw text, and surfaces stdout/stderr in
@@ -838,7 +878,13 @@ fn parse_issue_draft(text: &str) -> Result<(String, String, String), String> {
 /// ambient permissions. That contains prompt injection from the input text (or
 /// from repo files like CLAUDE.md, which is still loaded as context) to, at
 /// worst, a bad title/body the user reviews — not code execution or exfiltration.
-async fn claude_text(dir: &Path, prompt: &str, what: &str) -> Result<String, String> {
+async fn claude_text(
+    dir: &Path,
+    prompt: &str,
+    what: &str,
+    activity: Option<&ClaudeActivity>,
+) -> Result<String, String> {
+    let _active = activity.map(|a| a.begin());
     let run = tokio::process::Command::new(claude_binary())
         .current_dir(dir)
         .args(["-p", prompt, "--model", "haiku", "--output-format", "json", "--tools", ""])
@@ -868,7 +914,11 @@ async fn claude_text(dir: &Path, prompt: &str, what: &str) -> Result<String, Str
 /// user's free-text idea into an issue title + markdown body + a short label.
 /// The `short_title` is produced in the *same* call (no extra Claude run): it's
 /// a punchy branch/session label, distinct from the full issue title.
-async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String, String), String> {
+async fn draft_issue(
+    checkout: &Path,
+    idea: &str,
+    activity: &ClaudeActivity,
+) -> Result<(String, String, String), String> {
     let prompt = format!(
         "Based on this idea for a change to this codebase, draft a GitHub issue. \
          Reply with ONLY a JSON object of the form \
@@ -879,7 +929,7 @@ async fn draft_issue(checkout: &Path, idea: &str) -> Result<(String, String, Str
          no dashes/underscores), at most ~5 words / 40 characters, no issue number, no \
          trailing punctuation; it should read well, not just be the title cut off. Idea: {idea}"
     );
-    let reply = claude_text(checkout, &prompt, "drafting the issue").await?;
+    let reply = claude_text(checkout, &prompt, "drafting the issue", Some(activity)).await?;
     parse_issue_draft(&reply)
 }
 
@@ -923,7 +973,9 @@ async fn suggest_short_label(checkout: &Path, title: &str, body: &str) -> Result
          the issue (component names, actions) over a generic rephrasing.\n\n\
          Issue title: {title}\n\nIssue body:\n{body}"
     );
-    let reply = claude_text(checkout, &prompt, "summarizing the issue").await?;
+    // No activity signal: this is a fire-and-forget label swap with no busy
+    // element in the UI to color.
+    let reply = claude_text(checkout, &prompt, "summarizing the issue", None).await?;
     parse_short_label(&reply)
 }
 
@@ -968,6 +1020,7 @@ async fn resolve_draft(
     repo: &str,
     idea: &str,
     use_raw_fallback: bool,
+    activity: &ClaudeActivity,
 ) -> Result<(GitHub, DraftStep), String> {
     let idea = idea.trim();
     if idea.is_empty() {
@@ -995,7 +1048,7 @@ async fn resolve_draft(
             warning: Some("created from your text without an AI draft".to_string()),
         }
     } else {
-        match draft_issue(&checkout, idea).await {
+        match draft_issue(&checkout, idea, activity).await {
             Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title, warning: None },
             // Couldn't draft: let the user confirm before creating anything.
             Err(message) => DraftStep::NeedsConfirmation { message },
@@ -1014,12 +1067,15 @@ async fn resolve_draft(
 /// true skips drafting and creates the issue straight from the user's text.
 #[tauri::command]
 pub async fn create_issue(
+    app: tauri::AppHandle,
     repo: String,
     idea: String,
     use_raw_fallback: bool,
+    request_id: String,
 ) -> Result<CreateIssueOutcome, String> {
     crate::log_invoke!("create_issue", repo = %repo, use_raw_fallback);
-    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
+    let activity = ClaudeActivity::new(app, request_id);
+    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback, &activity).await?;
     let (title, body, warning) = match step {
         DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
         DraftStep::NeedsConfirmation { message } => {
@@ -1064,13 +1120,16 @@ pub async fn create_issue_direct(repo: String, title: String, body: String) -> R
 /// drafting / needs-confirmation semantics.
 #[tauri::command]
 pub async fn create_issue_and_spawn(
+    app: tauri::AppHandle,
     repo: String,
     idea: String,
     use_raw_fallback: bool,
     force_new: bool,
+    request_id: String,
 ) -> Result<CreateAndSpawnOutcome, String> {
     crate::log_invoke!("create_issue_and_spawn", repo = %repo, use_raw_fallback, force_new);
-    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
+    let activity = ClaudeActivity::new(app, request_id);
+    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback, &activity).await?;
     let (title, body, draft_warning) = match step {
         DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
         DraftStep::NeedsConfirmation { message } => {
@@ -1145,12 +1204,15 @@ pub enum DraftPreviewOutcome {
 /// only opened when the user confirms via `confirm_spawn`.
 #[tauri::command]
 pub async fn draft_spawn_preview(
+    app: tauri::AppHandle,
     repo: String,
     idea: String,
     use_raw_fallback: bool,
+    request_id: String,
 ) -> Result<DraftPreviewOutcome, String> {
     crate::log_invoke!("draft_spawn_preview", repo = %repo, use_raw_fallback);
-    let (_gh, step) = resolve_draft(&repo, &idea, use_raw_fallback).await?;
+    let activity = ClaudeActivity::new(app, request_id);
+    let (_gh, step) = resolve_draft(&repo, &idea, use_raw_fallback, &activity).await?;
     match step {
         DraftStep::Ready { title, body, short_title, .. } => {
             let seed = format!("new-{}", slugify(&short_title, 25));
@@ -1589,7 +1651,11 @@ fn change_summary(work_dir: &Path, base: &str) -> String {
 /// to the originating issue with `Closes #N`.
 #[tauri::command]
 #[tracing::instrument(skip_all, fields(session = %session_id))]
-pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
+pub async fn session_create_pr(
+    app: tauri::AppHandle,
+    session_id: String,
+    request_id: String,
+) -> Result<PrLink, String> {
     crate::log_invoke!("session_create_pr");
     let session = crate::sessions::get(&session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
@@ -1652,7 +1718,8 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
     // pushing or opening the PR — we'd rather tell the user why than open a
     // garbage PR. The PR draft reuses the issue-draft parser but only needs
     // title + body.
-    let reply = claude_text(&work_dir, &prompt, "drafting the PR")
+    let activity = ClaudeActivity::new(app, request_id);
+    let reply = claude_text(&work_dir, &prompt, "drafting the PR", Some(&activity))
         .await
         .map_err(|e| { tracing::warn!(error = %e, "Claude PR draft failed"); e })?;
     let (title, body, _) = parse_issue_draft(&reply)
@@ -1808,7 +1875,11 @@ pub async fn session_work_state(session_id: String) -> Result<Option<WorkState>,
 /// (checks still running, GitHub recomputing) return the PR unmerged so the
 /// frontend poll retries.
 #[tauri::command]
-pub async fn session_merge_pr(session_id: String) -> Result<PrLink, String> {
+pub async fn session_merge_pr(
+    app: tauri::AppHandle,
+    session_id: String,
+    request_id: String,
+) -> Result<PrLink, String> {
     let session = crate::sessions::get(&session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
     let work_dir = PathBuf::from(&session.work_dir);
@@ -1844,7 +1915,7 @@ pub async fn session_merge_pr(session_id: String) -> Result<PrLink, String> {
     let prs = gh.pulls_for_branch(&session.repo, &branch).await?;
     let number = match prs.iter().find(|p| p["state"].as_str() == Some("open")) {
         Some(p) => p["number"].as_u64().unwrap_or(0),
-        None => session_create_pr(session_id.clone()).await?.number,
+        None => session_create_pr(app, session_id.clone(), request_id).await?.number,
     };
 
     // Re-fetch so `draft` / `mergeable_state` reflect the (possibly just-created)
