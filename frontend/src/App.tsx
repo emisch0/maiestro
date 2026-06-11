@@ -1204,6 +1204,8 @@ function MainView() {
   const [repoSettings, setRepoSettings] = useState<Record<string, RepoSettings>>({});
   // Open repo options menu (repo full_name); at most one at a time.
   const [repoMenuOpen, setRepoMenuOpen] = useState<string | null>(null);
+  // Per-repo "Open in VS Code" launch error, keyed by repo full_name.
+  const [openRepoErr, setOpenRepoErr] = useState<Record<string, string>>({});
   // Target of the hide/snooze dialog, or null when closed.
   const [hideTarget, setHideTarget] = useState<HideTarget | null>(null);
 
@@ -1709,6 +1711,21 @@ function MainView() {
                       {repoSnoozeLabel ? `Snoozed · ${repoSnoozeLabel}` : "Hidden"}
                     </button>
                   )}
+                  <button
+                    className="pill-btn repo-open-editor"
+                    onClick={async () => {
+                      setOpenRepoErr((e) => { const { [repo]: _, ...rest } = e; return rest; });
+                      try {
+                        await api.openRepoInEditor(repo);
+                      } catch (err) {
+                        setOpenRepoErr((e) => ({ ...e, [repo]: String(err) }));
+                      }
+                    }}
+                    title="Open checkout in VS Code"
+                    aria-label="Open checkout in VS Code"
+                  >
+                    <VSCodeIcon />
+                  </button>
                   <button className="btn-add" onClick={() => openStartWork(repo)}>
                     Start Work
                   </button>
@@ -1733,6 +1750,20 @@ function MainView() {
                     </button>
                   )}
                 </div>
+                {openRepoErr[repo] && (
+                  <div className="cleanup-confirm">
+                    <p className="cleanup-lead">Couldn't open in VS Code</p>
+                    <pre className="tool-error-message">{openRepoErr[repo]}</pre>
+                    <div className="issue-actions">
+                      <button
+                        className="btn-ghost"
+                        onClick={() => setOpenRepoErr((e) => { const { [repo]: _, ...rest } = e; return rest; })}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {visibleSessions.length === 0 ? (
                   <p className="repo-group-empty">No active work</p>

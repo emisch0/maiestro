@@ -219,6 +219,9 @@ export const api = {
   openInEditor: (workDir: string) =>
     invoke<void>("open_in_editor", { workDir }),
 
+  openRepoInEditor: (repo: string) =>
+    invoke<void>("open_repo_in_editor", { repo }),
+
   spawnWork: (repo: string, issueNumber: number, forceNew = false) =>
     invoke<SpawnResult>("spawn_work", { repo, issueNumber, forceNew }),
 
