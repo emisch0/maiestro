@@ -228,8 +228,12 @@ body {
   white-space: nowrap;
 }
 
-.repo-group-header .btn-add {
+.repo-group-header .repo-open-editor {
   margin-left: auto;
+  flex-shrink: 0;
+}
+
+.repo-group-header .btn-add {
   flex-shrink: 0;
 }
 

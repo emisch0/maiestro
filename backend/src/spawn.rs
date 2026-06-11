@@ -507,6 +507,20 @@ pub async fn open_in_editor(work_dir: String) -> Result<(), String> {
     open_vscode(&path)
 }
 
+/// Open a tracked repo's main checkout directory in VS Code. Unlike
+/// `open_in_editor` this is a pure launch — no worktree, no session, no status —
+/// reusing the same `open_vscode` path logic as spawned worktrees.
+#[tauri::command]
+pub async fn open_repo_in_editor(repo: String) -> Result<(), String> {
+    crate::log_invoke!("open_repo_in_editor", repo = %repo);
+    let settings = crate::repo_settings::repo_settings_get(repo);
+    let checkout = expand_tilde(settings.checkout_dir.as_deref().unwrap_or_default());
+    if !checkout.join(".git").exists() {
+        return Err(format!("checkout dir is not a git repo: {}", checkout.display()));
+    }
+    open_vscode(&checkout)
+}
+
 // ── Command ─────────────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]

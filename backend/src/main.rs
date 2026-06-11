@@ -148,6 +148,7 @@ fn main() {
             spawn::create_issue_direct,
             spawn::create_issue_and_spawn,
             spawn::open_in_editor,
+            spawn::open_repo_in_editor,
             spawn::teardown,
             spawn::open_accessibility_settings,
             spawn::session_pr,
