@@ -1305,13 +1305,19 @@ body {
   cursor: not-allowed;
 }
 
-/* Busy state for any async action button: an Apple-Intelligence-style rotating
-   rainbow glow around the edge while the action is in flight. Two layers sit
-   behind the button (`isolation: isolate` keeps them in the button's own
-   stacking context): a crisp rainbow ring and a blurred halo. `border-radius:
-   inherit` makes it fit every button shape, and `:disabled` stays full-opacity
-   so the glow reads clearly even while the click is disabled mid-flight.
-   The label stays visible — the glow, not a spinner, is the indicator. */
+/* Busy state for any async action button: a rotating glow around the edge
+   while the action is in flight. Two layers sit behind the button
+   (`isolation: isolate` keeps them in the button's own stacking context): a
+   crisp ring and a blurred halo. `border-radius: inherit` makes it fit every
+   button shape, and `:disabled` stays full-opacity so the glow reads clearly
+   even while the click is disabled mid-flight. The label stays visible — the
+   glow, not a spinner, is the indicator.
+
+   Two variants share the machinery: the base is a single-hue accent sweep
+   (brightness moves around the ring, no color cycling) for plain script work;
+   `.btn-busy--ai` is the Apple-Intelligence-style rainbow, applied live while
+   a Claude call is actually in flight for the action (`claude-activity`
+   event), so a mixed script/AI action changes color mid-flight. */
 @property --glow-angle {
   syntax: "<angle>";
   initial-value: 0deg;
@@ -1335,12 +1341,20 @@ body {
   border-radius: inherit;
   background: conic-gradient(
     from var(--glow-angle),
-    #ff2d55, #ff9500, #ffcc00, #34c759, #5ac8fa, #af52de, #ff2d55
+    var(--accent-border), var(--accent), var(--accent-border)
   );
   animation: glow-rotate 2.4s linear infinite;
 }
 
-/* Crisp ring: a rainbow band at the very edge (interior masked out). */
+.btn-busy--ai::before,
+.btn-busy--ai::after {
+  background: conic-gradient(
+    from var(--glow-angle),
+    #ff2d55, #ff9500, #ffcc00, #34c759, #5ac8fa, #af52de, #ff2d55
+  );
+}
+
+/* Crisp ring: a gradient band at the very edge (interior masked out). */
 .btn-busy::before {
   z-index: -1;
   padding: 1.5px;
@@ -1361,7 +1375,7 @@ body {
   to { --glow-angle: 360deg; }
 }
 
-/* Respect reduced-motion: keep the rainbow ring, but stop it rotating. */
+/* Respect reduced-motion: keep the ring (both variants), but stop it rotating. */
 @media (prefers-reduced-motion: reduce) {
   .btn-busy::before,
   .btn-busy::after {

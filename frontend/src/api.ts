@@ -231,20 +231,20 @@ export const api = {
   suggestShortTitle: (repo: string, issueNumber: number) =>
     invoke<string>("suggest_short_title", { repo, issueNumber }),
 
-  draftSpawnPreview: (repo: string, idea: string, useRawFallback = false) =>
-    invoke<DraftPreviewOutcome>("draft_spawn_preview", { repo, idea, useRawFallback }),
+  draftSpawnPreview: (repo: string, idea: string, requestId: string, useRawFallback = false) =>
+    invoke<DraftPreviewOutcome>("draft_spawn_preview", { repo, idea, useRawFallback, requestId }),
 
   confirmSpawn: (repo: string, edits: SpawnEdits, forceNew = false) =>
     invoke<SpawnResult>("confirm_spawn", { repo, edits, forceNew }),
 
-  createIssue: (repo: string, idea: string, useRawFallback = false) =>
-    invoke<CreateIssueOutcome>("create_issue", { repo, idea, useRawFallback }),
+  createIssue: (repo: string, idea: string, requestId: string, useRawFallback = false) =>
+    invoke<CreateIssueOutcome>("create_issue", { repo, idea, useRawFallback, requestId }),
 
   createIssueDirect: (repo: string, title: string, body: string) =>
     invoke<CreateIssueOutcome>("create_issue_direct", { repo, title, body }),
 
-  createIssueAndSpawn: (repo: string, idea: string, useRawFallback = false, forceNew = false) =>
-    invoke<CreateAndSpawnOutcome>("create_issue_and_spawn", { repo, idea, useRawFallback, forceNew }),
+  createIssueAndSpawn: (repo: string, idea: string, requestId: string, useRawFallback = false, forceNew = false) =>
+    invoke<CreateAndSpawnOutcome>("create_issue_and_spawn", { repo, idea, useRawFallback, forceNew, requestId }),
 
   sessionsList: () =>
     invoke<Session[]>("sessions_list"),
@@ -264,8 +264,8 @@ export const api = {
   sessionPr: (sessionId: string) =>
     invoke<PrLink | null>("session_pr", { sessionId }),
 
-  createPr: (sessionId: string) =>
-    invoke<PrLink>("session_create_pr", { sessionId }),
+  createPr: (sessionId: string, requestId: string) =>
+    invoke<PrLink>("session_create_pr", { sessionId, requestId }),
 
   sessionPrChecks: (sessionId: string) =>
     invoke<PrChecks | null>("session_pr_checks", { sessionId }),
@@ -273,8 +273,8 @@ export const api = {
   sessionWorkState: (sessionId: string) =>
     invoke<WorkState | null>("session_work_state", { sessionId }),
 
-  mergePr: (sessionId: string) =>
-    invoke<PrLink>("session_merge_pr", { sessionId }),
+  mergePr: (sessionId: string, requestId: string) =>
+    invoke<PrLink>("session_merge_pr", { sessionId, requestId }),
 
   logsRead: () =>
     invoke<string>("logs_read"),
