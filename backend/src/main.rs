@@ -196,7 +196,10 @@ fn main() {
             let menu = Menu::with_items(app, &[&logs, &separator, &quit])?;
 
             TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
+                // White brain mark rendered as a macOS template image, so the
+                // system tints it for both light and dark menu-bar appearances.
+                .icon(tauri::include_image!("icons/tray.png"))
+                .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
