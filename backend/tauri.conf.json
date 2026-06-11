@@ -31,10 +31,10 @@
       {
         "label": "settings",
         "title": "mAIestro Settings",
-        "width": 380,
-        "height": 500,
-        "minWidth": 340,
-        "minHeight": 420,
+        "width": 900,
+        "height": 640,
+        "minWidth": 560,
+        "minHeight": 400,
         "resizable": true,
         "visible": false,
         "center": true
