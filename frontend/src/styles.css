@@ -164,11 +164,18 @@ body {
 
 .panel-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   padding: 14px 20px 12px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+.panel-logo {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  color: var(--text);
 }
 
 .icon-btn {
