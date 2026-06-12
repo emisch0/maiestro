@@ -204,6 +204,10 @@ export const api = {
   setRepoVisibility: (repo: string, hidden: HideState | null) =>
     invoke<void>("repo_set_visibility", { repo, hidden }),
 
+  /** Untrack a repo (delete its settings file). Worktrees and sessions are kept. */
+  removeRepo: (repo: string) =>
+    invoke<void>("repo_remove", { repo }),
+
   setSessionVisibility: (sessionId: string, hidden: HideState | null) =>
     invoke<void>("session_set_visibility", { sessionId, hidden }),
 
