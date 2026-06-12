@@ -128,22 +128,6 @@ fn validate_against_schema(value: &serde_json::Value) -> Result<(), String> {
     }
 }
 
-/// Write the embedded schema to `~/.maiestro/schemas/repo-settings.schema.json`
-/// at startup so hand-editors can point a `$schema` key at it for autocomplete.
-/// Best-effort: a failure is logged, not fatal.
-pub fn write_schema_file() {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let dir = PathBuf::from(home).join(".maiestro/schemas");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(error = %e, "failed to create ~/.maiestro/schemas");
-        return;
-    }
-    let path = dir.join("repo-settings.schema.json");
-    if let Err(e) = std::fs::write(&path, SCHEMA_JSON) {
-        tracing::warn!(error = %e, path = %path.display(), "failed to write repo-settings schema");
-    }
-}
-
 // ── Storage ───────────────────────────────────────────────────────────────────
 
 fn repos_dir() -> PathBuf {

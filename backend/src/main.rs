@@ -228,10 +228,6 @@ fn main() {
             // Same for the Settings window, restored before its first show.
             restore_settings_size(app.handle());
 
-            // Mirror the embedded per-repo settings schema to
-            // ~/.maiestro/schemas/ so hand-editors can `$schema`-reference it.
-            repo_settings::write_schema_file();
-
             // Live per-session status: drop orphaned status files, then watch
             // ~/.maiestro/status/ and forward changes to the popover as
             // `session-status` events. The watcher must outlive setup(), so park
