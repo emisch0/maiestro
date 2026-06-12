@@ -222,6 +222,10 @@ export const api = {
   identitiesAdd: (identityId: string) =>
     invoke<void>("identities_add", { identityId }),
 
+  /** Remove an identity: its Keychain credentials, its list entry, and any repo references. */
+  identitiesRemove: (identityId: string) =>
+    invoke<void>("identities_remove", { identityId }),
+
   githubListRepos: (identityId: string) =>
     invoke<GHRepo[]>("github_list_repos", { identityId }),
 

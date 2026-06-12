@@ -94,3 +94,33 @@ pub fn identities_add(identity_id: String) -> Result<(), String> {
     register(&trimmed);
     Ok(())
 }
+
+/// Remove an identity: delete its Keychain credentials, drop it from the
+/// identity list (repointing the default if it was this one), and clear any
+/// repo settings that referenced it. Idempotent — an unknown identity is `Ok`.
+#[tauri::command]
+pub fn identities_remove(
+    identity_id: String,
+    registry: tauri::State<'_, crate::plugin::PluginRegistry>,
+) -> Result<(), String> {
+    crate::log_invoke!("identities_remove", identity = %identity_id);
+    // Delete Keychain credentials first: once the identity leaves the list there
+    // is no UI to reach them, so a real Keychain failure aborts the removal.
+    let scope = crate::credentials::CredentialScope::Identity {
+        identity_id: identity_id.clone(),
+    };
+    for t in registry.all_credential_types() {
+        match crate::credentials::CredentialStore::delete(t.type_id, &scope) {
+            Ok(()) | Err(crate::credentials::CredentialError::NotFound) => {}
+            Err(e) => return Err(format!("Failed to delete {} credential: {e}", t.display_name)),
+        }
+    }
+    let mut store = load_store();
+    store.identities.retain(|i| i != &identity_id);
+    if store.default.as_deref() == Some(identity_id.as_str()) {
+        store.default = store.identities.first().cloned();
+    }
+    save_store(&store).map_err(|e| e.to_string())?;
+    crate::repo_settings::clear_identity_references(&identity_id);
+    Ok(())
+}
