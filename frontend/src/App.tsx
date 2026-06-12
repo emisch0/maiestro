@@ -608,8 +608,7 @@ function Settings() {
                     <div className="cleanup-confirm">
                       <p className="cleanup-lead">Remove {selection.id} from mAIestro?</p>
                       <p className="cleanup-confirm-body">
-                        Its saved credentials are deleted from the Keychain, and repos
-                        using it will need an identity assigned again.
+                        Its Keychain credentials are deleted; repos that used it need a new identity.
                       </p>
                       <div className="issue-actions">
                         <button className="btn-danger" onClick={() => handleRemoveIdentity(selection.id)}>Remove</button>
