@@ -598,8 +598,8 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
 
     // Worktree location prefix: the full path is `<prefix><workspace>/<repo>`
     // (string concat — the trailing `work-` is part of the dir name). Unset
-    // falls back to the original `~/src/work-` behavior.
-    let worktree_prefix = settings.worktree_prefix.as_deref().unwrap_or("~/src/work-").to_string();
+    // falls back to the schema default.
+    let worktree_prefix = effective_worktree_prefix(settings.worktree_prefix.as_deref());
     let worktree_dir = |workspace: &str| expand_tilde(&format!("{worktree_prefix}{workspace}")).join(&repo_name);
 
     // Workspace name: "<n>-<slug>".
@@ -778,6 +778,18 @@ fn which(bin: &str) -> Option<PathBuf> {
     std::env::split_paths(&path).map(|d| d.join(bin)).find(|p| p.is_file())
 }
 
+/// The effective worktree-path prefix: the configured value, or the schema
+/// default (`/properties/worktree_prefix/default`) when unset or empty. The
+/// default lives in the JSON schema only — no hardcoded fallback here. Takes the
+/// field rather than the whole settings so callers that have already moved other
+/// fields out can still use it.
+fn effective_worktree_prefix(configured: Option<&str>) -> String {
+    configured
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::repo_settings::schema_default("/properties/worktree_prefix/default"))
+}
+
 /// Resolve the `claude` binary: prefer $PATH, then common install locations
 /// (the app's $PATH is minimal when launched at login, so fall back to disk).
 fn claude_binary() -> PathBuf {
@@ -917,18 +929,12 @@ async fn claude_text(
 async fn draft_issue(
     checkout: &Path,
     idea: &str,
+    instruction: &str,
     activity: &ClaudeActivity,
 ) -> Result<(String, String, String), String> {
-    let prompt = format!(
-        "Based on this idea for a change to this codebase, draft a GitHub issue. \
-         Reply with ONLY a JSON object of the form \
-         {{\"title\": string, \"body\": string, \"short_title\": string}}. \
-         The title is a concise summary (max ~70 characters). The body is clear markdown \
-         describing the work. The short_title is a short, human-readable session label — \
-         plain words with normal spaces and capitalization (NOT a slug or branch name, so \
-         no dashes/underscores), at most ~5 words / 40 characters, no issue number, no \
-         trailing punctuation; it should read well, not just be the title cut off. Idea: {idea}"
-    );
+    // Instruction (default or per-repo override) first; the idea is appended
+    // here so an override can't drop it. See prompts.rs.
+    let prompt = format!("{instruction}\n\nIdea: {idea}");
     let reply = claude_text(checkout, &prompt, "drafting the issue", Some(activity)).await?;
     parse_issue_draft(&reply)
 }
@@ -961,18 +967,17 @@ fn parse_short_label(text: &str) -> Result<String, String> {
 /// existing issue's title + body into a short session label. The spawn preview
 /// opens immediately with the heuristic label and swaps this in when it
 /// arrives; any error here just leaves the heuristic in place.
-async fn suggest_short_label(checkout: &Path, title: &str, body: &str) -> Result<String, String> {
+async fn suggest_short_label(
+    checkout: &Path,
+    title: &str,
+    body: &str,
+    instruction: &str,
+) -> Result<String, String> {
     // Issue bodies can be arbitrarily long; the label only needs the gist.
     let body: String = body.chars().take(4000).collect();
-    let prompt = format!(
-        "Summarize this GitHub issue as a short workspace label. Reply with ONLY \
-         the label, nothing else. The label is a short, human-readable session \
-         label — plain words with normal spaces and capitalization (NOT a slug or \
-         branch name, so no dashes/underscores), 2-4 words, at most 40 characters, \
-         no issue number, no trailing punctuation. Prefer concrete keywords from \
-         the issue (component names, actions) over a generic rephrasing.\n\n\
-         Issue title: {title}\n\nIssue body:\n{body}"
-    );
+    // Instruction (default or per-repo override) first; the issue text is
+    // appended here so an override can't drop it. See prompts.rs.
+    let prompt = format!("{instruction}\n\nIssue title: {title}\n\nIssue body:\n{body}");
     // No activity signal: this is a fire-and-forget label swap with no busy
     // element in the UI to color.
     let reply = claude_text(checkout, &prompt, "summarizing the issue", None).await?;
@@ -995,7 +1000,8 @@ pub async fn suggest_short_title(repo: String, issue_number: u64) -> Result<Stri
     }
     let gh = GitHub::for_identity(&identity_id)?;
     let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
-    suggest_short_label(&checkout, &issue_title, &issue_body).await
+    let instruction = crate::prompts::short_label(&settings.prompts);
+    suggest_short_label(&checkout, &issue_title, &issue_body, &instruction).await
 }
 
 /// A drafted issue ready to create, or a signal that Claude couldn't produce a
@@ -1048,7 +1054,8 @@ async fn resolve_draft(
             warning: Some("created from your text without an AI draft".to_string()),
         }
     } else {
-        match draft_issue(&checkout, idea, activity).await {
+        let instruction = crate::prompts::draft_issue(&settings.prompts);
+        match draft_issue(&checkout, idea, &instruction, activity).await {
             Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title, warning: None },
             // Couldn't draft: let the user confirm before creating anything.
             Err(message) => DraftStep::NeedsConfirmation { message },
@@ -1530,8 +1537,8 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     //    on the path actually starting with the repo's configured worktree
     //    prefix so we never remove_dir_all something outside it.
     if let Some(parent) = work_dir.parent() {
-        let prefix = settings.worktree_prefix.as_deref().unwrap_or("~/src/work-");
-        let expanded = expand_tilde(prefix);
+        let prefix = effective_worktree_prefix(settings.worktree_prefix.as_deref());
+        let expanded = expand_tilde(&prefix);
         let under_prefix = parent.to_string_lossy().starts_with(&*expanded.to_string_lossy());
         if under_prefix && parent.exists() {
             if let Err(e) = std::fs::remove_dir_all(parent) {
@@ -1703,12 +1710,11 @@ pub async fn session_create_pr(
     let issue_body = issue["body"].as_str().unwrap_or("");
 
     let summary = change_summary(&work_dir, &base);
+    // Instruction (default or per-repo override) first; the issue context and
+    // diff are appended here so an override can't drop them. See prompts.rs.
+    let instruction = crate::prompts::draft_pr(&settings.prompts);
     let prompt = format!(
-        "Draft a GitHub pull request description for the changes below. Reply with ONLY a \
-         JSON object of the form {{\"title\": string, \"body\": string}}. The title is a \
-         concise summary of the overall change (max ~70 characters). The body is clear \
-         markdown explaining what changed and why; do not include a heading that repeats the \
-         title. This PR resolves issue #{number} (\"{issue_title}\"). \
+        "{instruction}\n\nThis PR resolves issue #{number} (\"{issue_title}\").\
          \n\nOriginating issue body:\n{issue_body}\n\nChanges:\n{summary}",
         number = session.issue_number,
     );

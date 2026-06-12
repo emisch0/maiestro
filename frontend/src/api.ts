@@ -6,12 +6,21 @@ export interface HideState {
   snooze_until: number | null;
 }
 
+/** Per-repo overrides for the AI prompt instructions. Each field null/empty
+ *  uses the built-in default. The runtime context is appended automatically. */
+export interface PromptOverrides {
+  draft_issue: string | null;
+  short_label: string | null;
+  draft_pr: string | null;
+}
+
 export interface RepoSettings {
   checkout_dir: string | null;
   worktree_prefix: string | null;
   env_files: string[];
   identity_id: string | null;
   hidden: HideState | null;
+  prompts: PromptOverrides;
 }
 
 export interface GHRepo {

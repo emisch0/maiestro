@@ -7,6 +7,8 @@ import {
   repoSettingsCells,
   repoSettingsUISchema,
   sanitizeSchemaForForm,
+  extractFormDefaults,
+  RepoFormDefaults,
 } from "./RepoSettingsForm";
 import { applyTheme, initTheme } from "./theme";
 import GearIcon from "./icons/gear.svg?react";
@@ -141,10 +143,13 @@ function Settings() {
   const [repos, setRepos] = useState<string[]>([]);
   const [credTypes, setCredTypes] = useState<CredentialTypeDto[]>([]);
   const [credStates, setCredStates] = useState<Record<string, CredState>>({});
-  const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, worktree_prefix: null, env_files: [], identity_id: null, hidden: null });
+  const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, worktree_prefix: null, env_files: [], identity_id: null, hidden: null, prompts: { draft_issue: null, short_label: null, draft_pr: null } });
   // The hand-written JSON Schema, fetched from the backend, that drives the
   // repo-detail form. null until loaded.
   const [repoSchema, setRepoSchema] = useState<Record<string, unknown> | null>(null);
+  // Default values (worktree prefix, AI prompts) read from the schema's
+  // `default` keywords — shown by the custom renderers.
+  const [repoFormDefaults, setRepoFormDefaults] = useState<RepoFormDefaults | null>(null);
   // Set when the backend rejects a repo's settings file on load (bad JSON or a
   // schema violation); shown as a banner instead of a form full of defaults.
   const [repoLoadError, setRepoLoadError] = useState<string | null>(null);
@@ -174,7 +179,10 @@ function Settings() {
     api.identitiesList().then(setKnownIdentities);
     api.getDefaultIdentity().then((id) => { if (id) setSelection({ kind: "identity", id }); });
     api.getTheme().then(setThemeState);
-    api.repoSettingsSchema().then((s) => setRepoSchema(sanitizeSchemaForForm(s)));
+    api.repoSettingsSchema().then((s) => {
+      setRepoFormDefaults(extractFormDefaults(s));
+      setRepoSchema(sanitizeSchemaForForm(s));
+    });
   }, []);
 
   async function chooseTheme(next: Theme) {
@@ -264,8 +272,10 @@ function Settings() {
       showUnfocusedDescription: true as const,
       knownIdentities,
       checkoutDir: repoSettings.checkout_dir,
+      worktreePrefixDefault: repoFormDefaults?.worktreePrefixDefault ?? "",
+      promptDefaults: repoFormDefaults?.promptDefaults ?? {},
     }),
-    [knownIdentities, repoSettings.checkout_dir],
+    [knownIdentities, repoSettings.checkout_dir, repoFormDefaults],
   );
 
   // Autosave on change, debounced, skipped while ajv reports errors. JsonForms

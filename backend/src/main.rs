@@ -8,6 +8,7 @@ mod links;
 mod logging;
 mod plugin;
 mod plugins;
+mod prompts;
 mod repo_settings;
 mod sessions;
 mod spawn;

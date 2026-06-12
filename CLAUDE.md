@@ -113,14 +113,18 @@ Current schema:
   "checkout_dir": "~/src/repo-name",
   "worktree_prefix": "~/src/work-",
   "env_files": ["/absolute/path/.env", "/absolute/path/.env.local"],
-  "hidden": { "snooze_until": 1717372800000 }
+  "hidden": { "snooze_until": 1717372800000 },
+  "prompts": { "draft_issue": null, "short_label": null, "draft_pr": null }
 }
 ```
 
 - **`checkout_dir`**: absolute path to the local git checkout. Defaults to `~/src/<repo-name>` (no owner prefix). The source checkout `git worktree add` runs in, and the root for env file scanning.
-- **`worktree_prefix`**: prefix for spawned worktree locations. The full worktree path is `<worktree_prefix><workspace>/<repo>` — a string concatenation, so the trailing `work-` is part of the directory name, not a separate path component (e.g. `~/src/work-12-add-foo/repo-name`). Absent or `null` defaults to `~/src/work-`, preserving the original behavior. Tilde-expanded. Changing it affects future spawns only; it does not move existing worktrees.
+- **`worktree_prefix`**: prefix for spawned worktree locations. The full worktree path is `<worktree_prefix><workspace>/<repo>` — a string concatenation, so the trailing `work-` is part of the directory name, not a separate path component (e.g. `~/src/work-12-add-foo/repo-name`). Absent/`null`/empty falls back to the schema `default` (`~/src/work-`). Tilde-expanded. Changing it affects future spawns only; it does not move existing worktrees.
 - **`env_files`**: ordered list of `.env` files to source when launching user-facing tools (VSCode, Terminal) for this repo. Populated via a "Scan" action that walks the checkout directory (up to 4 levels, skipping `node_modules`, `.git`, `target`, etc.) looking for files whose name starts with `.env`. Users can also add or remove entries manually.
 - **`hidden`**: repo-level hide/snooze state. Absent (or `null`) means visible. When present, the repo and all its work items are hidden from the dashboard unless "Show hidden" is toggled on. `snooze_until` is a Unix-epoch-millis timestamp the repo stays hidden until (`null` = hidden indefinitely); once that time passes the repo renders as visible again. Per-work-item hide state is **not** stored here — it lives on each session record (`~/.maiestro/sessions/<id>.json`).
+- **`prompts`**: per-repo overrides for the AI prompt instructions mAIestro sends to Claude (`backend/src/prompts.rs`). Three fields, each `null`/empty = use the built-in default: `draft_issue` (idea → GitHub issue), `short_label` (issue → short workspace label), `draft_pr` (diff → PR description). Each prompt is assembled as `<instruction> + <runtime context>`: the **instruction** is what these overrides (or the defaults) supply; the **runtime context** (your idea, the issue title/body, the diff) is appended by `spawn.rs` and is *not* configurable, so an override — even arbitrary text or a `/skill` invocation — can't drop the data the draft needs. The Settings form shows each prompt's default text in a paragraph (textarea) field for editing.
+
+**Defaults live in the JSON Schema only.** The `worktree_prefix` and `prompts.*` defaults are declared as JSON Schema `default` keywords in `repo-settings.schema.json` and read from there by both sides — the backend via `repo_settings::schema_default("/properties/.../default")` (JSON Pointer into the embedded schema), and the Settings form via `extractFormDefaults` (the form strips `default` before handing the schema to JsonForms so it doesn't auto-inject them into the null-means-use-default fields). There is no hardcoded copy of these defaults in Rust or TS.
 
 #### Schema and validation
 

@@ -1922,13 +1922,64 @@ body {
   cursor: text;
 }
 
-/* The worktree-prefix field surfaces its backend default (~/src/work-) as a
-   placeholder, styled to read as a disabled default rather than ordinary
-   ghost text. */
+/* The worktree-prefix field surfaces its schema default as a placeholder,
+   styled to read as a disabled default rather than ordinary ghost text. */
 .jsf-root input.jsf-default-hint::placeholder {
   color: var(--muted);
   opacity: 0.9;
   font-style: italic;
+}
+
+/* ── AI prompt overrides ──────────────────────────────────────────────────── */
+.jsf-root .jsf-prompts {
+  gap: 8px;
+}
+.jsf-root .jsf-prompt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.jsf-root .jsf-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.jsf-root .jsf-prompt-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.jsf-root .jsf-prompt-reset {
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.jsf-root .jsf-prompt-reset:hover {
+  text-decoration: underline;
+}
+.jsf-root textarea.jsf-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  line-height: 1.45;
+  font-family: var(--font);
+}
+/* When showing the unmodified default, render the text muted so it reads as a
+   default the user can edit, not a committed override. */
+.jsf-root textarea.jsf-textarea-default {
+  color: var(--muted);
+}
+.jsf-root textarea.jsf-textarea-default:focus {
+  color: var(--text);
 }
 
 /* Validation errors tint red. */

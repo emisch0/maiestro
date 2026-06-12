@@ -12,6 +12,23 @@ pub struct HideState {
     pub snooze_until: Option<i64>,
 }
 
+/// Per-repo overrides for the instructions mAIestro sends to Claude. Each field
+/// `None`/empty uses the built-in default (see `prompts.rs`). The runtime
+/// context (idea, issue, diff) is appended automatically and is not part of
+/// these overrides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PromptOverrides {
+    /// Instruction for drafting a GitHub issue from the user's idea.
+    #[serde(default)]
+    pub draft_issue: Option<String>,
+    /// Instruction for summarizing an issue into a short workspace label.
+    #[serde(default)]
+    pub short_label: Option<String>,
+    /// Instruction for drafting a pull request description from the diff.
+    #[serde(default)]
+    pub draft_pr: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoSettings {
     /// Canonical "owner/name" string. Stored inside the file so repos_list can
@@ -35,6 +52,10 @@ pub struct RepoSettings {
     /// work items too. Per-work-item state lives on the session record, not here.
     #[serde(default)]
     pub hidden: Option<HideState>,
+    /// Per-repo overrides for the AI prompt instructions. Defaults (all `None`)
+    /// use the built-in prompts.
+    #[serde(default)]
+    pub prompts: PromptOverrides,
 }
 
 impl RepoSettings {
@@ -48,6 +69,7 @@ impl RepoSettings {
             worktree_prefix: None,
             env_files: Vec::new(),
             hidden: None,
+            prompts: PromptOverrides::default(),
         }
     }
 }
@@ -65,6 +87,18 @@ const SCHEMA_JSON: &str = include_str!("../schemas/repo-settings.schema.json");
 /// guarantees the embedded string is valid JSON, so a panic here is a build bug.
 fn schema_value() -> serde_json::Value {
     serde_json::from_str(SCHEMA_JSON).expect("embedded repo-settings schema is valid JSON")
+}
+
+/// A string `default` from the embedded schema, addressed by JSON Pointer (e.g.
+/// `/properties/worktree_prefix/default`). The schema is the single source of
+/// truth for these defaults, so both backend resolution and the Settings form
+/// read them from here rather than hardcoding. Returns `""` if absent.
+pub fn schema_default(pointer: &str) -> String {
+    schema_value()
+        .pointer(pointer)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Validate a settings JSON value against the embedded schema. Returns a message
@@ -284,6 +318,11 @@ mod tests {
             worktree_prefix: Some("/home/u/src/work-".into()),
             env_files: vec![".env".into(), ".env.local".into()],
             hidden: Some(HideState { snooze_until: Some(1_717_372_800_000) }),
+            prompts: PromptOverrides {
+                draft_issue: Some("Custom issue instruction".into()),
+                short_label: None,
+                draft_pr: Some("Custom PR instruction".into()),
+            },
         };
 
         for instance in [&default, &populated] {

@@ -19,7 +19,8 @@
     },
     "worktree_prefix": {
       "type": ["string", "null"],
-      "description": "Prefix for worktree locations. The full worktree path is `<worktree_prefix><workspace>/<repo>` (a string concatenation — the trailing segment is part of the directory name, not a path component). empty falls back to ~/src/work-. Tilde-expanded at the use site."
+      "default": "~/src/work-",
+      "description": "Prefix for worktree locations. The full worktree path is `<worktree_prefix><workspace>/<repo>` (a string concatenation — the trailing segment is part of the directory name, not a path component). empty falls back to the default. Tilde-expanded at the use site."
     },
     "env_files": {
       "type": "array",
@@ -34,6 +35,28 @@
         "snooze_until": {
           "type": ["integer", "null"],
           "description": "Unix-epoch millis until which the item stays hidden. null = hidden indefinitely. Expiry is resolved on the frontend at render time; the backend stores the timestamp verbatim."
+        }
+      }
+    },
+    "prompts": {
+      "type": ["object", "null"],
+      "title": "PromptOverrides",
+      "description": "Per-repo overrides for the instructions sent to Claude. Each field empty/null uses the built-in default. The runtime context (your idea, the issue, the diff) is appended automatically and is not part of these overrides.",
+      "properties": {
+        "draft_issue": {
+          "type": ["string", "null"],
+          "default": "Based on this idea for a change to this codebase, draft a GitHub issue. Reply with ONLY a JSON object of the form {\"title\": string, \"body\": string, \"short_title\": string}. The title is a concise summary (max ~70 characters). The body is clear markdown describing the work. The short_title is a short, human-readable session label — plain words with normal spaces and capitalization (NOT a slug or branch name, so no dashes/underscores), at most ~5 words / 40 characters, no issue number, no trailing punctuation; it should read well, not just be the title cut off.",
+          "description": "Instruction for drafting a GitHub issue from your idea."
+        },
+        "short_label": {
+          "type": ["string", "null"],
+          "default": "Summarize this GitHub issue as a short workspace label. Reply with ONLY the label, nothing else. The label is a short, human-readable session label — plain words with normal spaces and capitalization (NOT a slug or branch name, so no dashes/underscores), 2-4 words, at most 40 characters, no issue number, no trailing punctuation. Prefer concrete keywords from the issue (component names, actions) over a generic rephrasing.",
+          "description": "Instruction for summarizing an issue into a short workspace label."
+        },
+        "draft_pr": {
+          "type": ["string", "null"],
+          "default": "Draft a GitHub pull request description for the changes below. Reply with ONLY a JSON object of the form {\"title\": string, \"body\": string}. The title is a concise summary of the overall change (max ~70 characters). The body is clear markdown explaining what changed and why; do not include a heading that repeats the title.",
+          "description": "Instruction for drafting a pull request description from the diff."
         }
       }
     }
