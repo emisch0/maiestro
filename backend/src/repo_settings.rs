@@ -175,6 +175,35 @@ fn save(repo: &str, settings: &RepoSettings) -> std::io::Result<()> {
     std::fs::write(settings_path(repo), data)
 }
 
+/// Clear `identity_id` from every repo settings file that references the given
+/// identity, so removing an identity leaves repos reading "no identity assigned"
+/// instead of pointing at a ghost. Best-effort: a malformed or unwritable file is
+/// skipped with a warning rather than failing the identity removal. Edits the raw
+/// JSON value (not the `RepoSettings` struct) so unknown fields written by a
+/// newer app version survive the rewrite.
+pub fn clear_identity_references(identity_id: &str) {
+    let Ok(entries) = std::fs::read_dir(repos_dir()) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let Ok(data) = std::fs::read_to_string(&path) else { continue };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&data) else {
+            tracing::warn!(path = %path.display(), "skipping malformed repo settings while clearing identity reference");
+            continue;
+        };
+        if value.get("identity_id").and_then(|v| v.as_str()) != Some(identity_id) {
+            continue;
+        }
+        value["identity_id"] = serde_json::Value::Null;
+        let out = serde_json::to_string_pretty(&value).expect("Value is always serializable");
+        if let Err(e) = std::fs::write(&path, out) {
+            tracing::warn!(error = %e, path = %path.display(), "failed to clear identity reference");
+        }
+    }
+}
+
 // ── Env file scanner ──────────────────────────────────────────────────────────
 
 const SKIP_DIRS: &[&str] = &[

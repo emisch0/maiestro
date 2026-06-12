@@ -190,6 +190,7 @@ fn main() {
             identities::identities_get_default,
             identities::identities_set_default,
             identities::identities_add,
+            identities::identities_remove,
             links::open_url,
             links::open_path,
             spawn::spawn_work,

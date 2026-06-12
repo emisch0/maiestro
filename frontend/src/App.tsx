@@ -160,6 +160,10 @@ function Settings() {
   const [repoLoadError, setRepoLoadError] = useState<string | null>(null);
   // Set when an autosave write fails.
   const [repoSaveError, setRepoSaveError] = useState<string | null>(null);
+  // Whether the Remove Identity confirm is showing for the selected identity.
+  const [identityRemoveConfirm, setIdentityRemoveConfirm] = useState(false);
+  // Set when removing the selected identity fails.
+  const [identityRemoveError, setIdentityRemoveError] = useState<string | null>(null);
   // Whether the Remove Repo confirm is showing for the selected repo.
   const [repoRemoveConfirm, setRepoRemoveConfirm] = useState(false);
   // Set when removing the selected repo fails.
@@ -220,6 +224,12 @@ function Settings() {
   }, [selection]);
 
   const scopeKey = activeScope ? `identity:${activeScope.identity_id}` : null;
+
+  // Selecting a different identity dismisses any pending remove confirm/error.
+  useEffect(() => {
+    setIdentityRemoveConfirm(false);
+    setIdentityRemoveError(null);
+  }, [scopeKey]);
 
   useEffect(() => {
     setCredStates((prev) => {
@@ -323,6 +333,19 @@ function Settings() {
       setKnownIdentities(list);
       setSelection({ kind: "identity", id: trimmed });
     } catch { /* best-effort */ }
+  }
+
+  // Remove an identity: Keychain credentials, list entry, and repo references
+  // all go; worktrees and sessions are untouched.
+  async function handleRemoveIdentity(id: string) {
+    setIdentityRemoveConfirm(false);
+    try {
+      await api.identitiesRemove(id);
+      setKnownIdentities((prev) => prev.filter((i) => i !== id));
+      setSelection(null);
+    } catch (e) {
+      setIdentityRemoveError(String(e));
+    }
   }
 
   async function handleClear(type_id: string) {
@@ -571,6 +594,31 @@ function Settings() {
               </div>
               <div className="cred-list">
                 <CredRows />
+                <div className="settings-group">
+                  {identityRemoveError && (
+                    <div className="cleanup-confirm">
+                      <p className="cleanup-lead">Couldn't remove identity</p>
+                      <pre className="tool-error-message">{identityRemoveError}</pre>
+                      <div className="issue-actions">
+                        <button className="btn-ghost" onClick={() => setIdentityRemoveError(null)}>Dismiss</button>
+                      </div>
+                    </div>
+                  )}
+                  {identityRemoveConfirm ? (
+                    <div className="cleanup-confirm">
+                      <p className="cleanup-lead">Remove {selection.id} from mAIestro?</p>
+                      <p className="cleanup-confirm-body">
+                        Its Keychain credentials are deleted; repos that used it need a new identity.
+                      </p>
+                      <div className="issue-actions">
+                        <button className="btn-danger" onClick={() => handleRemoveIdentity(selection.id)}>Remove</button>
+                        <button className="btn-ghost" onClick={() => setIdentityRemoveConfirm(false)}>Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button className="btn-danger" onClick={() => setIdentityRemoveConfirm(true)}>Remove Identity</button>
+                  )}
+                </div>
               </div>
             </>
           ) : selection.kind === "repo" ? (
