@@ -379,11 +379,6 @@ function Settings() {
 
   return (
     <main className="panel panel--window">
-      <header className="panel-header">
-        <h1>m<span className="ai">AI</span>estro</h1>
-        <span className="panel-subtitle">Settings</span>
-      </header>
-
       <div className="settings-layout">
         {/* ── Sidebar ── */}
         <div className="settings-sidebar">

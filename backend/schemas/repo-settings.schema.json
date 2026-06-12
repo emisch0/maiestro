@@ -19,7 +19,7 @@
     },
     "worktree_prefix": {
       "type": ["string", "null"],
-      "description": "Prefix for worktree locations. The full worktree path is `<worktree_prefix><workspace>/<repo>` (a string concatenation — the trailing segment is part of the directory name, not a path component). null falls back to ~/src/work-, preserving the original hardcoded behavior. Tilde-expanded at the use site."
+      "description": "Prefix for worktree locations. The full worktree path is `<worktree_prefix><workspace>/<repo>` (a string concatenation — the trailing segment is part of the directory name, not a path component). empty falls back to ~/src/work-. Tilde-expanded at the use site."
     },
     "env_files": {
       "type": "array",

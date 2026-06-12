@@ -46,12 +46,23 @@ export interface RepoFormConfig {
 // Options come from the live identity list, which a static schema enum can't
 // express, so this replaces the vanilla string input for `identity_id`.
 
+/** Shared header: bold label over a muted description (VS Code settings style),
+ *  with the control rendered below by the caller. */
+function FieldHeading({ label, description }: { label?: string; description?: string }) {
+  return (
+    <>
+      <label className="jsf-label">{label}</label>
+      {description && <div className="jsf-help">{description}</div>}
+    </>
+  );
+}
+
 function IdentityControl(props: ControlProps) {
   const { data, handleChange, path, label, description, config } = props;
   const identities: string[] = config?.knownIdentities ?? [];
   return (
     <div className="control jsf-control">
-      <label className="jsf-label">{label}</label>
+      <FieldHeading label={label} description={description} />
       {identities.length === 0 ? (
         <p className="session-hint" style={{ paddingTop: 2 }}>
           No identities configured. Go to the Identity tab first.
@@ -68,13 +79,63 @@ function IdentityControl(props: ControlProps) {
           ))}
         </select>
       )}
-      {description && <div className="jsf-help">{description}</div>}
     </div>
   );
 }
 
 export const identityTester = rankWith(20, scopeEndsWith("identity_id"));
 export const IdentityRenderer = withJsonFormsControlProps(IdentityControl);
+
+// ── Plain text fields (checkout dir, worktree prefix) ───────────────────────
+// A text input with the label/description heading above it. `worktree_prefix`
+// surfaces its backend default (`~/src/work-`) as a disabled-looking
+// placeholder so it's clear what an empty field resolves to.
+
+const WORKTREE_PREFIX_DEFAULT = "~/src/work-";
+
+function CheckoutDirControl(props: ControlProps) {
+  const { data, handleChange, path, label, description } = props;
+  return (
+    <div className="control jsf-control">
+      <FieldHeading label={label} description={description} />
+      <input
+        className="text-input"
+        type="text"
+        value={data ?? ""}
+        placeholder="~/src/repo-name"
+        onChange={(e) => handleChange(path, e.target.value || null)}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+      />
+    </div>
+  );
+}
+
+export const checkoutDirTester = rankWith(20, scopeEndsWith("checkout_dir"));
+export const CheckoutDirRenderer = withJsonFormsControlProps(CheckoutDirControl);
+
+function WorktreePrefixControl(props: ControlProps) {
+  const { data, handleChange, path, label, description } = props;
+  return (
+    <div className="control jsf-control">
+      <FieldHeading label={label} description={description} />
+      <input
+        className="text-input jsf-default-hint"
+        type="text"
+        value={data ?? ""}
+        placeholder={WORKTREE_PREFIX_DEFAULT}
+        onChange={(e) => handleChange(path, e.target.value || null)}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+      />
+    </div>
+  );
+}
+
+export const worktreePrefixTester = rankWith(20, scopeEndsWith("worktree_prefix"));
+export const WorktreePrefixRenderer = withJsonFormsControlProps(WorktreePrefixControl);
 
 // ── Env files list ──────────────────────────────────────────────────────────
 // A list with Scan / Add / Remove, preserving the existing scan flow. The array
@@ -134,6 +195,8 @@ function EnvFilesControl(props: ControlProps) {
         </div>
       </div>
 
+      {description && <div className="jsf-help">{description}</div>}
+
       {adding && (
         <div className="cred-controls">
           <input
@@ -170,8 +233,6 @@ function EnvFilesControl(props: ControlProps) {
           ))}
         </div>
       )}
-
-      {description && <div className="jsf-help">{description}</div>}
     </div>
   );
 }
@@ -182,6 +243,8 @@ export const EnvFilesRenderer = withJsonFormsControlProps(EnvFilesControl);
 // Custom renderers first so they out-rank the vanilla defaults for their scopes.
 export const repoSettingsRenderers = [
   { tester: identityTester, renderer: IdentityRenderer },
+  { tester: checkoutDirTester, renderer: CheckoutDirRenderer },
+  { tester: worktreePrefixTester, renderer: WorktreePrefixRenderer },
   { tester: envFilesTester, renderer: EnvFilesRenderer },
   ...vanillaRenderers,
 ];

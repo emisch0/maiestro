@@ -1845,18 +1845,19 @@ body {
   flex-direction: column;
 }
 
-/* VerticalLayout: one gap between fields. */
+/* VerticalLayout: generous gap between fields (VS Code settings spacing). */
 .jsf-root .vertical-layout {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 22px;
 }
 .jsf-root .vertical-layout-item {
   display: flex;
   flex-direction: column;
 }
 
-/* Each control is a label-over-input stack. */
+/* Each field is a heading-over-control stack: bold label, muted description,
+   then the control — like VS Code's settings list. */
 .jsf-root .control,
 .jsf-root .jsf-control {
   display: flex;
@@ -1864,16 +1865,22 @@ body {
   gap: 6px;
 }
 
-/* Labels match .field-label (uppercase, muted, small). */
+/* Labels: bold and readable, normal case (not the app's tiny uppercase
+   field-label), in the primary text color. */
 .jsf-root label,
 .jsf-root .jsf-label {
   display: block;
-  font-size: 10.5px;
+  font-size: 12.5px;
   font-weight: 600;
-  color: var(--muted);
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
+  color: var(--text);
+  letter-spacing: 0;
+  text-transform: none;
   margin: 0;
+}
+
+/* A touch more breathing room between the description and the control below. */
+.jsf-root .jsf-control > .jsf-help {
+  margin-bottom: 2px;
 }
 
 /* Inputs and selects match .text-input. */
@@ -1903,12 +1910,25 @@ body {
 }
 
 /* Description help text (vanilla puts it in .validation when the field is
-   valid; our custom renderers use .jsf-help). */
+   valid; our custom renderers use .jsf-help). Made selectable so the help text
+   can be copied — the window otherwise sets user-select: none. */
 .jsf-root .validation,
 .jsf-root .jsf-help {
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--muted);
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+/* The worktree-prefix field surfaces its backend default (~/src/work-) as a
+   placeholder, styled to read as a disabled default rather than ordinary
+   ghost text. */
+.jsf-root input.jsf-default-hint::placeholder {
+  color: var(--muted);
+  opacity: 0.9;
+  font-style: italic;
 }
 
 /* Validation errors tint red. */
