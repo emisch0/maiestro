@@ -18,6 +18,7 @@ export interface RepoSettings {
   checkout_dir: string | null;
   worktree_prefix: string | null;
   env_files: string[];
+  post_spawn_commands: string[];
   identity_id: string | null;
   hidden: HideState | null;
   prompts: PromptOverrides;

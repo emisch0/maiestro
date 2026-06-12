@@ -27,6 +27,12 @@
       "items": { "type": "string" },
       "description": "Env files relative to checkout_dir to source when launching user-facing tools (VSCode, Terminal) for this repo."
     },
+    "post_spawn_commands": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Shell commands to run in a freshly-created worktree, in order, right after it's created and before the editor opens (e.g. `pnpm install`). Run via your login shell so PATH and tool managers are available. Stops at the first command that fails. Empty by default."
+    },
     "hidden": {
       "type": ["object", "null"],
       "title": "HideState",

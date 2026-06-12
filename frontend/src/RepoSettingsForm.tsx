@@ -29,6 +29,7 @@ export const repoSettingsUISchema = {
     { type: "Control", scope: "#/properties/worktree_prefix", label: "Worktree prefix" },
     { type: "Control", scope: "#/properties/identity_id", label: "Identity" },
     { type: "Control", scope: "#/properties/env_files", label: "Environment files" },
+    { type: "Control", scope: "#/properties/post_spawn_commands", label: "Post-spawn commands" },
     { type: "Control", scope: "#/properties/prompts" },
   ],
 } as unknown as UISchemaElement;
@@ -239,6 +240,60 @@ function EnvFilesControl(props: ControlProps) {
 export const envFilesTester = rankWith(20, scopeEndsWith("env_files"));
 export const EnvFilesRenderer = withJsonFormsControlProps(EnvFilesControl);
 
+// ── Post-spawn commands ─────────────────────────────────────────────────────
+// An ordered, editable list of shell commands run in a new worktree after it's
+// created (e.g. `pnpm install`). Empty by default.
+
+function PostSpawnCommandsControl(props: ControlProps) {
+  const { data, handleChange, path, label, description } = props;
+  const commands: string[] = Array.isArray(data) ? data : [];
+
+  const setCommands = (next: string[]) => handleChange(path, next);
+  const updateAt = (i: number, value: string) =>
+    setCommands(commands.map((c, idx) => (idx === i ? value : c)));
+  const removeAt = (i: number) => setCommands(commands.filter((_, idx) => idx !== i));
+  const add = () => setCommands([...commands, ""]);
+
+  return (
+    <div className="control jsf-control">
+      <div className="settings-group-header">
+        <span className="jsf-label" style={{ marginBottom: 0 }}>{label}</span>
+        <button className="btn-add" onClick={add}>+ Add</button>
+      </div>
+
+      {description && <div className="jsf-help">{description}</div>}
+
+      {commands.length === 0 ? (
+        <p className="session-hint" style={{ paddingTop: 2 }}>
+          No post-spawn commands. Add one (e.g. <code>pnpm install</code>) to run it in each new worktree.
+        </p>
+      ) : (
+        <div className="env-file-list">
+          {commands.map((c, i) => (
+            // Index key: the list is small and edited in place; order is stable.
+            <div key={i} className="cred-controls">
+              <input
+                className="text-input jsf-cmd-input"
+                type="text"
+                placeholder="e.g. pnpm install"
+                value={c}
+                onChange={(e) => updateAt(i, e.target.value)}
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+              />
+              <button className="btn-clear" onClick={() => removeAt(i)} title="Remove">✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export const postSpawnCommandsTester = rankWith(20, scopeEndsWith("post_spawn_commands"));
+export const PostSpawnCommandsRenderer = withJsonFormsControlProps(PostSpawnCommandsControl);
+
 // ── AI prompt overrides ─────────────────────────────────────────────────────
 // One paragraph (textarea) per AI prompt. Each shows the built-in default text
 // (from the `repo_prompt_defaults` command, via config); editing it stores a
@@ -327,6 +382,7 @@ export const repoSettingsRenderers = [
   { tester: checkoutDirTester, renderer: CheckoutDirRenderer },
   { tester: worktreePrefixTester, renderer: WorktreePrefixRenderer },
   { tester: envFilesTester, renderer: EnvFilesRenderer },
+  { tester: postSpawnCommandsTester, renderer: PostSpawnCommandsRenderer },
   { tester: promptsTester, renderer: PromptsRenderer },
   ...vanillaRenderers,
 ];

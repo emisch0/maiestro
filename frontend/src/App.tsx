@@ -143,7 +143,7 @@ function Settings() {
   const [repos, setRepos] = useState<string[]>([]);
   const [credTypes, setCredTypes] = useState<CredentialTypeDto[]>([]);
   const [credStates, setCredStates] = useState<Record<string, CredState>>({});
-  const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, worktree_prefix: null, env_files: [], identity_id: null, hidden: null, prompts: { draft_issue: null, short_label: null, draft_pr: null } });
+  const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, worktree_prefix: null, env_files: [], post_spawn_commands: [], identity_id: null, hidden: null, prompts: { draft_issue: null, short_label: null, draft_pr: null } });
   // The hand-written JSON Schema, fetched from the backend, that drives the
   // repo-detail form. null until loaded.
   const [repoSchema, setRepoSchema] = useState<Record<string, unknown> | null>(null);

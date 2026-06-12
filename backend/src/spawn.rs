@@ -716,6 +716,10 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         warnings.push(format!("could not record session: {e}"));
     }
 
+    // Run the repo's post-spawn commands (e.g. `pnpm install`) in the new
+    // worktree before opening the editor, so the session starts ready.
+    warnings.extend(run_post_spawn_commands(&work_dir, &settings.post_spawn_commands).await);
+
     open_vscode(&work_dir)?;
 
     tracing::info!(repo = %repo, issue = issue_number, branch = %branch, reused = false, "spawned workspace");
@@ -788,6 +792,54 @@ fn effective_worktree_prefix(configured: Option<&str>) -> String {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| crate::repo_settings::schema_default("/properties/worktree_prefix/default"))
+}
+
+/// Run a repo's post-spawn commands in the freshly-created worktree, in order.
+/// Each runs via the user's login shell (`$SHELL -lc`) so PATH and tool managers
+/// (nvm, pnpm, asdf, …) are available — mAIestro's own environment is minimal and
+/// not sourced from a profile. Stops at the first command that fails or times
+/// out; returns a warning per problem (the worktree is left in place either way,
+/// never torn down). A blank command is skipped.
+async fn run_post_spawn_commands(work_dir: &Path, commands: &[String]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    for cmd in commands {
+        let cmd = cmd.trim();
+        if cmd.is_empty() {
+            continue;
+        }
+        tracing::info!(command = %cmd, "running post-spawn command");
+        let run = tokio::process::Command::new(&shell)
+            .args(["-l", "-c", cmd])
+            .current_dir(work_dir)
+            .output();
+        // 10 minutes is generous for installs but still bounds a hung command so
+        // it can't freeze the spawn forever.
+        let output = tokio::time::timeout(std::time::Duration::from_secs(600), run).await;
+        match output {
+            Ok(Ok(out)) if out.status.success() => {
+                tracing::info!(command = %cmd, "post-spawn command succeeded");
+            }
+            Ok(Ok(out)) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let code = out.status.code().unwrap_or(-1);
+                tracing::error!(command = %cmd, code, stderr = %snippet(&stderr), "post-spawn command failed");
+                warnings.push(format!("post-spawn command failed (exit {code}): {cmd}"));
+                break;
+            }
+            Ok(Err(e)) => {
+                tracing::error!(command = %cmd, error = %e, "could not run post-spawn command");
+                warnings.push(format!("could not run post-spawn command '{cmd}': {e}"));
+                break;
+            }
+            Err(_) => {
+                tracing::error!(command = %cmd, "post-spawn command timed out");
+                warnings.push(format!("post-spawn command timed out after 10m: {cmd}"));
+                break;
+            }
+        }
+    }
+    warnings
 }
 
 /// Resolve the `claude` binary: prefer $PATH, then common install locations

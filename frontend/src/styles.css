@@ -1930,6 +1930,12 @@ body {
   font-style: italic;
 }
 
+/* Post-spawn command rows: a monospace editable input per command. */
+.jsf-root input.jsf-cmd-input {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}
+
 /* ── AI prompt overrides ──────────────────────────────────────────────────── */
 .jsf-root .jsf-prompts {
   gap: 8px;

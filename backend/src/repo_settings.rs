@@ -48,6 +48,11 @@ pub struct RepoSettings {
     pub worktree_prefix: Option<String>,
     /// Env files relative to checkout_dir to source when launching user-facing tools.
     pub env_files: Vec<String>,
+    /// Shell commands to run in a freshly-created worktree, in order, before the
+    /// editor opens (e.g. `pnpm install`). Empty by default. Run via the user's
+    /// login shell so PATH and tool managers are available.
+    #[serde(default)]
+    pub post_spawn_commands: Vec<String>,
     /// Repo-level hide/snooze state. `None` = visible. A hidden repo hides its
     /// work items too. Per-work-item state lives on the session record, not here.
     #[serde(default)]
@@ -68,6 +73,7 @@ impl RepoSettings {
             checkout_dir: Some(format!("{home}/src/{name}")),
             worktree_prefix: None,
             env_files: Vec::new(),
+            post_spawn_commands: Vec::new(),
             hidden: None,
             prompts: PromptOverrides::default(),
         }
@@ -317,6 +323,7 @@ mod tests {
             checkout_dir: Some("/home/u/src/widget".into()),
             worktree_prefix: Some("/home/u/src/work-".into()),
             env_files: vec![".env".into(), ".env.local".into()],
+            post_spawn_commands: vec!["pnpm install".into()],
             hidden: Some(HideState { snooze_until: Some(1_717_372_800_000) }),
             prompts: PromptOverrides {
                 draft_issue: Some("Custom issue instruction".into()),
