@@ -144,7 +144,11 @@ function Settings() {
   const [repos, setRepos] = useState<string[]>([]);
   const [credTypes, setCredTypes] = useState<CredentialTypeDto[]>([]);
   const [credStates, setCredStates] = useState<Record<string, CredState>>({});
-  const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, worktree_prefix: null, env_files: [], post_spawn_commands: [], identity_id: null, hidden: null, prompts: { draft_issue: null, short_label: null, draft_pr: null } });
+  // Settings for the selected repo, tagged with the repo they belong to. null
+  // until repo_settings_get resolves — the form must not render before then,
+  // or JsonForms' initial onChange autosaves placeholder data over the real
+  // file (#65).
+  const [loadedRepo, setLoadedRepo] = useState<{ repo: string; settings: RepoSettings } | null>(null);
   // The hand-written JSON Schema, fetched from the backend, that drives the
   // repo-detail form. null until loaded.
   const [repoSchema, setRepoSchema] = useState<Record<string, unknown> | null>(null);
@@ -255,13 +259,14 @@ function Settings() {
 
   useEffect(() => {
     if (!selectedRepo) return;
+    setLoadedRepo(null);
     setRepoLoadError(null);
     setRepoSaveError(null);
     api.getRepoSettings(selectedRepo)
       .then((s) => {
-        setRepoSettings(s);
         // Seed the baseline so JsonForms' initial onChange (same data) is a no-op.
         lastSavedRef.current = JSON.stringify(s);
+        setLoadedRepo({ repo: selectedRepo, settings: s });
       })
       .catch((e) => setRepoLoadError(String(e)));
   }, [selectedRepo]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -272,17 +277,20 @@ function Settings() {
     () => ({
       showUnfocusedDescription: true as const,
       knownIdentities,
-      checkoutDir: repoSettings.checkout_dir,
+      checkoutDir: loadedRepo?.settings.checkout_dir ?? null,
       worktreePrefixDefault: repoFormDefaults?.worktreePrefixDefault ?? "",
       promptDefaults: repoFormDefaults?.promptDefaults ?? {},
     }),
-    [knownIdentities, repoSettings.checkout_dir, repoFormDefaults],
+    [knownIdentities, loadedRepo?.settings.checkout_dir, repoFormDefaults],
   );
 
   // Autosave on change, debounced, skipped while ajv reports errors. JsonForms
   // preserves fields not in the UI schema (repo, hidden), so they round-trip.
   function handleRepoFormChange(repo: string, data: RepoSettings, errors: unknown[] | undefined) {
-    setRepoSettings(data);
+    // Only the currently-loaded repo may save — a stale render mid-switch must
+    // not write its data under another repo's key (#65).
+    if (loadedRepo?.repo !== repo) return;
+    setLoadedRepo({ repo, settings: data });
     if ((errors?.length ?? 0) > 0) return;
     const serialized = JSON.stringify(data);
     if (serialized === lastSavedRef.current) return;
@@ -566,7 +574,7 @@ function Settings() {
                       Fix the file by hand, then reselect this repo.
                     </p>
                   </div>
-                ) : repoSchema ? (
+                ) : repoSchema && loadedRepo?.repo === selection.repo ? (
                   <div className="jsf-root">
                     {repoSaveError && (
                       <div className="cleanup-confirm">
@@ -574,9 +582,10 @@ function Settings() {
                       </div>
                     )}
                     <JsonForms
+                      key={selection.repo}
                       schema={repoSchema}
                       uischema={repoSettingsUISchema}
-                      data={repoSettings}
+                      data={loadedRepo.settings}
                       renderers={repoSettingsRenderers}
                       cells={repoSettingsCells}
                       config={repoFormConfig}
