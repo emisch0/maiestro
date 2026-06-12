@@ -40,6 +40,12 @@ struct PopoverState {
 const MIN_POPOVER_WIDTH: f64 = 480.0;
 const MIN_POPOVER_HEIGHT: f64 = 360.0;
 
+/// Minimum Settings-window size, in logical pixels. Mirrors `minWidth`/`minHeight`
+/// on the `settings` window in `tauri.conf.json`; clamps a restored size so a
+/// stale or hand-edited `settings.json` can't shrink it below usable.
+const MIN_SETTINGS_WIDTH: f64 = 560.0;
+const MIN_SETTINGS_HEIGHT: f64 = 400.0;
+
 /// Apply the persisted popover size (if any) to the `main` window. Called in
 /// `setup()` while the window is still hidden, so the first show already has the
 /// user's chosen dimensions — no resize flash.
@@ -79,6 +85,49 @@ fn persist_popover_size(window: &tauri::Window) {
             width = logical.width,
             height = logical.height,
             "persisted popover size"
+        );
+    }
+}
+
+/// Apply the persisted Settings-window size (if any) to the `settings` window.
+/// Called in `setup()` while the window is still hidden, so it opens at the
+/// user's chosen dimensions with no resize flash on first show.
+fn restore_settings_size(app: &tauri::AppHandle) {
+    let Some(size) = app_settings::load().settings_window else {
+        return;
+    };
+    let Some(window) = app.get_webview_window("settings") else {
+        return;
+    };
+    let width = size.width.max(MIN_SETTINGS_WIDTH);
+    let height = size.height.max(MIN_SETTINGS_HEIGHT);
+    if let Err(e) = window.set_size(LogicalSize::new(width, height)) {
+        tracing::warn!(error = %e, "failed to restore settings size");
+    }
+}
+
+/// Save the Settings window's current logical size to the global settings file.
+/// The Settings window stays open on blur (unlike the popover), so we capture its
+/// size when it loses focus or is closed — both land after a resize drag finishes.
+fn persist_settings_size(window: &tauri::Window) {
+    let Ok(physical) = window.inner_size() else {
+        return;
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let logical = physical.to_logical::<f64>(scale);
+    // Load-merge so we don't clobber other fields (popover size, theme).
+    let mut settings = app_settings::load();
+    settings.settings_window = Some(app_settings::WindowSize {
+        width: logical.width,
+        height: logical.height,
+    });
+    if let Err(e) = app_settings::save(&settings) {
+        tracing::warn!(error = %e, "failed to persist settings size");
+    } else {
+        tracing::debug!(
+            width = logical.width,
+            height = logical.height,
+            "persisted settings size"
         );
     }
 }
@@ -138,6 +187,7 @@ fn main() {
             identities::identities_list,
             identities::identities_get_default,
             identities::identities_set_default,
+            identities::identities_add,
             links::open_url,
             links::open_path,
             spawn::spawn_work,
@@ -174,6 +224,8 @@ fn main() {
             // Apply the user's persisted popover size before the first show, so
             // the popover opens at their chosen dimensions with no resize flash.
             restore_popover_size(app.handle());
+            // Same for the Settings window, restored before its first show.
+            restore_settings_size(app.handle());
 
             // Mirror the embedded per-repo settings schema to
             // ~/.maiestro/schemas/ so hand-editors can `$schema`-reference it.
@@ -256,24 +308,29 @@ fn main() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // Only the menu-bar popover auto-hides on blur; the Settings window
-            // is a normal window and must stay open when you click elsewhere.
-            if window.label() != "main" {
-                return;
-            }
-            // Hide (don't quit) when the popover loses focus, so clicking away
-            // dismisses it like a normal menu-bar dropdown.
-            if let WindowEvent::Focused(false) = event {
-                let app = window.app_handle();
-                if let Some(state) = app.try_state::<PopoverState>() {
-                    *state.last_auto_hide.lock().unwrap() = Some(Instant::now());
+        .on_window_event(|window, event| match window.label() {
+            // The menu-bar popover auto-hides on blur; capture its (possibly
+            // just-resized) size before hiding so it survives the next launch.
+            "main" => {
+                if let WindowEvent::Focused(false) = event {
+                    let app = window.app_handle();
+                    if let Some(state) = app.try_state::<PopoverState>() {
+                        *state.last_auto_hide.lock().unwrap() = Some(Instant::now());
+                    }
+                    persist_popover_size(window);
+                    let _ = window.hide();
                 }
-                // Capture the (possibly just-resized) size before hiding, so it
-                // survives the next launch.
-                persist_popover_size(window);
-                let _ = window.hide();
             }
+            // The Settings window stays open on blur (it's a normal window), so
+            // persist its size whenever it loses focus or is closed — either lands
+            // after a resize drag finishes, without writing on every drag frame.
+            "settings" => match event {
+                WindowEvent::Focused(false) | WindowEvent::CloseRequested { .. } => {
+                    persist_settings_size(window);
+                }
+                _ => {}
+            },
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running mAIestro");

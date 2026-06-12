@@ -2,7 +2,7 @@
 //!
 //! Sibling to `profiles.json` and the per-repo `repos/<…>.json` files, but holds
 //! configuration that is neither a credential nor repo-scoped. Today that is the
-//! popover window's persisted size (issue #40) and the UI theme (issue #12); the
+//! popover and Settings window persisted sizes (issue #40) and the UI theme (issue #12); the
 //! file is intentionally human-editable and dotfile-manageable. A missing or
 //! partial file is fine — every field is optional and defaults to "not set".
 
@@ -10,8 +10,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Persisted size of the menu-bar popover, in logical pixels. Restored on launch
-/// before the popover is first shown, saved when the popover hides on blur.
+/// Persisted size of a window, in logical pixels. Restored on launch before the
+/// window is first shown, saved when the window hides (popover on blur, the
+/// Settings window when it loses focus or is closed).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct WindowSize {
     pub width: f64,
@@ -35,6 +36,9 @@ pub struct AppSettings {
     /// Saved popover size. `None` (absent) means "use the tauri.conf.json default".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<WindowSize>,
+    /// Saved Settings-window size. `None` (absent) means "use the tauri.conf.json default".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_window: Option<WindowSize>,
     /// Chosen UI theme. `None` (absent) means `System`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<Theme>,

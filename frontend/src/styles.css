@@ -974,36 +974,183 @@ body {
 
 /* ── Tabs ────────────────────────────────────────────────────────────── */
 
-.tabs {
+/* ── Settings two-pane layout ────────────────────────────────────────── */
+
+.settings-layout {
   display: flex;
-  gap: 4px;
-  padding: 12px 20px 0;
-  flex-shrink: 0;
-}
-
-.tab {
   flex: 1;
-  padding: 6px 0;
-  font-size: 12px;
-  font-weight: 500;
-  font-family: var(--font);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--muted);
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  overflow: hidden;
+  min-height: 0;
 }
 
-.tab:hover {
+.settings-sidebar {
+  width: 180px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.settings-sidebar::-webkit-scrollbar { width: 4px; }
+.settings-sidebar::-webkit-scrollbar-track { background: transparent; }
+.settings-sidebar::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+.settings-detail {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* ── Tree sidebar ────────────────────────────────────────────────────── */
+
+.settings-tree {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 0;
+}
+
+.tree-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.tree-section-header {
+  display: flex;
+  align-items: center;
+  padding: 1px 4px 1px 2px;
+}
+
+.tree-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 1;
+  padding: 4px 4px 4px 6px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--muted);
+  font-family: var(--font);
+  min-width: 0;
+}
+
+.tree-section-toggle:hover {
   background: var(--surface-hover);
   color: var(--text);
 }
 
-.tab.active {
-  background: var(--accent-bg);
-  border-color: var(--accent-border);
+.tree-chevron {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  transition: transform 0.2s ease;
+}
+
+.tree-chevron--open {
+  transform: rotate(90deg);
+}
+
+.tree-section-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.tree-add-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  font-family: var(--font);
+}
+
+.tree-add-btn:hover {
+  background: var(--surface-hover);
   color: var(--accent);
+}
+
+.tree-items {
+  display: flex;
+  flex-direction: column;
+  padding: 1px 4px 4px 4px;
+}
+
+.tree-item {
+  display: block;
+  width: 100%;
+  padding: 5px 8px 5px 22px;
+  font-size: 12.5px;
+  font-family: var(--font);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-item:hover {
+  background: var(--surface-hover);
+}
+
+.tree-item--selected {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.tree-item--selected:hover {
+  background: var(--accent-bg);
+}
+
+.tree-item--preferences {
+  padding-left: 10px;
+  color: var(--muted);
+  font-weight: 500;
+  margin: 2px 4px;
+  width: auto;
+}
+
+.tree-item--preferences:hover {
+  color: var(--text);
+}
+
+.tree-item--preferences.tree-item--selected {
+  color: var(--accent);
+}
+
+.tree-empty-hint {
+  padding: 3px 8px 3px 22px;
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.tree-add-row {
+  padding: 3px 4px;
+}
+
+.tree-add-input {
+  font-size: 12px !important;
+  padding: 5px 8px !important;
 }
 
 /* ── Context input ───────────────────────────────────────────────────── */
@@ -1305,13 +1452,19 @@ body {
   cursor: not-allowed;
 }
 
-/* Busy state for any async action button: an Apple-Intelligence-style rotating
-   rainbow glow around the edge while the action is in flight. Two layers sit
-   behind the button (`isolation: isolate` keeps them in the button's own
-   stacking context): a crisp rainbow ring and a blurred halo. `border-radius:
-   inherit` makes it fit every button shape, and `:disabled` stays full-opacity
-   so the glow reads clearly even while the click is disabled mid-flight.
-   The label stays visible — the glow, not a spinner, is the indicator. */
+/* Busy state for any async action button: a rotating glow around the edge
+   while the action is in flight. Two layers sit behind the button
+   (`isolation: isolate` keeps them in the button's own stacking context): a
+   crisp ring and a blurred halo. `border-radius: inherit` makes it fit every
+   button shape, and `:disabled` stays full-opacity so the glow reads clearly
+   even while the click is disabled mid-flight. The label stays visible — the
+   glow, not a spinner, is the indicator.
+
+   Two variants share the machinery: the base is a single-hue accent sweep
+   (brightness moves around the ring, no color cycling) for plain script work;
+   `.btn-busy--ai` is the Apple-Intelligence-style rainbow, applied live while
+   a Claude call is actually in flight for the action (`claude-activity`
+   event), so a mixed script/AI action changes color mid-flight. */
 @property --glow-angle {
   syntax: "<angle>";
   initial-value: 0deg;
@@ -1335,12 +1488,20 @@ body {
   border-radius: inherit;
   background: conic-gradient(
     from var(--glow-angle),
-    #ff2d55, #ff9500, #ffcc00, #34c759, #5ac8fa, #af52de, #ff2d55
+    var(--accent-border), var(--accent), var(--accent-border)
   );
   animation: glow-rotate 2.4s linear infinite;
 }
 
-/* Crisp ring: a rainbow band at the very edge (interior masked out). */
+.btn-busy--ai::before,
+.btn-busy--ai::after {
+  background: conic-gradient(
+    from var(--glow-angle),
+    #ff2d55, #ff9500, #ffcc00, #34c759, #5ac8fa, #af52de, #ff2d55
+  );
+}
+
+/* Crisp ring: a gradient band at the very edge (interior masked out). */
 .btn-busy::before {
   z-index: -1;
   padding: 1.5px;
@@ -1361,7 +1522,7 @@ body {
   to { --glow-angle: 360deg; }
 }
 
-/* Respect reduced-motion: keep the rainbow ring, but stop it rotating. */
+/* Respect reduced-motion: keep the ring (both variants), but stop it rotating. */
 @media (prefers-reduced-motion: reduce) {
   .btn-busy::before,
   .btn-busy::after {

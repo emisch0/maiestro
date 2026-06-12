@@ -83,3 +83,14 @@ pub fn identities_set_default(identity_id: String) -> Result<(), String> {
     store.default = Some(identity_id);
     save_store(&store).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn identities_add(identity_id: String) -> Result<(), String> {
+    crate::log_invoke!("identities_add", identity = %identity_id);
+    let trimmed = identity_id.trim().to_owned();
+    if trimmed.is_empty() {
+        return Err("identity ID cannot be empty".to_string());
+    }
+    register(&trimmed);
+    Ok(())
+}

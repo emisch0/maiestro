@@ -116,12 +116,13 @@ type TeardownPrompt =
   | { id: string; kind: "confirm"; warnings: string[] }
   | { id: string; kind: "blocked"; message: string; accessibility: boolean };
 
-type Tab = "identity" | "repo" | "appearance";
+type SettingsSelection =
+  | { kind: "identity"; id: string }
+  | { kind: "repo"; repo: string }
+  | { kind: "repo-add" }
+  | { kind: "preferences" }
+  | null;
 type SaveStatus = "idle" | "saving" | "saved" | "clearing" | "error";
-type RepoView =
-  | { mode: "list" }
-  | { mode: "browsing"; identityId: string | null; identityInput: string; repos: GHRepo[] | null; filter: string; loading: boolean; error?: string }
-  | { mode: "detail"; repo: string };
 
 interface CredState {
   isSet: boolean;
@@ -131,13 +132,13 @@ interface CredState {
 }
 
 function Settings() {
-  const [tab, setTab] = useState<Tab>("identity");
-  const [identityId, setIdentityId] = useState("");
+  const [selection, setSelection] = useState<SettingsSelection>(null);
+  const [identitiesOpen, setIdentitiesOpen] = useState(true);
+  const [reposOpen, setReposOpen] = useState(true);
+  const [addingIdentityInline, setAddingIdentityInline] = useState(false);
+  const [identityInputInline, setIdentityInputInline] = useState("");
   const [knownIdentities, setKnownIdentities] = useState<string[]>([]);
-  const [addingIdentity, setAddingIdentity] = useState(false);
-  const [identityInput, setIdentityInput] = useState("");
   const [repos, setRepos] = useState<string[]>([]);
-  const [repoView, setRepoView] = useState<RepoView>({ mode: "list" });
   const [credTypes, setCredTypes] = useState<CredentialTypeDto[]>([]);
   const [credStates, setCredStates] = useState<Record<string, CredState>>({});
   const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, worktree_prefix: null, env_files: [], identity_id: null, hidden: null });
@@ -152,6 +153,14 @@ function Settings() {
   // Last persisted form data, to skip the no-op onChange JsonForms fires on load.
   const lastSavedRef = useRef<string>("");
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [browse, setBrowse] = useState<{
+    identityId: string | null;
+    identityInput: string;
+    repos: GHRepo[] | null;
+    filter: string;
+    loading: boolean;
+    error?: string;
+  }>({ identityId: null, identityInput: "", repos: null, filter: "", loading: false });
   const [theme, setThemeState] = useState<Theme>("system");
 
   useEffect(() => {
@@ -163,22 +172,17 @@ function Settings() {
     });
     api.listRepos().then(setRepos);
     api.identitiesList().then(setKnownIdentities);
-    api.getDefaultIdentity().then((id) => { if (id) setIdentityId(id); });
+    api.getDefaultIdentity().then((id) => { if (id) setSelection({ kind: "identity", id }); });
     api.getTheme().then(setThemeState);
     api.repoSettingsSchema().then((s) => setRepoSchema(sanitizeSchemaForForm(s)));
   }, []);
 
-  // Persist and apply the picked theme. We apply locally for immediacy; the
-  // backend also broadcasts `theme-changed` so the popover and logs windows
-  // update too.
   async function chooseTheme(next: Theme) {
     setThemeState(next);
     applyTheme(next);
     await api.setTheme(next);
   }
 
-  // Closing the Settings window hides it (keeping it alive for reuse) rather
-  // than destroying it, so the gear icon can reopen the same window.
   useEffect(() => {
     const win = getCurrentWindow();
     const unlisten = win.onCloseRequested((event) => {
@@ -193,10 +197,10 @@ function Settings() {
   }, []);
 
   const activeScope = useMemo((): CredentialScope | null => {
-    if (tab === "identity" && identityId.trim())
-      return { kind: "identity", identity_id: identityId.trim() };
+    if (selection?.kind === "identity")
+      return { kind: "identity", identity_id: selection.id };
     return null;
-  }, [tab, identityId]);
+  }, [selection]);
 
   const scopeKey = activeScope ? `identity:${activeScope.identity_id}` : null;
 
@@ -238,19 +242,20 @@ function Settings() {
     }
   }
 
+  const selectedRepo = selection?.kind === "repo" ? selection.repo : null;
+
   useEffect(() => {
-    if (repoView.mode !== "detail") return;
-    const repo = repoView.repo;
+    if (!selectedRepo) return;
     setRepoLoadError(null);
     setRepoSaveError(null);
-    api.getRepoSettings(repo)
+    api.getRepoSettings(selectedRepo)
       .then((s) => {
         setRepoSettings(s);
         // Seed the baseline so JsonForms' initial onChange (same data) is a no-op.
         lastSavedRef.current = JSON.stringify(s);
       })
       .catch((e) => setRepoLoadError(String(e)));
-  }, [repoView.mode === "detail" ? repoView.repo : null]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedRepo]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Extra data the custom renderers (identity select, env-files Scan) read via
   // JsonForms' `config`. Memoized so the form isn't needlessly re-keyed.
@@ -282,18 +287,17 @@ function Settings() {
     }, 400);
   }
 
-  // Adopt an identity as the active one and remember it as the default so it is
-  // restored on the next launch. Used by both the picker and the add-new flow.
-  async function commitIdentity(id: string) {
-    const trimmed = id.trim();
+  async function commitIdentityInline() {
+    const trimmed = identityInputInline.trim();
     if (!trimmed) return;
-    setIdentityId(trimmed);
-    setAddingIdentity(false);
-    setIdentityInput("");
+    setAddingIdentityInline(false);
+    setIdentityInputInline("");
     try {
-      await api.setDefaultIdentity(trimmed);
-      api.identitiesList().then(setKnownIdentities);
-    } catch { /* best-effort: selection still works for this session */ }
+      await api.identitiesAdd(trimmed);
+      const list = await api.identitiesList();
+      setKnownIdentities(list);
+      setSelection({ kind: "identity", id: trimmed });
+    } catch { /* best-effort */ }
   }
 
   async function handleClear(type_id: string) {
@@ -305,24 +309,23 @@ function Settings() {
     patchCred(type_id, { status: "idle", isSet: false, input: "" });
   }
 
-  async function handleSelectIdentity(iid: string) {
-    if (repoView.mode !== "browsing") return;
-    setRepoView({ ...repoView, identityId: iid, loading: true, error: undefined });
+  async function handleSelectBrowseIdentity(iid: string) {
+    setBrowse((prev) => ({ ...prev, identityId: iid, loading: true, error: undefined }));
     try {
       const fetched = await api.githubListRepos(iid);
-      setRepoView({ ...repoView, identityId: iid, loading: false, repos: fetched, filter: "" });
+      setBrowse((prev) => ({ ...prev, identityId: iid, loading: false, repos: fetched, filter: "" }));
       api.identitiesList().then(setKnownIdentities);
     } catch (e) {
-      setRepoView({ ...repoView, identityId: iid, loading: false, error: String(e) });
+      setBrowse((prev) => ({ ...prev, identityId: iid, loading: false, error: String(e) }));
     }
   }
 
   async function handleSelectRepo(repo: string) {
-    const identityId = repoView.mode === "browsing" ? repoView.identityId : null;
-    setRepos((prev) => prev.includes(repo) ? prev : [...prev, repo]);
-    setRepoView({ mode: "detail", repo });
+    const iid = browse.identityId;
+    setRepos((prev) => (prev.includes(repo) ? prev : [...prev, repo]));
+    setSelection({ kind: "repo", repo });
     const defaults = await api.getRepoSettings(repo);
-    await api.setRepoSettings(repo, { ...defaults, identity_id: identityId ?? defaults.identity_id });
+    await api.setRepoSettings(repo, { ...defaults, identity_id: iid ?? defaults.identity_id });
   }
 
   function CredRows() {
@@ -381,288 +384,304 @@ function Settings() {
         <span className="panel-subtitle">Settings</span>
       </header>
 
-      <div className="tabs">
-        <button
-          className={`tab ${tab === "identity" ? "active" : ""}`}
-          onClick={() => setTab("identity")}
-        >
-          Identity
-        </button>
-        <button
-          className={`tab ${tab === "repo" ? "active" : ""}`}
-          onClick={() => { setTab("repo"); setRepoView({ mode: "list" }); }}
-        >
-          Repo
-        </button>
-        <button
-          className={`tab ${tab === "appearance" ? "active" : ""}`}
-          onClick={() => setTab("appearance")}
-        >
-          Appearance
-        </button>
-      </div>
+      <div className="settings-layout">
+        {/* ── Sidebar ── */}
+        <div className="settings-sidebar">
+          <div className="settings-tree">
 
-      {tab === "appearance" ? (
-        <div className="cred-list">
-          <div className="settings-group">
-            <div className="settings-group-header">
-              <span className="field-label" style={{ marginBottom: 0 }}>Theme</span>
-            </div>
-            <div className="theme-options" role="radiogroup" aria-label="Theme">
-              {(["light", "dark", "system"] as Theme[]).map((opt) => (
+            {/* Identities section */}
+            <div className="tree-section">
+              <div className="tree-section-header">
                 <button
-                  key={opt}
-                  className={`theme-option ${theme === opt ? "active" : ""}`}
-                  role="radio"
-                  aria-checked={theme === opt}
-                  onClick={() => chooseTheme(opt)}
+                  className="tree-section-toggle"
+                  onClick={() => setIdentitiesOpen((v) => !v)}
+                  aria-expanded={identitiesOpen}
                 >
-                  {opt === "light" ? "Light" : opt === "dark" ? "Dark" : "System"}
+                  <ChevronRightIcon className={`tree-chevron ${identitiesOpen ? "tree-chevron--open" : ""}`} />
+                  <span className="tree-section-label">Identities</span>
                 </button>
-              ))}
+                <button
+                  className="tree-add-btn"
+                  onClick={() => { setIdentitiesOpen(true); setAddingIdentityInline(true); setIdentityInputInline(""); }}
+                  title="Add identity"
+                  aria-label="Add identity"
+                >+</button>
+              </div>
+              {identitiesOpen && (
+                <div className="tree-items">
+                  {addingIdentityInline && (
+                    <div className="tree-add-row">
+                      <input
+                        className="text-input tree-add-input"
+                        type="text"
+                        placeholder="e.g. default"
+                        value={identityInputInline}
+                        autoFocus
+                        onChange={(e) => setIdentityInputInline(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") commitIdentityInline();
+                          if (e.key === "Escape") { setAddingIdentityInline(false); setIdentityInputInline(""); }
+                        }}
+                        spellCheck={false}
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                      />
+                    </div>
+                  )}
+                  {knownIdentities.length === 0 && !addingIdentityInline && (
+                    <p className="tree-empty-hint">No identities yet</p>
+                  )}
+                  {knownIdentities.map((id) => (
+                    <button
+                      key={id}
+                      className={`tree-item${selection?.kind === "identity" && selection.id === id ? " tree-item--selected" : ""}`}
+                      onClick={() => setSelection({ kind: "identity", id })}
+                    >
+                      {id}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-            <p className="session-hint" style={{ paddingTop: 2 }}>
-              System follows your macOS appearance.
-            </p>
+
+            {/* Repos section */}
+            <div className="tree-section">
+              <div className="tree-section-header">
+                <button
+                  className="tree-section-toggle"
+                  onClick={() => setReposOpen((v) => !v)}
+                  aria-expanded={reposOpen}
+                >
+                  <ChevronRightIcon className={`tree-chevron ${reposOpen ? "tree-chevron--open" : ""}`} />
+                  <span className="tree-section-label">Repos</span>
+                </button>
+                <button
+                  className="tree-add-btn"
+                  onClick={() => {
+                    api.identitiesList().then(setKnownIdentities);
+                    setBrowse({ identityId: null, identityInput: "", repos: null, filter: "", loading: false });
+                    setReposOpen(true);
+                    setSelection({ kind: "repo-add" });
+                  }}
+                  title="Add repo"
+                  aria-label="Add repo"
+                >+</button>
+              </div>
+              {reposOpen && (
+                <div className="tree-items">
+                  {repos.length === 0 && (
+                    <p className="tree-empty-hint">No repos yet</p>
+                  )}
+                  {repos.map((repo) => (
+                    <button
+                      key={repo}
+                      className={`tree-item${selection?.kind === "repo" && selection.repo === repo ? " tree-item--selected" : ""}`}
+                      onClick={() => setSelection({ kind: "repo", repo })}
+                    >
+                      {repo.split("/")[1] ?? repo}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Preferences — non-expandable leaf */}
+            <div className="tree-section">
+              <button
+                className={`tree-item tree-item--preferences${selection?.kind === "preferences" ? " tree-item--selected" : ""}`}
+                onClick={() => setSelection({ kind: "preferences" })}
+              >
+                Preferences
+              </button>
+            </div>
+
           </div>
         </div>
-      ) : tab === "identity" ? (
-        <>
-          <div className="context-section">
-            <label className="field-label">Identity</label>
-            {knownIdentities.length === 0 || addingIdentity ? (
-              <div className="cred-controls">
-                <input
-                  className="text-input"
-                  type="text"
-                  placeholder="e.g. default"
-                  value={identityInput}
-                  autoFocus={addingIdentity}
-                  onChange={(e) => setIdentityInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") commitIdentity(identityInput);
-                    if (e.key === "Escape") { setAddingIdentity(false); setIdentityInput(""); }
-                  }}
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                />
-                <button className="btn-save" disabled={!identityInput.trim()} onClick={() => commitIdentity(identityInput)}>Add</button>
-                {knownIdentities.length > 0 && (
-                  <button className="btn-clear" onClick={() => { setAddingIdentity(false); setIdentityInput(""); }}>✕</button>
+
+        {/* ── Detail panel ── */}
+        <div className="settings-detail">
+          {!selection ? (
+            <div className="cred-list">
+              <div className="empty-state">
+                <p className="empty-state-body">Select an item on the left.</p>
+              </div>
+            </div>
+          ) : selection.kind === "preferences" ? (
+            <div className="cred-list">
+              <div className="settings-group">
+                <div className="settings-group-header">
+                  <span className="field-label" style={{ marginBottom: 0 }}>Theme</span>
+                </div>
+                <div className="theme-options" role="radiogroup" aria-label="Theme">
+                  {(["light", "dark", "system"] as Theme[]).map((opt) => (
+                    <button
+                      key={opt}
+                      className={`theme-option ${theme === opt ? "active" : ""}`}
+                      role="radio"
+                      aria-checked={theme === opt}
+                      onClick={() => chooseTheme(opt)}
+                    >
+                      {opt === "light" ? "Light" : opt === "dark" ? "Dark" : "System"}
+                    </button>
+                  ))}
+                </div>
+                <p className="session-hint" style={{ paddingTop: 2 }}>
+                  System follows your macOS appearance.
+                </p>
+              </div>
+            </div>
+          ) : selection.kind === "identity" ? (
+            <>
+              <div className="detail-header">
+                <span className="detail-title">{selection.id}</span>
+              </div>
+              <div className="cred-list">
+                <CredRows />
+              </div>
+            </>
+          ) : selection.kind === "repo" ? (
+            <>
+              <div className="detail-header">
+                <span className="detail-title">{selection.repo}</span>
+              </div>
+              <div className="cred-list">
+                {repoLoadError ? (
+                  // The backend rejected this repo's settings file (bad JSON or a
+                  // schema violation). Show the error rather than a form full of
+                  // defaults that would clobber the file on the next save.
+                  <div className="cleanup-confirm">
+                    <p className="cleanup-confirm-body">
+                      Couldn't load settings for this repo:
+                    </p>
+                    <p className="cleanup-confirm-body" style={{ opacity: 0.85, fontFamily: "var(--font-mono, monospace)", fontSize: 11 }}>
+                      {repoLoadError}
+                    </p>
+                    <p className="cleanup-confirm-body" style={{ opacity: 0.7 }}>
+                      Fix the file by hand, then reselect this repo.
+                    </p>
+                  </div>
+                ) : repoSchema ? (
+                  <div className="jsf-root">
+                    {repoSaveError && (
+                      <div className="cleanup-confirm">
+                        <p className="cleanup-confirm-body">Couldn't save: {repoSaveError}</p>
+                      </div>
+                    )}
+                    <JsonForms
+                      schema={repoSchema}
+                      uischema={repoSettingsUISchema}
+                      data={repoSettings}
+                      renderers={repoSettingsRenderers}
+                      cells={repoSettingsCells}
+                      config={repoFormConfig}
+                      onChange={({ data, errors }) =>
+                        handleRepoFormChange(selection.repo, data as RepoSettings, errors)
+                      }
+                    />
+                  </div>
+                ) : (
+                  <p className="session-hint" style={{ paddingTop: 2 }}>Loading…</p>
                 )}
               </div>
-            ) : (
-              <div className="cred-controls">
-                <select
-                  className="text-input profile-select"
-                  value={identityId}
-                  onChange={(e) => commitIdentity(e.target.value)}
-                >
-                  {!identityId && <option value="">Select an identity…</option>}
-                  {identityId && !knownIdentities.includes(identityId) && (
-                    <option value={identityId}>{identityId}</option>
-                  )}
-                  {knownIdentities.map((iid) => (
-                    <option key={iid} value={iid}>{iid}</option>
-                  ))}
-                </select>
-                <button className="btn-add" onClick={() => { setAddingIdentity(true); setIdentityInput(""); }}>+ New</button>
+            </>
+          ) : (
+            /* selection.kind === "repo-add": identity picker → GitHub repo browser */
+            <>
+              <div className="detail-header">
+                {browse.identityId !== null ? (
+                  <>
+                    <button
+                      className="btn-back"
+                      onClick={() => setBrowse({ identityId: null, identityInput: "", repos: null, filter: "", loading: false, error: undefined })}
+                    >‹</button>
+                    <span className="detail-title">{browse.identityId}</span>
+                  </>
+                ) : (
+                  <span className="detail-title">Add Repo</span>
+                )}
               </div>
-            )}
-          </div>
-          <div className="cred-list">
-            {identityId.trim() ? <CredRows /> : (
-              <div className="empty-state">
-                <p className="empty-state-body">Select or add an identity to manage its credentials.</p>
-              </div>
-            )}
-          </div>
-        </>
-      ) : repoView.mode === "detail" ? (
-        <>
-          <div className="detail-header">
-            <button className="btn-back" onClick={() => setRepoView({ mode: "list" })}>‹</button>
-            <span className="detail-title">{repoView.repo}</span>
-          </div>
-          <div className="cred-list">
-            {repoLoadError ? (
-              // The backend rejected this repo's settings file (bad JSON or a
-              // schema violation). Show the error rather than a form full of
-              // defaults that would clobber the file on the next save.
-              <div className="cleanup-confirm">
-                <p className="cleanup-confirm-body">
-                  Couldn't load settings for this repo:
-                </p>
-                <p className="cleanup-confirm-body" style={{ opacity: 0.85, fontFamily: "var(--font-mono, monospace)", fontSize: 11 }}>
-                  {repoLoadError}
-                </p>
-                <p className="cleanup-confirm-body" style={{ opacity: 0.7 }}>
-                  Fix the file by hand, then reopen this repo.
-                </p>
-              </div>
-            ) : repoSchema ? (
-              <div className="jsf-root">
-                {repoSaveError && (
-                  <div className="cleanup-confirm">
-                    <p className="cleanup-confirm-body">Couldn't save: {repoSaveError}</p>
+              {browse.repos !== null && (
+                <div className="adding-row">
+                  <input
+                    className="text-input"
+                    type="text"
+                    placeholder="Filter repos…"
+                    value={browse.filter}
+                    autoFocus
+                    onChange={(e) => setBrowse((prev) => ({ ...prev, filter: e.target.value }))}
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                  />
+                </div>
+              )}
+              <div className="cred-list">
+                {browse.identityId === null && (
+                  knownIdentities.length === 0 ? (
+                    <div className="empty-state">
+                      <p className="empty-state-title">No identities yet</p>
+                      <p className="empty-state-body">
+                        Add an identity in the Identities section first, then save a GitHub token for it.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="cred-controls">
+                      <select
+                        className="text-input profile-select"
+                        value={browse.identityInput}
+                        autoFocus
+                        onChange={(e) => setBrowse((prev) => ({ ...prev, identityInput: e.target.value }))}
+                      >
+                        <option value="">Select an identity…</option>
+                        {knownIdentities.map((iid) => (
+                          <option key={iid} value={iid}>{iid}</option>
+                        ))}
+                      </select>
+                      <button
+                        className="btn-save"
+                        disabled={!browse.identityInput.trim()}
+                        onClick={() => handleSelectBrowseIdentity(browse.identityInput.trim())}
+                      >
+                        Fetch
+                      </button>
+                    </div>
+                  )
+                )}
+                {browse.identityId !== null && browse.loading && (
+                  <div className="empty-state">
+                    <p className="empty-state-body">Fetching repos…</p>
                   </div>
                 )}
-                <JsonForms
-                  schema={repoSchema}
-                  uischema={repoSettingsUISchema}
-                  data={repoSettings}
-                  renderers={repoSettingsRenderers}
-                  cells={repoSettingsCells}
-                  config={repoFormConfig}
-                  onChange={({ data, errors }) =>
-                    handleRepoFormChange(repoView.repo, data as RepoSettings, errors)
-                  }
-                />
+                {browse.error && (
+                  <p className="cred-error" style={{ paddingTop: 4 }}>{browse.error}</p>
+                )}
+                {browse.repos !== null && (() => {
+                  const filtered = browse.repos.filter((r) =>
+                    !browse.filter || r.full_name.toLowerCase().includes(browse.filter.toLowerCase())
+                  );
+                  return filtered.length === 0 ? (
+                    <div className="empty-state">
+                      <p className="empty-state-body">No repos match your filter.</p>
+                    </div>
+                  ) : filtered.map((r) => (
+                    <button
+                      key={r.full_name}
+                      className="repo-item"
+                      onClick={() => handleSelectRepo(r.full_name)}
+                    >
+                      <span className="repo-item-name">{r.full_name}</span>
+                      {r.private
+                        ? <span className="repo-item-private">private</span>
+                        : <span className="repo-item-chevron">›</span>
+                      }
+                    </button>
+                  ));
+                })()}
               </div>
-            ) : (
-              <p className="session-hint" style={{ paddingTop: 2 }}>Loading…</p>
-            )}
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="list-header">
-            <span className="field-label">
-              {repoView.mode === "browsing" && repoView.identityId
-                ? repoView.identityId
-                : repoView.mode === "browsing"
-                ? "Select identity"
-                : "Repositories"}
-            </span>
-            {repoView.mode === "list" ? (
-              <button
-                className="btn-add"
-                onClick={() => {
-                  api.identitiesList().then(setKnownIdentities);
-                  setRepoView({ mode: "browsing", identityId: null, identityInput: "", repos: null, filter: "", loading: false });
-                }}
-              >
-                + Add
-              </button>
-            ) : repoView.mode === "browsing" && repoView.identityId !== null ? (
-              <button
-                className="btn-clear"
-                onClick={() => setRepoView({ ...repoView, identityId: null, identityInput: "", repos: null, filter: "", loading: false, error: undefined })}
-              >
-                ‹ Back
-              </button>
-            ) : (
-              <button className="btn-clear" onClick={() => setRepoView({ mode: "list" })}>Cancel</button>
-            )}
-          </div>
-
-          {repoView.mode === "browsing" && repoView.repos !== null && (
-            <div className="adding-row" style={{ paddingTop: 0 }}>
-              <input
-                className="text-input"
-                type="text"
-                placeholder="Filter repos…"
-                value={repoView.filter}
-                autoFocus
-                onChange={(e) => setRepoView({ ...repoView, filter: e.target.value })}
-                spellCheck={false}
-                autoCapitalize="off"
-                autoCorrect="off"
-              />
-            </div>
+            </>
           )}
-
-          <div className="cred-list">
-            {repoView.mode === "list" && (
-              repos.length === 0 ? (
-                <div className="empty-state">
-                  <p className="empty-state-title">No repos configured</p>
-                  <p className="empty-state-body">
-                    Add a repo to assign it an identity and configure its workspace.
-                  </p>
-                </div>
-              ) : (
-                repos.map((repo) => (
-                  <button
-                    key={repo}
-                    className="repo-item"
-                    onClick={() => setRepoView({ mode: "detail", repo })}
-                  >
-                    <span className="repo-item-name">{repo}</span>
-                    <span className="repo-item-chevron">›</span>
-                  </button>
-                ))
-              )
-            )}
-
-            {repoView.mode === "browsing" && repoView.identityId === null && (
-              knownIdentities.length === 0 ? (
-                <div className="empty-state">
-                  <p className="empty-state-title">No identities yet</p>
-                  <p className="empty-state-body">
-                    Go to the Identity tab, enter an identity ID, and save a GitHub token. Then come back here.
-                  </p>
-                </div>
-              ) : (
-                <div className="adding-row">
-                  <select
-                    className="text-input profile-select"
-                    value={repoView.identityInput}
-                    autoFocus
-                    onChange={(e) => setRepoView({ ...repoView, identityInput: e.target.value })}
-                  >
-                    <option value="">Select an identity…</option>
-                    {knownIdentities.map((iid) => (
-                      <option key={iid} value={iid}>{iid}</option>
-                    ))}
-                  </select>
-                  <button
-                    className="btn-save"
-                    disabled={!repoView.identityInput.trim()}
-                    onClick={() => handleSelectIdentity(repoView.identityInput.trim())}
-                  >
-                    Fetch
-                  </button>
-                </div>
-              )
-            )}
-
-            {repoView.mode === "browsing" && repoView.identityId !== null && repoView.loading && (
-              <div className="empty-state">
-                <p className="empty-state-body">Fetching repos…</p>
-              </div>
-            )}
-
-            {repoView.mode === "browsing" && repoView.error && (
-              <p className="cred-error" style={{ paddingTop: 4 }}>{repoView.error}</p>
-            )}
-
-            {repoView.mode === "browsing" && repoView.repos !== null && (() => {
-              const filtered = repoView.repos.filter((r) =>
-                !repoView.filter || r.full_name.toLowerCase().includes(repoView.filter.toLowerCase())
-              );
-              return filtered.length === 0 ? (
-                <div className="empty-state">
-                  <p className="empty-state-body">No repos match your filter.</p>
-                </div>
-              ) : filtered.map((r) => (
-                <button
-                  key={r.full_name}
-                  className="repo-item"
-                  onClick={() => handleSelectRepo(r.full_name)}
-                >
-                  <span className="repo-item-name">{r.full_name}</span>
-                  {r.private
-                    ? <span className="repo-item-private">private</span>
-                    : <span className="repo-item-chevron">›</span>
-                  }
-                </button>
-              ));
-            })()}
-          </div>
-        </>
-      )}
+        </div>
+      </div>
     </main>
   );
 }
@@ -705,6 +724,9 @@ type Picker = {
   // Which create button is in flight, so we can disable both and spin the
   // active one. Undefined when idle.
   creating?: "create" | "spawn";
+  // Request id of the in-flight draft, correlating `claude-activity` events so
+  // the busy glow turns rainbow exactly while Claude is drafting.
+  creatingRequestId?: string;
   // True while the issue list is being re-fetched via the refresh button.
   refreshing?: boolean;
   // Issue number whose spawn preview is currently being prepared (the row's
@@ -1097,14 +1119,21 @@ function MainView() {
   // button glows while the backend removes the worktree.
   const [teardownBusy, setTeardownBusy] = useState<Record<string, boolean>>({});
   // Create-PR progress/error per session id: `{ creating }` while in flight,
-  // `{ error }` after a failure. Absent = idle.
-  const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; error?: string }>>({});
+  // `{ error }` after a failure. Absent = idle. `requestId` correlates
+  // `claude-activity` events to this action's busy glow.
+  const [prCreate, setPrCreate] = useState<Record<string, { creating?: boolean; requestId?: string; error?: string }>>({});
   // PR check status per session id, polled from GitHub while the popover is open.
   // Absent = not yet fetched; null = no open PR (or lookup failed).
   const [prChecks, setPrChecks] = useState<Record<string, PrChecks | null>>({});
   // Merge-PR state per session id. `intent` keeps the auto-merge watcher armed
   // until the PR lands; `merging` guards against overlapping merge attempts.
-  const [prMerge, setPrMerge] = useState<Record<string, { intent?: boolean; merging?: boolean; error?: string }>>({});
+  // `requestId` correlates `claude-activity` events (the merge drafts the PR
+  // via Claude when none exists yet) to this action's busy glow.
+  const [prMerge, setPrMerge] = useState<Record<string, { intent?: boolean; merging?: boolean; requestId?: string; error?: string }>>({});
+  // Request ids with a Claude call currently in flight (`claude-activity`
+  // events). A busy button whose request id is here glows rainbow instead of
+  // the monochrome sweep; absent = plain. Missed events degrade to monochrome.
+  const [aiActive, setAiActive] = useState<Record<string, boolean>>({});
   // Whether the menu-bar popover is currently open. Gates check polling so we
   // don't hit GitHub while the window is hidden.
   const [popoverOpen, setPopoverOpen] = useState(true);
@@ -1187,6 +1216,28 @@ function MainView() {
     });
     return () => { unlisten.then((f) => f()); };
   }, []);
+
+  // Live Claude-call signal from the backend: while a request id is active its
+  // button's busy glow turns rainbow (AI), reverting to the monochrome sweep
+  // when the call ends — so mixed script/AI actions change color mid-flight.
+  useEffect(() => {
+    const unlisten = getCurrentWindow().listen<{ request_id: string; active: boolean }>("claude-activity", (e) => {
+      const { request_id, active } = e.payload;
+      setAiActive((prev) => {
+        if (!active) {
+          const { [request_id]: _drop, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, [request_id]: true };
+      });
+    });
+    return () => { unlisten.then((f) => f()); };
+  }, []);
+
+  // Busy classes for a button whose backend command can run Claude: rainbow
+  // while its request id has a Claude call in flight, monochrome otherwise.
+  const busyCls = (requestId?: string) =>
+    requestId && aiActive[requestId] ? "btn-busy btn-busy--ai" : "btn-busy";
 
   // Also refresh whenever the window itself regains focus — covers any path that
   // re-focuses the popover without a fresh "popover-shown" emit. Refresh is
@@ -1311,9 +1362,9 @@ function MainView() {
 
   function applyDraftPreview(res: DraftPreviewOutcome, idea: string, mode: "spawn" | "create") {
     if (res.status === "needs_confirmation") {
-      setPicker((p) => (p ? { ...p, creating: undefined, note: undefined, confirm: { idea, message: res.message, action: mode } } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, creatingRequestId: undefined, note: undefined, confirm: { idea, message: res.message, action: mode } } : p));
     } else {
-      setPicker((p) => (p ? { ...p, creating: undefined, note: undefined, confirm: undefined, preview: planToPreview(res, mode) } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, creatingRequestId: undefined, note: undefined, confirm: undefined, preview: planToPreview(res, mode) } : p));
     }
   }
 
@@ -1390,11 +1441,12 @@ function MainView() {
     const repo = picker.repo;
     const idea = picker.query.trim();
     if (!idea) return;
-    setPicker((p) => (p ? { ...p, creating: "create", note: `Drafting an issue for “${idea}”…`, confirm: undefined } : p));
+    const requestId = crypto.randomUUID();
+    setPicker((p) => (p ? { ...p, creating: "create", creatingRequestId: requestId, note: `Drafting an issue for “${idea}”…`, confirm: undefined } : p));
     try {
-      applyDraftPreview(await api.draftSpawnPreview(repo, idea), idea, "create");
+      applyDraftPreview(await api.draftSpawnPreview(repo, idea, requestId), idea, "create");
     } catch (e) {
-      setPicker((p) => (p ? { ...p, creating: undefined, note: `Failed to draft issue: ${String(e)}` } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, creatingRequestId: undefined, note: `Failed to draft issue: ${String(e)}` } : p));
     }
   }
 
@@ -1404,11 +1456,12 @@ function MainView() {
     const repo = picker.repo;
     const idea = picker.query.trim();
     if (!idea) return;
-    setPicker((p) => (p ? { ...p, creating: "spawn", note: `Drafting an issue for “${idea}”…`, confirm: undefined } : p));
+    const requestId = crypto.randomUUID();
+    setPicker((p) => (p ? { ...p, creating: "spawn", creatingRequestId: requestId, note: `Drafting an issue for “${idea}”…`, confirm: undefined } : p));
     try {
-      applyDraftPreview(await api.draftSpawnPreview(repo, idea), idea, "spawn");
+      applyDraftPreview(await api.draftSpawnPreview(repo, idea, requestId), idea, "spawn");
     } catch (e) {
-      setPicker((p) => (p ? { ...p, creating: undefined, note: `Failed to draft issue: ${String(e)}` } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, creatingRequestId: undefined, note: `Failed to draft issue: ${String(e)}` } : p));
     }
   }
 
@@ -1418,11 +1471,12 @@ function MainView() {
     if (!picker?.confirm) return;
     const repo = picker.repo;
     const { idea, action } = picker.confirm;
-    setPicker((p) => (p ? { ...p, creating: action, note: "Drafting from your text…", confirm: undefined } : p));
+    const requestId = crypto.randomUUID();
+    setPicker((p) => (p ? { ...p, creating: action, creatingRequestId: requestId, note: "Drafting from your text…", confirm: undefined } : p));
     try {
-      applyDraftPreview(await api.draftSpawnPreview(repo, idea, true), idea, action);
+      applyDraftPreview(await api.draftSpawnPreview(repo, idea, requestId, true), idea, action);
     } catch (e) {
-      setPicker((p) => (p ? { ...p, creating: undefined, note: `Failed: ${String(e)}` } : p));
+      setPicker((p) => (p ? { ...p, creating: undefined, creatingRequestId: undefined, note: `Failed: ${String(e)}` } : p));
     }
   }
 
@@ -1430,9 +1484,10 @@ function MainView() {
   // draft PR. On success the PR pill refreshes to link the new PR (we don't
   // open it in the browser — the pill is the entry point).
   async function createPr(s: Session) {
-    setPrCreate((prev) => ({ ...prev, [s.id]: { creating: true } }));
+    const requestId = crypto.randomUUID();
+    setPrCreate((prev) => ({ ...prev, [s.id]: { creating: true, requestId } }));
     try {
-      const pr = await api.createPr(s.id);
+      const pr = await api.createPr(s.id, requestId);
       setPrs((prev) => ({ ...prev, [s.id]: pr }));
       setPrCreate((prev) => ({ ...prev, [s.id]: {} }));
     } catch (e) {
@@ -1445,9 +1500,10 @@ function MainView() {
   // a PR that isn't mergeable yet comes back unmerged and stays armed for the
   // next poll to retry; a hard failure (conflict, auth) surfaces in the panel.
   const runMerge = useCallback(async (id: string) => {
-    setPrMerge((prev) => ({ ...prev, [id]: { ...prev[id], intent: true, merging: true, error: undefined } }));
+    const requestId = crypto.randomUUID();
+    setPrMerge((prev) => ({ ...prev, [id]: { ...prev[id], intent: true, merging: true, requestId, error: undefined } }));
     try {
-      const pr = await api.mergePr(id);
+      const pr = await api.mergePr(id, requestId);
       setPrs((prev) => ({ ...prev, [id]: pr }));
       setPrMerge((prev) =>
         pr.state === "merged"
@@ -1778,7 +1834,7 @@ function MainView() {
                       </div>
                       <div className={`command-strip ${cmdOpen ? "command-strip--open" : ""}`}>
                         <button
-                          className={`command-btn ${prc?.creating ? "btn-busy" : ""}`}
+                          className={`command-btn ${prc?.creating ? busyCls(prc.requestId) : ""}`}
                           onClick={() => { setCommandsOpen(null); createPr(s); }}
                           disabled={prc?.creating || prOpen}
                           title={prOpen ? `PR #${pr?.number} is already open` : undefined}
@@ -1786,7 +1842,7 @@ function MainView() {
                           {prc?.creating ? "Creating PR…" : "Create PR"}
                         </button>
                         <button
-                          className={`command-btn ${pm?.intent && pr?.state !== "merged" ? "btn-busy" : ""}`}
+                          className={`command-btn ${pm?.intent && pr?.state !== "merged" ? busyCls(pm.requestId) : ""}`}
                           onClick={() => { setCommandsOpen(null); startMerge(s); }}
                           disabled={pm?.intent || pr?.state === "merged"}
                           title={
@@ -2036,14 +2092,14 @@ function MainView() {
                     {ideaOpen && (
                       <div className="issue-actions">
                         <button
-                          className={`btn-ghost ${picker.creating === "create" ? "btn-busy" : ""}`}
+                          className={`btn-ghost ${picker.creating === "create" ? busyCls(picker.creatingRequestId) : ""}`}
                           disabled={!picker.query.trim() || busy}
                           onClick={createIssueOnly}
                         >
                           Create Issue
                         </button>
                         <button
-                          className={`btn-save ${picker.creating === "spawn" ? "btn-busy" : ""}`}
+                          className={`btn-save ${picker.creating === "spawn" ? busyCls(picker.creatingRequestId) : ""}`}
                           disabled={!picker.query.trim() || busy}
                           onClick={createAndSpawn}
                         >
