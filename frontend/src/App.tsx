@@ -160,6 +160,10 @@ function Settings() {
   const [repoLoadError, setRepoLoadError] = useState<string | null>(null);
   // Set when an autosave write fails.
   const [repoSaveError, setRepoSaveError] = useState<string | null>(null);
+  // Whether the Remove Repo confirm is showing for the selected repo.
+  const [repoRemoveConfirm, setRepoRemoveConfirm] = useState(false);
+  // Set when removing the selected repo fails.
+  const [repoRemoveError, setRepoRemoveError] = useState<string | null>(null);
   // Last persisted form data, to skip the no-op onChange JsonForms fires on load.
   const lastSavedRef = useRef<string>("");
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -262,6 +266,8 @@ function Settings() {
     setLoadedRepo(null);
     setRepoLoadError(null);
     setRepoSaveError(null);
+    setRepoRemoveConfirm(false);
+    setRepoRemoveError(null);
     api.getRepoSettings(selectedRepo)
       .then((s) => {
         // Seed the baseline so JsonForms' initial onChange (same data) is a no-op.
@@ -336,6 +342,20 @@ function Settings() {
       api.identitiesList().then(setKnownIdentities);
     } catch (e) {
       setBrowse((prev) => ({ ...prev, identityId: iid, loading: false, error: String(e) }));
+    }
+  }
+
+  // Untrack the selected repo (delete its settings file). Cancels any pending
+  // debounced autosave first so it can't recreate the file after the delete.
+  async function handleRemoveRepo(repo: string) {
+    setRepoRemoveConfirm(false);
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    try {
+      await api.removeRepo(repo);
+      setRepos((prev) => prev.filter((r) => r !== repo));
+      setSelection(null);
+    } catch (e) {
+      setRepoRemoveError(String(e));
     }
   }
 
@@ -597,6 +617,33 @@ function Settings() {
                 ) : (
                   <p className="session-hint" style={{ paddingTop: 2 }}>Loading…</p>
                 )}
+                {/* Removal works even when the settings file failed to load —
+                    deleting the file is the fix for an unparseable one. */}
+                <div className="settings-group">
+                  {repoRemoveError && (
+                    <div className="cleanup-confirm">
+                      <p className="cleanup-lead">Couldn't remove repo</p>
+                      <pre className="tool-error-message">{repoRemoveError}</pre>
+                      <div className="issue-actions">
+                        <button className="btn-ghost" onClick={() => setRepoRemoveError(null)}>Dismiss</button>
+                      </div>
+                    </div>
+                  )}
+                  {repoRemoveConfirm ? (
+                    <div className="cleanup-confirm">
+                      <p className="cleanup-lead">Remove {selection.repo} from mAIestro?</p>
+                      <p className="cleanup-confirm-body">
+                        Worktrees, checkouts, and any work in them are kept on disk.
+                      </p>
+                      <div className="issue-actions">
+                        <button className="btn-danger" onClick={() => handleRemoveRepo(selection.repo)}>Remove</button>
+                        <button className="btn-ghost" onClick={() => setRepoRemoveConfirm(false)}>Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button className="btn-danger" onClick={() => setRepoRemoveConfirm(true)}>Remove Repo</button>
+                  )}
+                </div>
               </div>
             </>
           ) : (
@@ -1162,6 +1209,10 @@ function MainView() {
   const [openRepoErr, setOpenRepoErr] = useState<Record<string, string>>({});
   // Target of the hide/snooze dialog, or null when closed.
   const [hideTarget, setHideTarget] = useState<HideTarget | null>(null);
+  // Repo (full_name) awaiting remove confirmation; at most one at a time.
+  const [removeConfirm, setRemoveConfirm] = useState<string | null>(null);
+  // Per-repo removal failure message, keyed by repo full_name.
+  const [removeErr, setRemoveErr] = useState<Record<string, string>>({});
 
   const refreshSessions = useCallback(() => {
     api.sessionsList().then((list) => {
@@ -1615,6 +1666,20 @@ function MainView() {
     runTeardown(s.id, false, false);
   }
 
+  // Untrack a repo (delete its settings file). Worktrees and session records
+  // stay on disk; the repo and its work items just drop out of the dashboard.
+  async function removeRepo(repo: string) {
+    setRemoveConfirm(null);
+    setRemoveErr((e) => { const { [repo]: _, ...rest } = e; return rest; });
+    try {
+      await api.removeRepo(repo);
+      setRepos((prev) => prev.filter((r) => r !== repo));
+    } catch (err) {
+      setRemoveErr((e) => ({ ...e, [repo]: String(err) }));
+    }
+    refreshAll();
+  }
+
   // Set or clear (hidden = null → unhide) hide/snooze state for a repo or work
   // item, then refresh so the dimming/filtering reflects the new state.
   async function applyVisibility(target: HideTarget, hidden: HideState | null) {
@@ -1731,7 +1796,36 @@ function MainView() {
                       Hide…
                     </button>
                   )}
+                  <button className="command-btn" onClick={() => { setRepoMenuOpen(null); setRemoveConfirm(repo); }}>
+                    Remove…
+                  </button>
                 </div>
+                {removeConfirm === repo && (
+                  <div className="cleanup-confirm">
+                    <p className="cleanup-lead">Remove {repo} from mAIestro?</p>
+                    <p className="cleanup-confirm-body">
+                      Worktrees, checkouts, and any work in them are kept on disk.
+                    </p>
+                    <div className="issue-actions">
+                      <button className="btn-danger" onClick={() => removeRepo(repo)}>Remove</button>
+                      <button className="btn-ghost" onClick={() => setRemoveConfirm(null)}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+                {removeErr[repo] && (
+                  <div className="cleanup-confirm">
+                    <p className="cleanup-lead">Couldn't remove repo</p>
+                    <pre className="tool-error-message">{removeErr[repo]}</pre>
+                    <div className="issue-actions">
+                      <button
+                        className="btn-ghost"
+                        onClick={() => setRemoveErr((e) => { const { [repo]: _, ...rest } = e; return rest; })}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {openRepoErr[repo] && (
                   <div className="cleanup-confirm">
                     <p className="cleanup-lead">Couldn't open in VS Code</p>
