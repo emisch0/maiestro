@@ -246,6 +246,20 @@ pub fn repo_settings_set(repo: String, mut settings: RepoSettings) -> Result<(),
     save(&repo, &settings).map_err(|e| e.to_string())
 }
 
+/// Untrack a repo by deleting its settings file. Idempotent — a missing file is
+/// already the goal state ("not tracked"). Worktrees, checkouts, and session
+/// records are untouched; sessions for the repo simply stop rendering because
+/// the popover only shows sessions under tracked repos.
+#[tauri::command]
+pub fn repo_remove(repo: String) -> Result<(), String> {
+    crate::log_invoke!("repo_remove", repo = %repo);
+    match std::fs::remove_file(settings_path(&repo)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Failed to remove repo settings: {e}")),
+    }
+}
+
 /// Set (or clear) a repo's hide/snooze state. `hidden = None` unhides. Errors on
 /// an unparseable existing file rather than clobbering it with defaults.
 #[tauri::command]

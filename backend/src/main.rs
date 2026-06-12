@@ -182,6 +182,7 @@ fn main() {
             repo_settings::repo_settings_get,
             repo_settings::repo_settings_set,
             repo_settings::repo_set_visibility,
+            repo_settings::repo_remove,
             repo_settings::repo_scan_env_files,
             github_list_repos,
             github_list_issues,
