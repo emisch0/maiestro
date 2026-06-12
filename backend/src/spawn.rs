@@ -513,7 +513,7 @@ pub async fn open_in_editor(work_dir: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn open_repo_in_editor(repo: String) -> Result<(), String> {
     crate::log_invoke!("open_repo_in_editor", repo = %repo);
-    let settings = crate::repo_settings::repo_settings_get(repo);
+    let settings = crate::repo_settings::repo_settings_get(repo)?;
     let checkout = expand_tilde(settings.checkout_dir.as_deref().unwrap_or_default());
     if !checkout.join(".git").exists() {
         return Err(format!("checkout dir is not a git repo: {}", checkout.display()));
@@ -579,7 +579,7 @@ struct SpawnDecision<'a> {
 async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     let SpawnDecision { repo, issue_number, issue_url, default_branch, short_label, color, emoji, force_new } = d;
 
-    let settings = crate::repo_settings::repo_settings_get(repo.to_string());
+    let settings = crate::repo_settings::repo_settings_get(repo.to_string())?;
     let identity_id = settings
         .identity_id
         .clone()
@@ -598,8 +598,8 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
 
     // Worktree location prefix: the full path is `<prefix><workspace>/<repo>`
     // (string concat — the trailing `work-` is part of the dir name). Unset
-    // falls back to the original `~/src/work-` behavior.
-    let worktree_prefix = settings.worktree_prefix.as_deref().unwrap_or("~/src/work-").to_string();
+    // falls back to the schema default.
+    let worktree_prefix = effective_worktree_prefix(settings.worktree_prefix.as_deref());
     let worktree_dir = |workspace: &str| expand_tilde(&format!("{worktree_prefix}{workspace}")).join(&repo_name);
 
     // Workspace name: "<n>-<slug>".
@@ -716,6 +716,10 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         warnings.push(format!("could not record session: {e}"));
     }
 
+    // Run the repo's post-spawn commands (e.g. `pnpm install`) in the new
+    // worktree before opening the editor, so the session starts ready.
+    warnings.extend(run_post_spawn_commands(&work_dir, &settings.post_spawn_commands).await);
+
     open_vscode(&work_dir)?;
 
     tracing::info!(repo = %repo, issue = issue_number, branch = %branch, reused = false, "spawned workspace");
@@ -747,7 +751,7 @@ async fn issue_facts(gh: &GitHub, repo: &str, issue_number: u64) -> Result<(Stri
 #[tauri::command]
 pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
     crate::log_invoke!("spawn_work", repo = %repo, issue = issue_number, force_new);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -776,6 +780,66 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
 fn which(bin: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|d| d.join(bin)).find(|p| p.is_file())
+}
+
+/// The effective worktree-path prefix: the configured value, or the schema
+/// default (`/properties/worktree_prefix/default`) when unset or empty. The
+/// default lives in the JSON schema only — no hardcoded fallback here. Takes the
+/// field rather than the whole settings so callers that have already moved other
+/// fields out can still use it.
+fn effective_worktree_prefix(configured: Option<&str>) -> String {
+    configured
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::repo_settings::schema_default("/properties/worktree_prefix/default"))
+}
+
+/// Run a repo's post-spawn commands in the freshly-created worktree, in order.
+/// Each runs via the user's login shell (`$SHELL -lc`) so PATH and tool managers
+/// (nvm, pnpm, asdf, …) are available — mAIestro's own environment is minimal and
+/// not sourced from a profile. Stops at the first command that fails or times
+/// out; returns a warning per problem (the worktree is left in place either way,
+/// never torn down). A blank command is skipped.
+async fn run_post_spawn_commands(work_dir: &Path, commands: &[String]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    for cmd in commands {
+        let cmd = cmd.trim();
+        if cmd.is_empty() {
+            continue;
+        }
+        tracing::info!(command = %cmd, "running post-spawn command");
+        let run = tokio::process::Command::new(&shell)
+            .args(["-l", "-c", cmd])
+            .current_dir(work_dir)
+            .output();
+        // 10 minutes is generous for installs but still bounds a hung command so
+        // it can't freeze the spawn forever.
+        let output = tokio::time::timeout(std::time::Duration::from_secs(600), run).await;
+        match output {
+            Ok(Ok(out)) if out.status.success() => {
+                tracing::info!(command = %cmd, "post-spawn command succeeded");
+            }
+            Ok(Ok(out)) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let code = out.status.code().unwrap_or(-1);
+                tracing::error!(command = %cmd, code, stderr = %snippet(&stderr), "post-spawn command failed");
+                warnings.push(format!("post-spawn command failed (exit {code}): {cmd}"));
+                break;
+            }
+            Ok(Err(e)) => {
+                tracing::error!(command = %cmd, error = %e, "could not run post-spawn command");
+                warnings.push(format!("could not run post-spawn command '{cmd}': {e}"));
+                break;
+            }
+            Err(_) => {
+                tracing::error!(command = %cmd, "post-spawn command timed out");
+                warnings.push(format!("post-spawn command timed out after 10m: {cmd}"));
+                break;
+            }
+        }
+    }
+    warnings
 }
 
 /// Resolve the `claude` binary: prefer $PATH, then common install locations
@@ -917,18 +981,12 @@ async fn claude_text(
 async fn draft_issue(
     checkout: &Path,
     idea: &str,
+    instruction: &str,
     activity: &ClaudeActivity,
 ) -> Result<(String, String, String), String> {
-    let prompt = format!(
-        "Based on this idea for a change to this codebase, draft a GitHub issue. \
-         Reply with ONLY a JSON object of the form \
-         {{\"title\": string, \"body\": string, \"short_title\": string}}. \
-         The title is a concise summary (max ~70 characters). The body is clear markdown \
-         describing the work. The short_title is a short, human-readable session label — \
-         plain words with normal spaces and capitalization (NOT a slug or branch name, so \
-         no dashes/underscores), at most ~5 words / 40 characters, no issue number, no \
-         trailing punctuation; it should read well, not just be the title cut off. Idea: {idea}"
-    );
+    // Instruction (default or per-repo override) first; the idea is appended
+    // here so an override can't drop it. See prompts.rs.
+    let prompt = format!("{instruction}\n\nIdea: {idea}");
     let reply = claude_text(checkout, &prompt, "drafting the issue", Some(activity)).await?;
     parse_issue_draft(&reply)
 }
@@ -961,18 +1019,17 @@ fn parse_short_label(text: &str) -> Result<String, String> {
 /// existing issue's title + body into a short session label. The spawn preview
 /// opens immediately with the heuristic label and swaps this in when it
 /// arrives; any error here just leaves the heuristic in place.
-async fn suggest_short_label(checkout: &Path, title: &str, body: &str) -> Result<String, String> {
+async fn suggest_short_label(
+    checkout: &Path,
+    title: &str,
+    body: &str,
+    instruction: &str,
+) -> Result<String, String> {
     // Issue bodies can be arbitrarily long; the label only needs the gist.
     let body: String = body.chars().take(4000).collect();
-    let prompt = format!(
-        "Summarize this GitHub issue as a short workspace label. Reply with ONLY \
-         the label, nothing else. The label is a short, human-readable session \
-         label — plain words with normal spaces and capitalization (NOT a slug or \
-         branch name, so no dashes/underscores), 2-4 words, at most 40 characters, \
-         no issue number, no trailing punctuation. Prefer concrete keywords from \
-         the issue (component names, actions) over a generic rephrasing.\n\n\
-         Issue title: {title}\n\nIssue body:\n{body}"
-    );
+    // Instruction (default or per-repo override) first; the issue text is
+    // appended here so an override can't drop it. See prompts.rs.
+    let prompt = format!("{instruction}\n\nIssue title: {title}\n\nIssue body:\n{body}");
     // No activity signal: this is a fire-and-forget label swap with no busy
     // element in the UI to color.
     let reply = claude_text(checkout, &prompt, "summarizing the issue", None).await?;
@@ -985,7 +1042,7 @@ async fn suggest_short_label(checkout: &Path, title: &str, body: &str) -> Result
 #[tauri::command]
 pub async fn suggest_short_title(repo: String, issue_number: u64) -> Result<String, String> {
     crate::log_invoke!("suggest_short_title", repo = %repo, issue = issue_number);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -995,7 +1052,8 @@ pub async fn suggest_short_title(repo: String, issue_number: u64) -> Result<Stri
     }
     let gh = GitHub::for_identity(&identity_id)?;
     let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
-    suggest_short_label(&checkout, &issue_title, &issue_body).await
+    let instruction = crate::prompts::short_label(&settings.prompts);
+    suggest_short_label(&checkout, &issue_title, &issue_body, &instruction).await
 }
 
 /// A drafted issue ready to create, or a signal that Claude couldn't produce a
@@ -1027,7 +1085,7 @@ async fn resolve_draft(
         return Err("Describe what you want to work on first.".into());
     }
 
-    let settings = crate::repo_settings::repo_settings_get(repo.to_string());
+    let settings = crate::repo_settings::repo_settings_get(repo.to_string())?;
     let identity_id = settings
         .identity_id
         .clone()
@@ -1048,7 +1106,8 @@ async fn resolve_draft(
             warning: Some("created from your text without an AI draft".to_string()),
         }
     } else {
-        match draft_issue(&checkout, idea, activity).await {
+        let instruction = crate::prompts::draft_issue(&settings.prompts);
+        match draft_issue(&checkout, idea, &instruction, activity).await {
             Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title, warning: None },
             // Couldn't draft: let the user confirm before creating anything.
             Err(message) => DraftStep::NeedsConfirmation { message },
@@ -1102,7 +1161,7 @@ pub async fn create_issue_direct(repo: String, title: String, body: String) -> R
     if title.is_empty() {
         return Err("Issue title can't be empty.".into());
     }
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -1168,7 +1227,7 @@ pub struct SpawnPlan {
 #[tauri::command]
 pub async fn prepare_spawn(repo: String, issue_number: u64) -> Result<SpawnPlan, String> {
     crate::log_invoke!("prepare_spawn", repo = %repo, issue = issue_number);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -1253,7 +1312,7 @@ pub struct SpawnEdits {
 #[tauri::command]
 pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> Result<SpawnResult, String> {
     crate::log_invoke!("confirm_spawn", repo = %repo, force_new);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -1422,7 +1481,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
 
     // PR state via the REST API (best-effort: needs an identity + token).
     let mut pr_merged = false;
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     if let Some(identity_id) = settings.identity_id {
         if let Ok(gh) = GitHub::for_identity(&identity_id) {
             if let Ok(prs) = gh.pulls_for_branch(&session.repo, &branch).await {
@@ -1530,8 +1589,8 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     //    on the path actually starting with the repo's configured worktree
     //    prefix so we never remove_dir_all something outside it.
     if let Some(parent) = work_dir.parent() {
-        let prefix = settings.worktree_prefix.as_deref().unwrap_or("~/src/work-");
-        let expanded = expand_tilde(prefix);
+        let prefix = effective_worktree_prefix(settings.worktree_prefix.as_deref());
+        let expanded = expand_tilde(&prefix);
         let under_prefix = parent.to_string_lossy().starts_with(&*expanded.to_string_lossy());
         if under_prefix && parent.exists() {
             if let Err(e) = std::fs::remove_dir_all(parent) {
@@ -1593,7 +1652,7 @@ pub async fn session_pr(session_id: String) -> Result<Option<PrLink>, String> {
     let Some(session) = crate::sessions::get(&session_id) else {
         return Ok(None);
     };
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     let Some(identity_id) = settings.identity_id else {
         return Ok(None);
     };
@@ -1672,7 +1731,7 @@ pub async fn session_create_pr(
         return Err("This worktree has uncommitted changes. Commit them first, then create the PR.".to_string());
     }
 
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -1703,12 +1762,11 @@ pub async fn session_create_pr(
     let issue_body = issue["body"].as_str().unwrap_or("");
 
     let summary = change_summary(&work_dir, &base);
+    // Instruction (default or per-repo override) first; the issue context and
+    // diff are appended here so an override can't drop them. See prompts.rs.
+    let instruction = crate::prompts::draft_pr(&settings.prompts);
     let prompt = format!(
-        "Draft a GitHub pull request description for the changes below. Reply with ONLY a \
-         JSON object of the form {{\"title\": string, \"body\": string}}. The title is a \
-         concise summary of the overall change (max ~70 characters). The body is clear \
-         markdown explaining what changed and why; do not include a heading that repeats the \
-         title. This PR resolves issue #{number} (\"{issue_title}\"). \
+        "{instruction}\n\nThis PR resolves issue #{number} (\"{issue_title}\").\
          \n\nOriginating issue body:\n{issue_body}\n\nChanges:\n{summary}",
         number = session.issue_number,
     );
@@ -1790,7 +1848,7 @@ pub async fn session_pr_checks(session_id: String) -> Result<Option<PrChecks>, S
     let Some(session) = crate::sessions::get(&session_id) else {
         return Ok(None);
     };
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     let Some(identity_id) = settings.identity_id else {
         return Ok(None);
     };
@@ -1884,7 +1942,7 @@ pub async fn session_merge_pr(
         .ok_or_else(|| format!("session not found: {session_id}"))?;
     let work_dir = PathBuf::from(&session.work_dir);
     let branch = session.branch.clone();
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;

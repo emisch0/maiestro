@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maiestro.app/schemas/repo-settings.schema.json",
+  "title": "RepoSettings",
+  "description": "Per-repo settings stored at ~/.maiestro/repos/<owner>-<name>.json. This schema is the hand-written specification for the file format; the Rust RepoSettings struct must conform to it (a unit test enforces the two stay in sync). Unknown fields are tolerated so files written by a newer app version still load in an older one.",
+  "type": "object",
+  "properties": {
+    "repo": {
+      "type": "string",
+      "description": "Canonical \"owner/name\" string. Stored inside the file so repos_list can reconstruct the list without parsing the filename (which uses \"-\" and is ambiguous)."
+    },
+    "identity_id": {
+      "type": ["string", "null"],
+      "description": "Identity used for credentials and agent spawning for this repo."
+    },
+    "checkout_dir": {
+      "type": ["string", "null"],
+      "description": "Absolute path to the local checkout directory."
+    },
+    "worktree_prefix": {
+      "type": ["string", "null"],
+      "default": "~/src/work-",
+      "description": "Prefix for worktree locations. The full worktree path is `<worktree_prefix><workspace>/<repo>` (a string concatenation — the trailing segment is part of the directory name, not a path component). empty falls back to the default. Tilde-expanded at the use site."
+    },
+    "env_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Env files relative to checkout_dir to source when launching user-facing tools (VSCode, Terminal) for this repo."
+    },
+    "post_spawn_commands": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Shell commands to run in a freshly-created worktree, in order, right after it's created and before the editor opens (e.g. `pnpm install`). Run via your login shell so PATH and tool managers are available. Stops at the first command that fails. Empty by default."
+    },
+    "hidden": {
+      "type": ["object", "null"],
+      "title": "HideState",
+      "description": "Repo-level hide/snooze state. null = visible. A hidden repo hides its work items too. Per-work-item state lives on the session record, not here.",
+      "properties": {
+        "snooze_until": {
+          "type": ["integer", "null"],
+          "description": "Unix-epoch millis until which the item stays hidden. null = hidden indefinitely. Expiry is resolved on the frontend at render time; the backend stores the timestamp verbatim."
+        }
+      }
+    },
+    "prompts": {
+      "type": ["object", "null"],
+      "title": "PromptOverrides",
+      "description": "Per-repo overrides for the instructions sent to Claude. Each field empty/null uses the built-in default. The runtime context (your idea, the issue, the diff) is appended automatically and is not part of these overrides.",
+      "properties": {
+        "draft_issue": {
+          "type": ["string", "null"],
+          "default": "Based on this idea for a change to this codebase, draft a GitHub issue. Reply with ONLY a JSON object of the form {\"title\": string, \"body\": string, \"short_title\": string}. The title is a concise summary (max ~70 characters). The body is clear markdown describing the work. The short_title is a short, human-readable session label — plain words with normal spaces and capitalization (NOT a slug or branch name, so no dashes/underscores), at most ~5 words / 40 characters, no issue number, no trailing punctuation; it should read well, not just be the title cut off.",
+          "description": "Instruction for drafting a GitHub issue from your idea."
+        },
+        "short_label": {
+          "type": ["string", "null"],
+          "default": "Summarize this GitHub issue as a short workspace label. Reply with ONLY the label, nothing else. The label is a short, human-readable session label — plain words with normal spaces and capitalization (NOT a slug or branch name, so no dashes/underscores), 2-4 words, at most 40 characters, no issue number, no trailing punctuation. Prefer concrete keywords from the issue (component names, actions) over a generic rephrasing.",
+          "description": "Instruction for summarizing an issue into a short workspace label."
+        },
+        "draft_pr": {
+          "type": ["string", "null"],
+          "default": "Draft a GitHub pull request description for the changes below. Reply with ONLY a JSON object of the form {\"title\": string, \"body\": string}. The title is a concise summary of the overall change (max ~70 characters). The body is clear markdown explaining what changed and why; do not include a heading that repeats the title.",
+          "description": "Instruction for drafting a pull request description from the diff."
+        }
+      }
+    }
+  }
+}

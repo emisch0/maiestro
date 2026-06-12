@@ -6,12 +6,22 @@ export interface HideState {
   snooze_until: number | null;
 }
 
+/** Per-repo overrides for the AI prompt instructions. Each field null/empty
+ *  uses the built-in default. The runtime context is appended automatically. */
+export interface PromptOverrides {
+  draft_issue: string | null;
+  short_label: string | null;
+  draft_pr: string | null;
+}
+
 export interface RepoSettings {
   checkout_dir: string | null;
   worktree_prefix: string | null;
   env_files: string[];
+  post_spawn_commands: string[];
   identity_id: string | null;
   hidden: HideState | null;
+  prompts: PromptOverrides;
 }
 
 export interface GHRepo {
@@ -179,6 +189,11 @@ export const api = {
 
   listRepos: () =>
     invoke<string[]>("repos_list"),
+
+  /** The hand-written JSON Schema for per-repo settings, used by the Settings
+   *  window's JSON Forms renderer. */
+  repoSettingsSchema: () =>
+    invoke<Record<string, unknown>>("repo_settings_schema"),
 
   getRepoSettings: (repo: string) =>
     invoke<RepoSettings>("repo_settings_get", { repo }),

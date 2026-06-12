@@ -1833,3 +1833,169 @@ body {
   font-family: var(--font);
   font-size: 13px;
 }
+
+/* ── JSON Forms (per-repo settings detail) ──────────────────────────────────
+   The repo detail form is rendered by JSON Forms' vanilla renderers (issue
+   #57). These rules dress the vanilla output classes (.control, .input,
+   .select, .validation…) and our two custom renderers (.jsf-*) to match the
+   hand-built inputs. All colors come from theme tokens, so one rule set serves
+   both light and dark. */
+.jsf-root {
+  display: flex;
+  flex-direction: column;
+}
+
+/* VerticalLayout: generous gap between fields (VS Code settings spacing). */
+.jsf-root .vertical-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.jsf-root .vertical-layout-item {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Each field is a heading-over-control stack: bold label, muted description,
+   then the control — like VS Code's settings list. */
+.jsf-root .control,
+.jsf-root .jsf-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Labels: bold and readable, normal case (not the app's tiny uppercase
+   field-label), in the primary text color. */
+.jsf-root label,
+.jsf-root .jsf-label {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0;
+  text-transform: none;
+  margin: 0;
+}
+
+/* A touch more breathing room between the description and the control below. */
+.jsf-root .jsf-control > .jsf-help {
+  margin-bottom: 2px;
+}
+
+/* Inputs and selects match .text-input. */
+.jsf-root .input,
+.jsf-root .select,
+.jsf-root input[type="text"],
+.jsf-root input[type="number"],
+.jsf-root select {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: var(--font);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+  transition: border-color 0.12s;
+}
+.jsf-root .input:focus,
+.jsf-root .select:focus,
+.jsf-root input:focus,
+.jsf-root select:focus {
+  border-color: var(--accent-border);
+}
+
+/* Description help text (vanilla puts it in .validation when the field is
+   valid; our custom renderers use .jsf-help). Made selectable so the help text
+   can be copied — the window otherwise sets user-select: none. */
+.jsf-root .validation,
+.jsf-root .jsf-help {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+/* The worktree-prefix field surfaces its schema default as a placeholder,
+   styled to read as a disabled default rather than ordinary ghost text. */
+.jsf-root input.jsf-default-hint::placeholder {
+  color: var(--muted);
+  opacity: 0.9;
+  font-style: italic;
+}
+
+/* Post-spawn command rows: a monospace editable input per command. */
+.jsf-root input.jsf-cmd-input {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}
+
+/* ── AI prompt overrides ──────────────────────────────────────────────────── */
+.jsf-root .jsf-prompts {
+  gap: 8px;
+}
+.jsf-root .jsf-prompt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.jsf-root .jsf-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.jsf-root .jsf-prompt-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.jsf-root .jsf-prompt-reset {
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.jsf-root .jsf-prompt-reset:hover {
+  text-decoration: underline;
+}
+.jsf-root textarea.jsf-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  line-height: 1.45;
+  font-family: var(--font);
+}
+/* When showing the unmodified default, render the text muted so it reads as a
+   default the user can edit, not a committed override. */
+.jsf-root textarea.jsf-textarea-default {
+  color: var(--muted);
+}
+.jsf-root textarea.jsf-textarea-default:focus {
+  color: var(--text);
+}
+
+/* Validation errors tint red. */
+.jsf-root .validation_error {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--red);
+}
+
+/* Hide the empty checkbox vanilla wraps some controls in; not used here. */
+.jsf-root .control:empty {
+  display: none;
+}

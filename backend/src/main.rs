@@ -8,6 +8,7 @@ mod links;
 mod logging;
 mod plugin;
 mod plugins;
+mod prompts;
 mod repo_settings;
 mod sessions;
 mod spawn;
@@ -177,6 +178,7 @@ fn main() {
             credentials::credentials_delete,
             plugins_list_credential_types,
             repo_settings::repos_list,
+            repo_settings::repo_settings_schema,
             repo_settings::repo_settings_get,
             repo_settings::repo_settings_set,
             repo_settings::repo_set_visibility,
@@ -225,6 +227,10 @@ fn main() {
             restore_popover_size(app.handle());
             // Same for the Settings window, restored before its first show.
             restore_settings_size(app.handle());
+
+            // Mirror the embedded per-repo settings schema to
+            // ~/.maiestro/schemas/ so hand-editors can `$schema`-reference it.
+            repo_settings::write_schema_file();
 
             // Live per-session status: drop orphaned status files, then watch
             // ~/.maiestro/status/ and forward changes to the popover as
