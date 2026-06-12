@@ -11,6 +11,7 @@ import {
   RepoFormDefaults,
 } from "./RepoSettingsForm";
 import { applyTheme, initTheme } from "./theme";
+import LogoIcon from "./icons/logo.svg?react";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
@@ -1632,6 +1633,7 @@ function MainView() {
     <main className="panel">
       <ResizeGrips />
       <header className="panel-header">
+        <LogoIcon className="panel-logo" aria-hidden="true" />
         <h1>m<span className="ai">AI</span>estro</h1>
         <button
           className={`icon-btn ${showHidden ? "icon-btn--active" : ""}`}
