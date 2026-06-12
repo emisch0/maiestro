@@ -1,6 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
 import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, Theme, WorkState } from "./api";
+import { JsonForms } from "@jsonforms/react";
+import {
+  repoSettingsRenderers,
+  repoSettingsCells,
+  repoSettingsUISchema,
+  sanitizeSchemaForForm,
+} from "./RepoSettingsForm";
 import { applyTheme, initTheme } from "./theme";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
@@ -134,11 +141,17 @@ function Settings() {
   const [credTypes, setCredTypes] = useState<CredentialTypeDto[]>([]);
   const [credStates, setCredStates] = useState<Record<string, CredState>>({});
   const [repoSettings, setRepoSettings] = useState<RepoSettings>({ checkout_dir: null, worktree_prefix: null, env_files: [], identity_id: null, hidden: null });
-  const [checkoutDraft, setCheckoutDraft] = useState("");
-  const [worktreePrefixDraft, setWorktreePrefixDraft] = useState("");
-  const [addingEnvFile, setAddingEnvFile] = useState(false);
-  const [envFileInput, setEnvFileInput] = useState("");
-  const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "done">("idle");
+  // The hand-written JSON Schema, fetched from the backend, that drives the
+  // repo-detail form. null until loaded.
+  const [repoSchema, setRepoSchema] = useState<Record<string, unknown> | null>(null);
+  // Set when the backend rejects a repo's settings file on load (bad JSON or a
+  // schema violation); shown as a banner instead of a form full of defaults.
+  const [repoLoadError, setRepoLoadError] = useState<string | null>(null);
+  // Set when an autosave write fails.
+  const [repoSaveError, setRepoSaveError] = useState<string | null>(null);
+  // Last persisted form data, to skip the no-op onChange JsonForms fires on load.
+  const lastSavedRef = useRef<string>("");
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [theme, setThemeState] = useState<Theme>("system");
 
   useEffect(() => {
@@ -152,6 +165,7 @@ function Settings() {
     api.identitiesList().then(setKnownIdentities);
     api.getDefaultIdentity().then((id) => { if (id) setIdentityId(id); });
     api.getTheme().then(setThemeState);
+    api.repoSettingsSchema().then((s) => setRepoSchema(sanitizeSchemaForForm(s)));
   }, []);
 
   // Persist and apply the picked theme. We apply locally for immediacy; the
@@ -227,61 +241,45 @@ function Settings() {
   useEffect(() => {
     if (repoView.mode !== "detail") return;
     const repo = repoView.repo;
-    api.getRepoSettings(repo).then((s) => {
-      setRepoSettings(s);
-      setCheckoutDraft(s.checkout_dir ?? "");
-      setWorktreePrefixDraft(s.worktree_prefix ?? "");
-    });
-    setScanStatus("idle");
-    setAddingEnvFile(false);
-    setEnvFileInput("");
+    setRepoLoadError(null);
+    setRepoSaveError(null);
+    api.getRepoSettings(repo)
+      .then((s) => {
+        setRepoSettings(s);
+        // Seed the baseline so JsonForms' initial onChange (same data) is a no-op.
+        lastSavedRef.current = JSON.stringify(s);
+      })
+      .catch((e) => setRepoLoadError(String(e)));
   }, [repoView.mode === "detail" ? repoView.repo : null]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function saveRepoSettings(next: RepoSettings) {
-    if (repoView.mode !== "detail") return;
-    await api.setRepoSettings(repoView.repo, next);
-    setRepoSettings(next);
-  }
+  // Extra data the custom renderers (identity select, env-files Scan) read via
+  // JsonForms' `config`. Memoized so the form isn't needlessly re-keyed.
+  const repoFormConfig = useMemo(
+    () => ({
+      showUnfocusedDescription: true as const,
+      knownIdentities,
+      checkoutDir: repoSettings.checkout_dir,
+    }),
+    [knownIdentities, repoSettings.checkout_dir],
+  );
 
-  async function handleCheckoutDirCommit() {
-    const dir = checkoutDraft.trim() || null;
-    await saveRepoSettings({ ...repoSettings, checkout_dir: dir });
-  }
-
-  async function handleWorktreePrefixCommit() {
-    const prefix = worktreePrefixDraft.trim() || null;
-    await saveRepoSettings({ ...repoSettings, worktree_prefix: prefix });
-  }
-
-  async function handleScanEnvFiles() {
-    if (!repoSettings.checkout_dir) return;
-    setScanStatus("scanning");
-    try {
-      const files = await api.scanEnvFiles(repoSettings.checkout_dir);
-      await saveRepoSettings({ ...repoSettings, env_files: files });
-      setScanStatus("done");
-      setTimeout(() => setScanStatus("idle"), 2000);
-    } catch {
-      setScanStatus("idle");
-    }
-  }
-
-  async function handleAddEnvFile() {
-    const path = envFileInput.trim();
-    if (!path) return;
-    const files = repoSettings.env_files.includes(path)
-      ? repoSettings.env_files
-      : [...repoSettings.env_files, path];
-    await saveRepoSettings({ ...repoSettings, env_files: files });
-    setEnvFileInput("");
-    setAddingEnvFile(false);
-  }
-
-  async function handleRemoveEnvFile(path: string) {
-    await saveRepoSettings({
-      ...repoSettings,
-      env_files: repoSettings.env_files.filter((f) => f !== path),
-    });
+  // Autosave on change, debounced, skipped while ajv reports errors. JsonForms
+  // preserves fields not in the UI schema (repo, hidden), so they round-trip.
+  function handleRepoFormChange(repo: string, data: RepoSettings, errors: unknown[] | undefined) {
+    setRepoSettings(data);
+    if ((errors?.length ?? 0) > 0) return;
+    const serialized = JSON.stringify(data);
+    if (serialized === lastSavedRef.current) return;
+    lastSavedRef.current = serialized;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(async () => {
+      try {
+        await api.setRepoSettings(repo, data);
+        setRepoSaveError(null);
+      } catch (e) {
+        setRepoSaveError(String(e));
+      }
+    }, 400);
   }
 
   // Adopt an identity as the active one and remember it as the default so it is
@@ -488,131 +486,43 @@ function Settings() {
             <span className="detail-title">{repoView.repo}</span>
           </div>
           <div className="cred-list">
-
-            {/* ── Identity ── */}
-            <div className="settings-group">
-              <div className="settings-group-header">
-                <span className="field-label" style={{ marginBottom: 0 }}>Identity</span>
-              </div>
-              {knownIdentities.length === 0 ? (
-                <p className="session-hint" style={{ paddingTop: 2 }}>
-                  No identities configured. Go to the Identity tab first.
+            {repoLoadError ? (
+              // The backend rejected this repo's settings file (bad JSON or a
+              // schema violation). Show the error rather than a form full of
+              // defaults that would clobber the file on the next save.
+              <div className="cleanup-confirm">
+                <p className="cleanup-confirm-body">
+                  Couldn't load settings for this repo:
                 </p>
-              ) : (
-                <select
-                  className="text-input profile-select"
-                  value={repoSettings.identity_id ?? ""}
-                  onChange={(e) => saveRepoSettings({ ...repoSettings, identity_id: e.target.value || null })}
-                >
-                  <option value="">— none —</option>
-                  {knownIdentities.map((iid) => (
-                    <option key={iid} value={iid}>{iid}</option>
-                  ))}
-                </select>
-              )}
-            </div>
-
-            {/* ── Checkout directory ── */}
-            <div className="settings-group">
-              <div className="settings-group-header">
-                <span className="field-label" style={{ marginBottom: 0 }}>Checkout directory</span>
+                <p className="cleanup-confirm-body" style={{ opacity: 0.85, fontFamily: "var(--font-mono, monospace)", fontSize: 11 }}>
+                  {repoLoadError}
+                </p>
+                <p className="cleanup-confirm-body" style={{ opacity: 0.7 }}>
+                  Fix the file by hand, then reopen this repo.
+                </p>
               </div>
-              <div className="cred-controls">
-                <input
-                  className="text-input"
-                  type="text"
-                  placeholder="~/src/repo-name"
-                  value={checkoutDraft}
-                  onChange={(e) => setCheckoutDraft(e.target.value)}
-                  onBlur={handleCheckoutDirCommit}
-                  onKeyDown={(e) => e.key === "Enter" && handleCheckoutDirCommit()}
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoCorrect="off"
+            ) : repoSchema ? (
+              <div className="jsf-root">
+                {repoSaveError && (
+                  <div className="cleanup-confirm">
+                    <p className="cleanup-confirm-body">Couldn't save: {repoSaveError}</p>
+                  </div>
+                )}
+                <JsonForms
+                  schema={repoSchema}
+                  uischema={repoSettingsUISchema}
+                  data={repoSettings}
+                  renderers={repoSettingsRenderers}
+                  cells={repoSettingsCells}
+                  config={repoFormConfig}
+                  onChange={({ data, errors }) =>
+                    handleRepoFormChange(repoView.repo, data as RepoSettings, errors)
+                  }
                 />
               </div>
-            </div>
-
-            {/* ── Worktree prefix ── */}
-            <div className="settings-group">
-              <div className="settings-group-header">
-                <span className="field-label" style={{ marginBottom: 0 }}>Worktree prefix</span>
-              </div>
-              <div className="cred-controls">
-                <input
-                  className="text-input"
-                  type="text"
-                  placeholder="~/src/work-"
-                  value={worktreePrefixDraft}
-                  onChange={(e) => setWorktreePrefixDraft(e.target.value)}
-                  onBlur={handleWorktreePrefixCommit}
-                  onKeyDown={(e) => e.key === "Enter" && handleWorktreePrefixCommit()}
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                />
-              </div>
-            </div>
-
-            {/* ── Env files ── */}
-            <div className="settings-group">
-              <div className="settings-group-header">
-                <span className="field-label" style={{ marginBottom: 0 }}>Environment files</span>
-                <div style={{ display: "flex", gap: 4 }}>
-                  {repoSettings.checkout_dir && (
-                    <button
-                      className={`btn-add ${scanStatus === "scanning" ? "btn-busy" : ""}`}
-                      disabled={scanStatus === "scanning"}
-                      onClick={handleScanEnvFiles}
-                    >
-                      {scanStatus === "scanning" ? "…" : scanStatus === "done" ? "✓ Scanned" : "Scan"}
-                    </button>
-                  )}
-                  <button className="btn-add" onClick={() => setAddingEnvFile(true)}>+ Add</button>
-                </div>
-              </div>
-
-              {addingEnvFile && (
-                <div className="cred-controls">
-                  <input
-                    className="text-input"
-                    type="text"
-                    placeholder=".env or subdir/.env"
-                    value={envFileInput}
-                    autoFocus
-                    onChange={(e) => setEnvFileInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleAddEnvFile();
-                      if (e.key === "Escape") { setAddingEnvFile(false); setEnvFileInput(""); }
-                    }}
-                    spellCheck={false}
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                  />
-                  <button className="btn-save" disabled={!envFileInput.trim()} onClick={handleAddEnvFile}>Add</button>
-                  <button className="btn-clear" onClick={() => { setAddingEnvFile(false); setEnvFileInput(""); }}>✕</button>
-                </div>
-              )}
-
-              {repoSettings.env_files.length === 0 && !addingEnvFile ? (
-                <p className="session-hint" style={{ paddingTop: 2 }}>
-                  No env files. Use Scan to find .env files in the checkout directory.
-                </p>
-              ) : (
-                <div className="env-file-list">
-                  {repoSettings.env_files.map((f) => (
-                    <div key={f} className="env-file-row">
-                      <span className="env-file-path">{f}</span>
-                      <button
-                        className="btn-clear"
-                        onClick={() => handleRemoveEnvFile(f)}
-                        title="Remove"
-                      >✕</button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            ) : (
+              <p className="session-hint" style={{ paddingTop: 2 }}>Loading…</p>
+            )}
           </div>
         </>
       ) : (

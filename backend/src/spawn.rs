@@ -513,7 +513,7 @@ pub async fn open_in_editor(work_dir: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn open_repo_in_editor(repo: String) -> Result<(), String> {
     crate::log_invoke!("open_repo_in_editor", repo = %repo);
-    let settings = crate::repo_settings::repo_settings_get(repo);
+    let settings = crate::repo_settings::repo_settings_get(repo)?;
     let checkout = expand_tilde(settings.checkout_dir.as_deref().unwrap_or_default());
     if !checkout.join(".git").exists() {
         return Err(format!("checkout dir is not a git repo: {}", checkout.display()));
@@ -579,7 +579,7 @@ struct SpawnDecision<'a> {
 async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     let SpawnDecision { repo, issue_number, issue_url, default_branch, short_label, color, emoji, force_new } = d;
 
-    let settings = crate::repo_settings::repo_settings_get(repo.to_string());
+    let settings = crate::repo_settings::repo_settings_get(repo.to_string())?;
     let identity_id = settings
         .identity_id
         .clone()
@@ -747,7 +747,7 @@ async fn issue_facts(gh: &GitHub, repo: &str, issue_number: u64) -> Result<(Stri
 #[tauri::command]
 pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
     crate::log_invoke!("spawn_work", repo = %repo, issue = issue_number, force_new);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -933,7 +933,7 @@ async fn suggest_short_label(checkout: &Path, title: &str, body: &str) -> Result
 #[tauri::command]
 pub async fn suggest_short_title(repo: String, issue_number: u64) -> Result<String, String> {
     crate::log_invoke!("suggest_short_title", repo = %repo, issue = issue_number);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -974,7 +974,7 @@ async fn resolve_draft(
         return Err("Describe what you want to work on first.".into());
     }
 
-    let settings = crate::repo_settings::repo_settings_get(repo.to_string());
+    let settings = crate::repo_settings::repo_settings_get(repo.to_string())?;
     let identity_id = settings
         .identity_id
         .clone()
@@ -1046,7 +1046,7 @@ pub async fn create_issue_direct(repo: String, title: String, body: String) -> R
     if title.is_empty() {
         return Err("Issue title can't be empty.".into());
     }
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -1109,7 +1109,7 @@ pub struct SpawnPlan {
 #[tauri::command]
 pub async fn prepare_spawn(repo: String, issue_number: u64) -> Result<SpawnPlan, String> {
     crate::log_invoke!("prepare_spawn", repo = %repo, issue = issue_number);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -1191,7 +1191,7 @@ pub struct SpawnEdits {
 #[tauri::command]
 pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> Result<SpawnResult, String> {
     crate::log_invoke!("confirm_spawn", repo = %repo, force_new);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -1360,7 +1360,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
 
     // PR state via the REST API (best-effort: needs an identity + token).
     let mut pr_merged = false;
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     if let Some(identity_id) = settings.identity_id {
         if let Ok(gh) = GitHub::for_identity(&identity_id) {
             if let Ok(prs) = gh.pulls_for_branch(&session.repo, &branch).await {
@@ -1531,7 +1531,7 @@ pub async fn session_pr(session_id: String) -> Result<Option<PrLink>, String> {
     let Some(session) = crate::sessions::get(&session_id) else {
         return Ok(None);
     };
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     let Some(identity_id) = settings.identity_id else {
         return Ok(None);
     };
@@ -1606,7 +1606,7 @@ pub async fn session_create_pr(session_id: String) -> Result<PrLink, String> {
         return Err("This worktree has uncommitted changes. Commit them first, then create the PR.".to_string());
     }
 
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -1723,7 +1723,7 @@ pub async fn session_pr_checks(session_id: String) -> Result<Option<PrChecks>, S
     let Some(session) = crate::sessions::get(&session_id) else {
         return Ok(None);
     };
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     let Some(identity_id) = settings.identity_id else {
         return Ok(None);
     };
@@ -1813,7 +1813,7 @@ pub async fn session_merge_pr(session_id: String) -> Result<PrLink, String> {
         .ok_or_else(|| format!("session not found: {session_id}"))?;
     let work_dir = PathBuf::from(&session.work_dir);
     let branch = session.branch.clone();
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone());
+    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;

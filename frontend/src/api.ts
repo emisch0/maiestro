@@ -180,6 +180,11 @@ export const api = {
   listRepos: () =>
     invoke<string[]>("repos_list"),
 
+  /** The hand-written JSON Schema for per-repo settings, used by the Settings
+   *  window's JSON Forms renderer. */
+  repoSettingsSchema: () =>
+    invoke<Record<string, unknown>>("repo_settings_schema"),
+
   getRepoSettings: (repo: string) =>
     invoke<RepoSettings>("repo_settings_get", { repo }),
 

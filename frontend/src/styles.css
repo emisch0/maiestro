@@ -1672,3 +1672,92 @@ body {
   font-family: var(--font);
   font-size: 13px;
 }
+
+/* ── JSON Forms (per-repo settings detail) ──────────────────────────────────
+   The repo detail form is rendered by JSON Forms' vanilla renderers (issue
+   #57). These rules dress the vanilla output classes (.control, .input,
+   .select, .validation…) and our two custom renderers (.jsf-*) to match the
+   hand-built inputs. All colors come from theme tokens, so one rule set serves
+   both light and dark. */
+.jsf-root {
+  display: flex;
+  flex-direction: column;
+}
+
+/* VerticalLayout: one gap between fields. */
+.jsf-root .vertical-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.jsf-root .vertical-layout-item {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Each control is a label-over-input stack. */
+.jsf-root .control,
+.jsf-root .jsf-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Labels match .field-label (uppercase, muted, small). */
+.jsf-root label,
+.jsf-root .jsf-label {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  margin: 0;
+}
+
+/* Inputs and selects match .text-input. */
+.jsf-root .input,
+.jsf-root .select,
+.jsf-root input[type="text"],
+.jsf-root input[type="number"],
+.jsf-root select {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: var(--font);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+  transition: border-color 0.12s;
+}
+.jsf-root .input:focus,
+.jsf-root .select:focus,
+.jsf-root input:focus,
+.jsf-root select:focus {
+  border-color: var(--accent-border);
+}
+
+/* Description help text (vanilla puts it in .validation when the field is
+   valid; our custom renderers use .jsf-help). */
+.jsf-root .validation,
+.jsf-root .jsf-help {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+/* Validation errors tint red. */
+.jsf-root .validation_error {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--red);
+}
+
+/* Hide the empty checkbox vanilla wraps some controls in; not used here. */
+.jsf-root .control:empty {
+  display: none;
+}

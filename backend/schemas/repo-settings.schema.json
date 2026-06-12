@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maiestro.app/schemas/repo-settings.schema.json",
+  "title": "RepoSettings",
+  "description": "Per-repo settings stored at ~/.maiestro/repos/<owner>-<name>.json. This schema is the hand-written specification for the file format; the Rust RepoSettings struct must conform to it (a unit test enforces the two stay in sync). Unknown fields are tolerated so files written by a newer app version still load in an older one.",
+  "type": "object",
+  "properties": {
+    "repo": {
+      "type": "string",
+      "description": "Canonical \"owner/name\" string. Stored inside the file so repos_list can reconstruct the list without parsing the filename (which uses \"-\" and is ambiguous)."
+    },
+    "identity_id": {
+      "type": ["string", "null"],
+      "description": "Identity used for credentials and agent spawning for this repo."
+    },
+    "checkout_dir": {
+      "type": ["string", "null"],
+      "description": "Absolute path to the local checkout directory."
+    },
+    "worktree_prefix": {
+      "type": ["string", "null"],
+      "description": "Prefix for worktree locations. The full worktree path is `<worktree_prefix><workspace>/<repo>` (a string concatenation — the trailing segment is part of the directory name, not a path component). null falls back to ~/src/work-, preserving the original hardcoded behavior. Tilde-expanded at the use site."
+    },
+    "env_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Env files relative to checkout_dir to source when launching user-facing tools (VSCode, Terminal) for this repo."
+    },
+    "hidden": {
+      "type": ["object", "null"],
+      "title": "HideState",
+      "description": "Repo-level hide/snooze state. null = visible. A hidden repo hides its work items too. Per-work-item state lives on the session record, not here.",
+      "properties": {
+        "snooze_until": {
+          "type": ["integer", "null"],
+          "description": "Unix-epoch millis until which the item stays hidden. null = hidden indefinitely. Expiry is resolved on the frontend at render time; the backend stores the timestamp verbatim."
+        }
+      }
+    }
+  }
+}
