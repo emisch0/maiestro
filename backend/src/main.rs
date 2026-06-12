@@ -248,10 +248,11 @@ fn main() {
                 Err(e) => tracing::error!(error = %e, "status watcher failed to start"),
             }
 
+            let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
             let logs = MenuItem::with_id(app, "logs", "Show Logs", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "Quit mAIestro", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&logs, &separator, &quit])?;
+            let menu = Menu::with_items(app, &[&settings, &logs, &separator, &quit])?;
 
             TrayIconBuilder::with_id("main")
                 // White brain mark rendered as a macOS template image, so the
@@ -262,6 +263,12 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "quit" => app.exit(0),
+                    "settings" => {
+                        if let Some(window) = app.get_webview_window("settings") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
                     "logs" => {
                         if let Some(window) = app.get_webview_window("logs") {
                             let _ = window.show();
