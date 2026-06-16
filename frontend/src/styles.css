@@ -9,6 +9,14 @@
 :root {
   --radius: 7px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  /* The rotating rainbow used by every "working" indicator (Claude pill, the
+     workspace operation pill, the AI button glow, the title-field ring). Defined
+     once here so the stop list isn't duplicated; `--glow-angle` resolves on the
+     element that animates it. */
+  --rainbow-conic: conic-gradient(
+    from var(--glow-angle),
+    #ff2d55, #ff9500, #ffcc00, #34c759, #5ac8fa, #af52de, #ff2d55
+  );
 }
 
 :root,
@@ -271,6 +279,25 @@ body {
   white-space: nowrap;
 }
 
+/* A transient "working" pill shown in the row while a mAIestro operation
+   (Create PR / Merge / Tear Down) is in flight. Non-interactive: the rotating
+   rainbow ring (`busy-ring`) is the indicator, matching the Claude pill's busy
+   look. Sits just before the action pill group. */
+.workspace-op-pill {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--font);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  white-space: nowrap;
+}
+
 /* Claude session pill: the Claude mark tints by live session state, with the
    status word beside it. Sits between the title and the action pill group, and
    clicking it opens the session's VS Code window. */
@@ -312,30 +339,23 @@ body {
   overflow: hidden;
 }
 
-/* Working: a rotating rainbow ring traces the border — the same glow as
-   .btn-busy, but border-only (no halo) — and is the sole "busy" indicator. The
-   mark and label are plain off-white (green clashed with the rainbow, and the
-   ring already conveys activity, so the mark no longer pulses). Reuses the
-   shared --glow-angle property and glow-rotate keyframe. */
-.claude-pill--busy {
+/* A rotating rainbow ring traced around the border — border-only (no halo), the
+   shared "working" indicator. Add `busy-ring` to any element to give it the ring;
+   the host needs a border-radius for the ring to match its shape. Reuses the
+   shared --rainbow-conic gradient, the --glow-angle property, and the glow-rotate
+   keyframe. Used by the Claude pill, the workspace operation pill, and the
+   spawn-preview title field. */
+.busy-ring {
   position: relative;
   isolation: isolate;
 }
-.claude-pill--busy .claude-pill-mark,
-.claude-pill--busy .claude-pill-label {
-  color: var(--text);
-}
-
-.claude-pill--busy::before {
+.busy-ring::before {
   content: "";
   position: absolute;
   inset: -1px;
   border-radius: inherit;
   padding: 1.5px;
-  background: conic-gradient(
-    from var(--glow-angle),
-    #ff2d55, #ff9500, #ffcc00, #34c759, #5ac8fa, #af52de, #ff2d55
-  );
+  background: var(--rainbow-conic);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
@@ -346,9 +366,18 @@ body {
 
 /* Respect reduced-motion: keep the rainbow ring, but stop it rotating. */
 @media (prefers-reduced-motion: reduce) {
-  .claude-pill--busy::before {
+  .busy-ring::before {
     animation: none;
   }
+}
+
+/* Working: the rainbow ring is the sole "busy" indicator (the pill gets
+   `busy-ring`). The mark and label are plain off-white (green clashed with the
+   rainbow, and the ring already conveys activity, so the mark no longer
+   pulses). */
+.claude-pill--busy .claude-pill-mark,
+.claude-pill--busy .claude-pill-label {
+  color: var(--text);
 }
 
 /* Needs you: amber and emphasized — the actionable state. */
@@ -1184,6 +1213,30 @@ body {
   margin-bottom: 5px;
 }
 
+/* Label line that carries an inline note beside it (e.g. the "Generating
+   title…" caption while the AI suggestion is in flight). */
+.field-label--row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The "generating title…" caption: lowercase and untracked so it reads as a
+   status note rather than a second label. */
+.field-busy-note {
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--muted);
+}
+
+/* Wrapper that lets the Session-name input wear the rotating rainbow ring while
+   the AI title suggestion is in flight (`busy-ring` is added conditionally). The
+   radius matches `.text-input` so the ring traces the field's shape. */
+.title-field {
+  border-radius: var(--radius);
+}
+
 .context-hint {
   font-size: 11px;
   color: var(--muted);
@@ -1509,10 +1562,7 @@ body {
 
 .btn-busy--ai::before,
 .btn-busy--ai::after {
-  background: conic-gradient(
-    from var(--glow-angle),
-    #ff2d55, #ff9500, #ffcc00, #34c759, #5ac8fa, #af52de, #ff2d55
-  );
+  background: var(--rainbow-conic);
 }
 
 /* Crisp ring: a gradient band at the very edge (interior masked out). */
