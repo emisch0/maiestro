@@ -1023,7 +1023,7 @@ function ClaudePill({ status, onClick }: { status?: StatusRecord; onClick: () =>
   // A *surfaced* failed tool tints the pill red; a pending/transient one Claude
   // may still recover from doesn't. The error itself lives in the dismissible row
   // block, not this tooltip.
-  const cls = `claude-pill claude-pill--${status.state}${status.state === "busy" ? " busy-ring" : ""}${status.last_error?.surfaced ? " claude-pill--error" : ""}`;
+  const cls = `claude-pill claude-pill--${status.state}${status.state === "busy" ? " busy-ring busy-ring--ai" : ""}${status.last_error?.surfaced ? " claude-pill--error" : ""}`;
   return (
     <button
       className={cls}
@@ -1355,6 +1355,13 @@ function MainView() {
   // while its request id has a Claude call in flight, monochrome otherwise.
   const busyCls = (requestId?: string) =>
     requestId && aiActive[requestId] ? "btn-busy btn-busy--ai" : "btn-busy";
+
+  // Busy-ring classes for the row's "working" pill: rainbow (AI) while the
+  // operation's Claude call is in flight, single-hue (non-AI) otherwise — so a
+  // Create PR glows rainbow while Claude drafts the body, then reverts for the
+  // git push/merge. Teardown passes no request id and stays monochrome.
+  const busyRingCls = (requestId?: string) =>
+    requestId && aiActive[requestId] ? "busy-ring busy-ring--ai" : "busy-ring";
 
   // Also refresh whenever the window itself regains focus — covers any path that
   // re-focuses the popover without a fresh "popover-shown" emit. Refresh is
@@ -1940,12 +1947,20 @@ function MainView() {
                         : teardownBusy[s.id]
                           ? "Tearing down…"
                           : null;
+                    // Request id of the in-flight op (if it can run Claude), so the
+                    // op-pill glows rainbow only while that AI call is active.
+                    // Teardown is pure git, so it has none.
+                    const opRequestId = prc?.creating
+                      ? prc.requestId
+                      : pm?.intent && pr?.state !== "merged"
+                        ? pm.requestId
+                        : undefined;
                     return (
                     <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${accentColor(s.color)}` }}>
                         <ClaudePill status={statuses[s.id]} onClick={() => api.openInEditor(s.work_dir)} />
                         <span className="workspace-title">{s.session_title}</span>
-                        {opLabel && <span className="workspace-op-pill busy-ring">{opLabel}</span>}
+                        {opLabel && <span className={`workspace-op-pill ${busyRingCls(opRequestId)}`}>{opLabel}</span>}
                         {sessHidden && (
                           <button
                             className="snooze-label"
@@ -2171,7 +2186,7 @@ function MainView() {
                           Session name
                           {pv.suggesting && <span className="field-busy-note">Generating title…</span>}
                         </label>
-                        <div className={`title-field${pv.suggesting ? " busy-ring" : ""}`}>
+                        <div className={`title-field${pv.suggesting ? " busy-ring busy-ring--ai" : ""}`}>
                           <input
                             className="text-input"
                             type="text"

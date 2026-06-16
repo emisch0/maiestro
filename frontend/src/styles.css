@@ -9,14 +9,14 @@
 :root {
   --radius: 7px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  /* The rotating rainbow used by every "working" indicator (Claude pill, the
-     workspace operation pill, the AI button glow, the title-field ring). Defined
-     once here so the stop list isn't duplicated; `--glow-angle` resolves on the
-     element that animates it. */
-  --rainbow-conic: conic-gradient(
-    from var(--glow-angle),
-    #ff2d55, #ff9500, #ffcc00, #34c759, #5ac8fa, #af52de, #ff2d55
-  );
+  /* The rotating rainbow's color stop list, shared by every AI "working"
+     indicator (Claude pill, the AI button glow, the title-field ring) so the
+     stops aren't duplicated. We store only the *stops*, not the whole
+     conic-gradient: `--glow-angle` is registered `inherits: false` and is
+     animated per busy element, so the `from var(--glow-angle)` must be written
+     at each use site to resolve on the animating element. Baking it into a
+     `:root` gradient variable froze the angle at :root's 0deg (issue #75). */
+  --rainbow-stops: #ff2d55, #ff9500, #ffcc00, #34c759, #5ac8fa, #af52de, #ff2d55;
 }
 
 :root,
@@ -339,12 +339,14 @@ body {
   overflow: hidden;
 }
 
-/* A rotating rainbow ring traced around the border — border-only (no halo), the
-   shared "working" indicator. Add `busy-ring` to any element to give it the ring;
-   the host needs a border-radius for the ring to match its shape. Reuses the
-   shared --rainbow-conic gradient, the --glow-angle property, and the glow-rotate
-   keyframe. Used by the Claude pill, the workspace operation pill, and the
-   spawn-preview title field. */
+/* A rotating ring traced around the border — border-only (no halo), the shared
+   "working" indicator. Add `busy-ring` to any element to give it the ring; the
+   host needs a border-radius for the ring to match its shape. Two variants
+   mirror the `.btn-busy` / `.btn-busy--ai` pair: the base is a single-hue accent
+   sweep (a moving highlight, no color cycling) for non-AI work (git ops), and
+   `.busy-ring--ai` is the rotating rainbow for Claude work. Reuses the
+   --glow-angle property and the glow-rotate keyframe. Used by the Claude pill,
+   the workspace operation pill, and the spawn-preview title field. */
 .busy-ring {
   position: relative;
   isolation: isolate;
@@ -355,7 +357,10 @@ body {
   inset: -1px;
   border-radius: inherit;
   padding: 1.5px;
-  background: var(--rainbow-conic);
+  background: conic-gradient(
+    from var(--glow-angle),
+    var(--accent-border), var(--accent), var(--accent-border)
+  );
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
@@ -364,7 +369,12 @@ body {
   pointer-events: none;
 }
 
-/* Respect reduced-motion: keep the rainbow ring, but stop it rotating. */
+/* AI variant: the Apple-Intelligence-style rotating rainbow. */
+.busy-ring--ai::before {
+  background: conic-gradient(from var(--glow-angle), var(--rainbow-stops));
+}
+
+/* Respect reduced-motion: keep the ring (both variants), but stop it rotating. */
 @media (prefers-reduced-motion: reduce) {
   .busy-ring::before {
     animation: none;
@@ -1562,7 +1572,7 @@ body {
 
 .btn-busy--ai::before,
 .btn-busy--ai::after {
-  background: var(--rainbow-conic);
+  background: conic-gradient(from var(--glow-angle), var(--rainbow-stops));
 }
 
 /* Crisp ring: a gradient band at the very edge (interior masked out). */
