@@ -821,6 +821,9 @@ type Preview = {
   origTitle: string;
   origBody: string;
   spawning: boolean;
+  // True while Claude's short-title suggestion is in flight, so the Session name
+  // field shows a "generating title" rainbow indicator.
+  suggesting?: boolean;
   error?: string;
 };
 
@@ -1020,7 +1023,7 @@ function ClaudePill({ status, onClick }: { status?: StatusRecord; onClick: () =>
   // A *surfaced* failed tool tints the pill red; a pending/transient one Claude
   // may still recover from doesn't. The error itself lives in the dismissible row
   // block, not this tooltip.
-  const cls = `claude-pill claude-pill--${status.state}${status.last_error?.surfaced ? " claude-pill--error" : ""}`;
+  const cls = `claude-pill claude-pill--${status.state}${status.state === "busy" ? " busy-ring" : ""}${status.last_error?.surfaced ? " claude-pill--error" : ""}`;
   return (
     <button
       className={cls}
@@ -1448,7 +1451,9 @@ function MainView() {
     setPicker((p) => (p ? { ...p, preparing: node.number, note: `Preparing #${node.number}…` } : p));
     try {
       const plan = await api.prepareSpawn(repo, node.number);
-      setPicker((p) => (p ? { ...p, preparing: undefined, note: undefined, preview: planToPreview(plan, "spawn") } : p));
+      // `suggesting: true` shows the "generating title" indicator on the Session
+      // name field until the AI suggestion lands (or the call fails).
+      setPicker((p) => (p ? { ...p, preparing: undefined, note: undefined, preview: { ...planToPreview(plan, "spawn"), suggesting: true } } : p));
       // Fire-and-forget: upgrade the heuristic label to an AI suggestion once
       // Claude replies. The preview is already open and usable meanwhile.
       void suggestLabel(repo, node.number, plan.short_title);
@@ -1462,16 +1467,19 @@ function MainView() {
   // heuristic value (the user hasn't typed). Failures are silent: the
   // heuristic label is a fine fallback.
   async function suggestLabel(repo: string, issueNumber: number, heuristic: string) {
+    let suggestion = "";
     try {
-      const suggestion = await api.suggestShortTitle(repo, issueNumber);
-      if (!suggestion.trim()) return;
-      setPicker((p) => {
-        const pv = p?.preview;
-        if (!p || !pv || p.repo !== repo) return p;
-        if (pv.mode !== "spawn" || pv.issueNumber !== issueNumber || pv.shortTitle !== heuristic) return p;
-        return { ...p, preview: { ...pv, shortTitle: suggestion } };
-      });
+      suggestion = await api.suggestShortTitle(repo, issueNumber);
     } catch { /* keep the heuristic label */ }
+    // Clear the "generating title" indicator and, if the preview is still open
+    // for this same issue and untouched, swap in the suggestion. Runs on both
+    // success and failure so the indicator never sticks.
+    setPicker((p) => {
+      const pv = p?.preview;
+      if (!p || !pv || p.repo !== repo || pv.mode !== "spawn" || pv.issueNumber !== issueNumber) return p;
+      const useSuggestion = !!suggestion.trim() && pv.shortTitle === heuristic;
+      return { ...p, preview: { ...pv, suggesting: false, shortTitle: useSuggestion ? suggestion : pv.shortTitle } };
+    });
   }
 
   function applyDraftPreview(res: DraftPreviewOutcome, idea: string, mode: "spawn" | "create") {
@@ -1921,11 +1929,23 @@ function MainView() {
                     const prc = prCreate[s.id];
                     const checks = prChecks[s.id];
                     const pm = prMerge[s.id];
+                    // A mAIestro operation in flight on this row. The rainbow
+                    // "working" pill keeps the feedback visible after the command
+                    // strip collapses on click; mirrors the command buttons' busy
+                    // flags so it clears on completion or failure.
+                    const opLabel = prc?.creating
+                      ? "Creating PR…"
+                      : pm?.intent && pr?.state !== "merged"
+                        ? "Merging…"
+                        : teardownBusy[s.id]
+                          ? "Tearing down…"
+                          : null;
                     return (
                     <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${accentColor(s.color)}` }}>
                         <ClaudePill status={statuses[s.id]} onClick={() => api.openInEditor(s.work_dir)} />
                         <span className="workspace-title">{s.session_title}</span>
+                        {opLabel && <span className="workspace-op-pill busy-ring">{opLabel}</span>}
                         {sessHidden && (
                           <button
                             className="snooze-label"
@@ -2147,16 +2167,21 @@ function MainView() {
                   <div className="overlay-body preview-body">
                     {isSpawn && (
                       <>
-                        <label className="field-label">Session name</label>
-                        <input
-                          className="text-input"
-                          type="text"
-                          value={pv.shortTitle}
-                          autoFocus
-                          placeholder="short session label"
-                          disabled={pv.spawning}
-                          onChange={(e) => setPreview({ shortTitle: e.target.value })}
-                        />
+                        <label className="field-label field-label--row">
+                          Session name
+                          {pv.suggesting && <span className="field-busy-note">Generating title…</span>}
+                        </label>
+                        <div className={`title-field${pv.suggesting ? " busy-ring" : ""}`}>
+                          <input
+                            className="text-input"
+                            type="text"
+                            value={pv.shortTitle}
+                            autoFocus
+                            placeholder="short session label"
+                            disabled={pv.spawning}
+                            onChange={(e) => setPreview({ shortTitle: e.target.value })}
+                          />
+                        </div>
                       </>
                     )}
 
