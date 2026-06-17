@@ -1002,6 +1002,10 @@ function IssueRow({ node, depth, expandedNumber, preparingNumber, active, onExpa
 
 // How each status state renders in a work-item row. `running`/`idle` are quiet;
 // `busy` and `needs_you` draw attention. States not in the map render nothing.
+// The `creating` state (worktree being built after a spawn, issue #77) is
+// deliberately absent: it renders as a `workspace-op-pill` ("Creating…") next to
+// the title — like "Merging…"/"Tearing down…" — not as a Claude status pill, so
+// ClaudePill renders nothing for it.
 const STATUS_LABELS: Record<string, string> = {
   running: "Ready",
   busy: "Working",
@@ -1520,8 +1524,15 @@ function MainView() {
       update_issue: pv.issueNumber !== null && (pv.issueTitle !== pv.origTitle || pv.issueBody !== pv.origBody),
     };
     try {
+      // confirm_spawn now returns as soon as the worktree build is handed to a
+      // background task, so this resolves quickly: close the overlay and land on
+      // the dashboard, where the new row shows a "Creating…" pill (driven by the
+      // backend's `creating` status) until the worktree is ready. A thrown error
+      // here is a synchronous failure (issue create/update, identity) — keep the
+      // overlay open and show it.
       await api.confirmSpawn(repo, edits);
       refreshSessions();
+      refreshStatuses();
       closePicker();
     } catch (e) {
       setPreview({ spawning: false, error: String(e) });
@@ -1919,6 +1930,9 @@ function MainView() {
                         </div>
                         {zoneItems.map((s) => {
                     const cmdOpen = commandsOpen === s.id;
+                    // While the worktree is still being built in the background
+                    // (issue #77), actions that need it to exist are disabled.
+                    const creating = statuses[s.id]?.state === "creating";
                     // Only surfaced errors render; pending/transient ones (Claude
                     // may still recover) stay hidden until promoted (issue #48).
                     const toolErr = statuses[s.id]?.last_error?.surfaced
@@ -1939,14 +1953,17 @@ function MainView() {
                     // A mAIestro operation in flight on this row. The rainbow
                     // "working" pill keeps the feedback visible after the command
                     // strip collapses on click; mirrors the command buttons' busy
-                    // flags so it clears on completion or failure.
-                    const opLabel = prc?.creating
-                      ? "Creating PR…"
-                      : pm?.intent && pr?.state !== "merged"
-                        ? "Merging…"
-                        : teardownBusy[s.id]
-                          ? "Tearing down…"
-                          : null;
+                    // flags so it clears on completion or failure. `creating` is
+                    // the background worktree build (issue #77).
+                    const opLabel = creating
+                      ? "Creating…"
+                      : prc?.creating
+                        ? "Creating PR…"
+                        : pm?.intent && pr?.state !== "merged"
+                          ? "Merging…"
+                          : teardownBusy[s.id]
+                            ? "Tearing down…"
+                            : null;
                     // Request id of the in-flight op (if it can run Claude), so the
                     // op-pill glows rainbow only while that AI call is active.
                     // Teardown is pure git, so it has none.
@@ -1958,7 +1975,7 @@ function MainView() {
                     return (
                     <div key={s.id} className={`workspace-item ${sessHidden || repoHidden ? "workspace-item--hidden" : ""}`}>
                       <div className="workspace-row" style={{ borderLeft: `3px solid ${accentColor(s.color)}` }}>
-                        <ClaudePill status={statuses[s.id]} onClick={() => api.openInEditor(s.work_dir)} />
+                        <ClaudePill status={statuses[s.id]} onClick={() => { if (!creating) api.openInEditor(s.work_dir); }} />
                         <span className="workspace-title">{s.session_title}</span>
                         {opLabel && <span className={`workspace-op-pill ${busyRingCls(opRequestId)}`}>{opLabel}</span>}
                         {sessHidden && (
@@ -2001,7 +2018,8 @@ function MainView() {
                           <button
                             className="pill-btn"
                             onClick={() => api.openPath(s.work_dir)}
-                            title={`Reveal in Finder: ${s.work_dir}`}
+                            disabled={creating}
+                            title={creating ? "Still creating this workspace…" : `Reveal in Finder: ${s.work_dir}`}
                             aria-label="Open folder in Finder"
                           >
                             <FolderIcon />
@@ -2009,7 +2027,8 @@ function MainView() {
                           <button
                             className="pill-btn"
                             onClick={() => api.openInEditor(s.work_dir)}
-                            title="Open in VS Code"
+                            disabled={creating}
+                            title={creating ? "Still creating this workspace…" : "Open in VS Code"}
                             aria-label="Open in VS Code"
                           >
                             <VSCodeIcon style={{ color: accentColor(s.color) }} />
@@ -2029,19 +2048,21 @@ function MainView() {
                         <button
                           className={`command-btn ${prc?.creating ? busyCls(prc.requestId) : ""}`}
                           onClick={() => { setCommandsOpen(null); createPr(s); }}
-                          disabled={prc?.creating || prOpen}
-                          title={prOpen ? `PR #${pr?.number} is already open` : undefined}
+                          disabled={prc?.creating || prOpen || creating}
+                          title={creating ? "Still creating this workspace…" : prOpen ? `PR #${pr?.number} is already open` : undefined}
                         >
                           {prc?.creating ? "Creating PR…" : "Create PR"}
                         </button>
                         <button
                           className={`command-btn ${pm?.intent && pr?.state !== "merged" ? busyCls(pm.requestId) : ""}`}
                           onClick={() => { setCommandsOpen(null); startMerge(s); }}
-                          disabled={pm?.intent || pr?.state === "merged"}
+                          disabled={pm?.intent || pr?.state === "merged" || creating}
                           title={
-                            pr?.state === "merged"
-                              ? `PR #${pr.number} is already merged`
-                              : "Create the PR if needed, wait for checks, then merge"
+                            creating
+                              ? "Still creating this workspace…"
+                              : pr?.state === "merged"
+                                ? `PR #${pr.number} is already merged`
+                                : "Create the PR if needed, wait for checks, then merge"
                           }
                         >
                           {pr?.state === "merged" ? "Merged" : pm?.intent ? "Merging…" : "Merge PR"}
@@ -2053,7 +2074,8 @@ function MainView() {
                         )}
                         <button
                           className={`command-btn ${teardownBusy[s.id] ? "btn-busy" : ""}`}
-                          disabled={teardownBusy[s.id]}
+                          disabled={teardownBusy[s.id] || creating}
+                          title={creating ? "Still creating this workspace…" : undefined}
                           onClick={() => { setCommandsOpen(null); tearDown(s); }}
                         >
                           Tear Down
