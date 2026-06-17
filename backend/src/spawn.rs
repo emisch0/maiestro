@@ -525,12 +525,17 @@ pub async fn open_repo_in_editor(repo: String) -> Result<(), String> {
 
 #[derive(serde::Serialize)]
 pub struct SpawnResult {
+    /// The workspace/session id (= `Session.id`), so the frontend can match the
+    /// row this spawn created and track its `creating` status.
+    pub session_id: String,
     pub work_dir: String,
     pub branch: String,
     pub issue_url: String,
     /// True when an existing workspace was reused rather than created.
     pub reused: bool,
-    /// Non-fatal warnings (e.g. GitHub assign/comment failures, missing env files).
+    /// Non-fatal warnings raised during the *synchronous* phase. On a fresh
+    /// spawn the heavy work now runs in the background, so its warnings are
+    /// logged there rather than returned here.
     pub warnings: Vec<String>,
 }
 
@@ -572,9 +577,35 @@ struct SpawnDecision<'a> {
     force_new: bool,
 }
 
+/// Everything the background phase of a fresh spawn needs, owned so it can move
+/// into the `tokio::spawn`ed task that builds the worktree after `do_spawn` has
+/// already returned. See `finish_spawn`.
+struct SpawnBg {
+    gh: GitHub,
+    checkout: PathBuf,
+    work_dir: PathBuf,
+    work_parent: String,
+    branch: String,
+    workspace: String,
+    session_title: String,
+    color: String,
+    default_branch: String,
+    repo: String,
+    issue_number: u64,
+    env_files: Vec<String>,
+    post_spawn_commands: Vec<String>,
+}
+
 /// Core worktree + session creation, shared by every spawn path. Resolves the
 /// repo's settings/identity/checkout itself; the caller supplies the issue facts
 /// and the (reviewed) label/theming. The slug is `<n>-<slug(short_label)>`.
+///
+/// Two-phase for a fresh spawn: this fast synchronous phase resolves the final
+/// workspace id, records the `Session` row, and marks it `creating` (so the
+/// popover shows the row with a "Creating…" pill immediately), then hands the
+/// slow work — worktree add, env copy, GitHub assign/comment, post-spawn
+/// commands, editor launch — to a background task and returns at once. Reopening
+/// an existing worktree stays fully synchronous (it's near-instant).
 #[tracing::instrument(skip_all, fields(session = tracing::field::Empty))]
 async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     let SpawnDecision { repo, issue_number, issue_url, default_branch, short_label, color, emoji, force_new } = d;
@@ -618,6 +649,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         open_vscode(&base_dir)?;
         tracing::info!(repo = %repo, issue = issue_number, branch = %base_branch, reused = true, "spawned workspace");
         return Ok(SpawnResult {
+            session_id: base_workspace,
             work_dir: base_dir.display().to_string(),
             branch: base_branch,
             issue_url: issue_url.to_string(),
@@ -643,61 +675,12 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     tracing::Span::current().record("session", workspace.as_str());
 
     let session_title = format!("{emoji} {session_label}");
-
-    // Create the worktree from the repo's default branch.
     let work_parent = work_dir.parent().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    std::fs::create_dir_all(work_dir.parent().unwrap()).map_err(|e| e.to_string())?;
-    if let Err(e) = git(&checkout, &["fetch", "origin", "--quiet"]) {
-        tracing::warn!(error = %e, "git fetch before spawn failed (continuing)");
-    }
-    git(&checkout, &["worktree", "add", &work_dir.to_string_lossy(), "-b", &branch, &format!("origin/{default_branch}")])?;
-    if let Err(e) = git(&work_dir, &["branch", "--unset-upstream"]) {
-        tracing::warn!(error = %e, "git branch --unset-upstream failed (continuing)");
-    }
 
-    // Copy configured env files (relative to checkout) into the worktree.
-    let mut warnings = Vec::new();
-    for rel in &settings.env_files {
-        let src = checkout.join(rel);
-        if !src.is_file() {
-            warnings.push(format!("env file not found, skipped: {rel}"));
-            continue;
-        }
-        let dst = work_dir.join(rel);
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        if let Err(e) = std::fs::copy(&src, &dst) {
-            warnings.push(format!("could not copy env file {rel}: {e}"));
-        }
-    }
-
-    // Assign the issue to the token's user and record the workspace in a
-    // comment. Non-fatal: the worktree already exists, so failures only warn.
-    match gh.authenticated_login().await {
-        Ok(login) => {
-            if let Err(e) = gh.add_assignees(repo, issue_number, &[login]).await {
-                warnings.push(format!("could not assign issue #{issue_number}: {e}"));
-            }
-            let body = format!(
-                "🤖 Spawned a local workspace for this issue.\n\n\
-                 - **GitHub Branch:** `{branch}`\n\
-                 - **Local Directory:** `{}`\n\
-                 - **Claude Session:** `{session_title}`\n",
-                work_dir.display()
-            );
-            if let Err(e) = gh.create_comment(repo, issue_number, &body).await {
-                warnings.push(format!("could not comment on issue #{issue_number}: {e}"));
-            }
-        }
-        Err(e) => warnings.push(format!("could not resolve token user for assignment: {e}")),
-    }
-
-    write_vscode_files(&work_dir, &work_parent, color, &session_title)?;
-    write_claude_hooks(&work_dir, &workspace)?;
-
-    // Record the session so mAIestro can track it (and so its color counts as
-    // taken for the next spawn). Non-fatal: the worktree already exists.
+    // Record the session up front so the dashboard shows the row immediately
+    // (and so its color counts as taken for the next spawn) — the worktree it
+    // points at is built by the background task below. If we can't even record
+    // it, fail synchronously: the row would never appear.
     let session = crate::sessions::Session {
         id: workspace.clone(),
         repo: repo.to_string(),
@@ -712,24 +695,136 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         emoji: emoji.to_string(),
         hidden: None,
     };
-    if let Err(e) = crate::sessions::save(&session) {
-        warnings.push(format!("could not record session: {e}"));
-    }
+    crate::sessions::save(&session).map_err(|e| format!("could not record session: {e}"))?;
 
-    // Run the repo's post-spawn commands (e.g. `pnpm install`) in the new
-    // worktree before opening the editor, so the session starts ready.
-    warnings.extend(run_post_spawn_commands(&work_dir, &settings.post_spawn_commands).await);
+    // Mark it `creating` so the popover shows a "Creating…" pill while the
+    // background task builds the worktree.
+    crate::status::write_creating(&workspace);
 
-    open_vscode(&work_dir)?;
+    // Hand the slow work off to a background task and return at once.
+    let bg = SpawnBg {
+        gh,
+        checkout,
+        work_dir: work_dir.clone(),
+        work_parent,
+        branch: branch.clone(),
+        workspace: workspace.clone(),
+        session_title,
+        color: color.to_string(),
+        default_branch: default_branch.to_string(),
+        repo: repo.to_string(),
+        issue_number,
+        env_files: settings.env_files.clone(),
+        post_spawn_commands: settings.post_spawn_commands.clone(),
+    };
+    tokio::spawn(finish_spawn(bg));
 
-    tracing::info!(repo = %repo, issue = issue_number, branch = %branch, reused = false, "spawned workspace");
+    tracing::info!(repo = %repo, issue = issue_number, branch = %branch, reused = false, "spawn started (building worktree in background)");
     Ok(SpawnResult {
+        session_id: workspace,
         work_dir: work_dir.display().to_string(),
         branch,
         issue_url: issue_url.to_string(),
         reused: false,
-        warnings,
+        warnings: Vec::new(),
     })
+}
+
+/// Background phase of a fresh spawn: build the worktree and launch the editor
+/// after `do_spawn` has already returned. On success the `creating` marker is
+/// cleared (handing the status over to Claude's hooks); on a fatal failure it's
+/// replaced with a surfaced error the popover shows on the row. Carries the
+/// `session=` span so its log lines join the rest of the spawn's story.
+async fn finish_spawn(bg: SpawnBg) {
+    use tracing::Instrument;
+    let span = tracing::info_span!("finish_spawn", session = %bg.workspace);
+    async move {
+        match do_finish_spawn(&bg).await {
+            Ok(warnings) => {
+                for w in &warnings {
+                    tracing::warn!(warning = %w, "spawn warning");
+                }
+                tracing::info!(branch = %bg.branch, "spawn finished");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "spawn failed");
+                crate::status::write_spawn_error(&bg.workspace, &e);
+            }
+        }
+    }
+    .instrument(span)
+    .await;
+}
+
+/// The actual worktree build, factored out so `finish_spawn` can map its result
+/// to the status record. Returns non-fatal warnings on success; an `Err` is a
+/// fatal failure (e.g. `git worktree add`) that leaves no usable worktree.
+async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+
+    // Create the worktree from the repo's default branch.
+    std::fs::create_dir_all(bg.work_dir.parent().unwrap()).map_err(|e| e.to_string())?;
+    if let Err(e) = git(&bg.checkout, &["fetch", "origin", "--quiet"]) {
+        tracing::warn!(error = %e, "git fetch before spawn failed (continuing)");
+    }
+    git(&bg.checkout, &["worktree", "add", &bg.work_dir.to_string_lossy(), "-b", &bg.branch, &format!("origin/{}", bg.default_branch)])?;
+    if let Err(e) = git(&bg.work_dir, &["branch", "--unset-upstream"]) {
+        tracing::warn!(error = %e, "git branch --unset-upstream failed (continuing)");
+    }
+
+    // Copy configured env files (relative to checkout) into the worktree.
+    for rel in &bg.env_files {
+        let src = bg.checkout.join(rel);
+        if !src.is_file() {
+            warnings.push(format!("env file not found, skipped: {rel}"));
+            continue;
+        }
+        let dst = bg.work_dir.join(rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        if let Err(e) = std::fs::copy(&src, &dst) {
+            warnings.push(format!("could not copy env file {rel}: {e}"));
+        }
+    }
+
+    // Assign the issue to the token's user and record the workspace in a
+    // comment. Non-fatal: the worktree already exists, so failures only warn.
+    match bg.gh.authenticated_login().await {
+        Ok(login) => {
+            if let Err(e) = bg.gh.add_assignees(&bg.repo, bg.issue_number, &[login]).await {
+                warnings.push(format!("could not assign issue #{}: {e}", bg.issue_number));
+            }
+            let body = format!(
+                "🤖 Spawned a local workspace for this issue.\n\n\
+                 - **GitHub Branch:** `{}`\n\
+                 - **Local Directory:** `{}`\n\
+                 - **Claude Session:** `{}`\n",
+                bg.branch,
+                bg.work_dir.display(),
+                bg.session_title,
+            );
+            if let Err(e) = bg.gh.create_comment(&bg.repo, bg.issue_number, &body).await {
+                warnings.push(format!("could not comment on issue #{}: {e}", bg.issue_number));
+            }
+        }
+        Err(e) => warnings.push(format!("could not resolve token user for assignment: {e}")),
+    }
+
+    write_vscode_files(&bg.work_dir, &bg.work_parent, &bg.color, &bg.session_title)?;
+    write_claude_hooks(&bg.work_dir, &bg.workspace)?;
+
+    // Run the repo's post-spawn commands (e.g. `pnpm install`) in the new
+    // worktree before opening the editor, so the session starts ready.
+    warnings.extend(run_post_spawn_commands(&bg.work_dir, &bg.post_spawn_commands).await);
+
+    // Worktree is ready: clear the `creating` marker before opening the editor,
+    // so Claude's SessionStart hook (fired only once VS Code launches it) owns
+    // the status from here without us racing to clobber it.
+    crate::status::clear_creating(&bg.workspace);
+
+    open_vscode(&bg.work_dir)?;
+    Ok(warnings)
 }
 
 /// Fetch an issue's facts (title, url) and the repo's default branch — the
@@ -1575,7 +1670,14 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     }
 
     // 2. Remove the worktree (force: the user confirmed discarding any changes).
-    git(&checkout, &["worktree", "remove", "--force", &work_dir.to_string_lossy()])?;
+    //    A spawn that failed in the background (issue #77) can leave a Session
+    //    record whose worktree was never created — tolerate a missing dir so the
+    //    broken row can still be torn down, just pruning any dangling admin entry.
+    if work_dir.exists() {
+        git(&checkout, &["worktree", "remove", "--force", &work_dir.to_string_lossy()])?;
+    } else {
+        let _ = git(&checkout, &["worktree", "prune"]);
+    }
 
     // 3. Delete the local branch (-D: spawn unset the upstream and -d checks the
     //    wrong base, so it would refuse even for merged branches).

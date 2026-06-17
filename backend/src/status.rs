@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 pub struct StatusRecord {
     /// Workspace id (= `Session.id`, e.g. "8-surface-per-session").
     pub workspace: String,
-    /// One of: running | busy | needs_you | idle | ended.
+    /// One of: creating | running | busy | needs_you | idle | ended. `creating`
+    /// is written by `spawn.rs` while a fresh worktree is being built in the
+    /// background (not a Claude hook state) and is cleared once the worktree is
+    /// ready, after which Claude's own hooks own the record.
     pub state: String,
     /// Claude session id from the hook payload, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -285,6 +288,57 @@ fn load_all() -> Vec<StatusRecord> {
 /// emits an `ended` record so the popover clears the row. No-op if absent.
 pub fn remove(ws: &str) {
     let _ = std::fs::remove_file(status_path(ws));
+}
+
+/// Mark a workspace as `creating` — the worktree is being built in the
+/// background (`spawn.rs`). Written synchronously at spawn start, *before* the
+/// `Session` row's heavy work, so the popover shows a "Creating…" pill right
+/// away. Not a Claude hook state; cleared by `clear_creating` when the worktree
+/// is ready or replaced by `write_spawn_error` on failure.
+pub fn write_creating(ws: &str) {
+    let _ = write_record_atomic(&StatusRecord {
+        workspace: ws.to_string(),
+        state: "creating".into(),
+        session_id: None,
+        cwd: None,
+        detail: None,
+        last_error: None,
+        ts: chrono::Utc::now().to_rfc3339(),
+    });
+}
+
+/// Clear a `creating` marker once the worktree is ready, so Claude's own hooks
+/// (SessionStart → running, …) take over the record. Removes the file only if it
+/// still reads `creating`, so a status Claude may already have written (it can't,
+/// since this runs before the editor opens — belt and braces) is never clobbered.
+/// The watcher then emits `ended`, clearing the pill until Claude's first hook.
+pub fn clear_creating(ws: &str) {
+    if read_record(ws).map(|r| r.state == "creating").unwrap_or(false) {
+        remove(ws);
+    }
+}
+
+/// Record a failed background spawn as a surfaced `last_error` on the workspace's
+/// status, reusing the dismissible error block the popover already shows for
+/// failed tool calls. The `Session` row is kept so the user can read the error
+/// and tear the broken workspace down.
+pub fn write_spawn_error(ws: &str, message: &str) {
+    let ts = chrono::Utc::now().to_rfc3339();
+    let _ = write_record_atomic(&StatusRecord {
+        workspace: ws.to_string(),
+        state: "idle".into(),
+        session_id: None,
+        cwd: None,
+        detail: None,
+        last_error: Some(ToolError {
+            tool: None,
+            message: message.to_string(),
+            ts: ts.clone(),
+            count: 1,
+            surfaced: true,
+        }),
+        ts,
+    });
 }
 
 /// Snapshot of every tracked session's status — read by the popover on open so

@@ -38,6 +38,8 @@ export interface IssueNode {
 }
 
 export interface SpawnResult {
+  /** Workspace/session id (= Session.id) of the row this spawn created/reused. */
+  session_id: string;
   work_dir: string;
   branch: string;
   issue_url: string;
