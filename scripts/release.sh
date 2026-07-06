@@ -11,6 +11,8 @@
 #   release.sh build
 #       Source .env.release, validate the signing identity, `tauri build`, and
 #       verify the signature / Gatekeeper assessment / notarization staple.
+#       tauri only notarizes the .app, so this also submits + staples the .dmg
+#       (which publish requires); already-stapled artifacts are skipped.
 #
 #   release.sh publish [--notes-file <file>]
 #       Tag vX.Y.Z, create the GitHub Release (REST API, not `gh`), and upload
@@ -64,6 +66,41 @@ source_env() {
 # The version is single-sourced from tauri.conf.json.
 read_version() {
   python3 -c 'import json;print(json.load(open("backend/tauri.conf.json"))["version"])'
+}
+
+# Populate the global NOTARY_AUTH_ARGS array with the `xcrun notarytool` auth
+# flags for whichever credentials are present (App Store Connect API key
+# preferred, Apple ID app-specific password as fallback). Returns non-zero if
+# neither is configured. A global (not a bash-4 nameref) so this stays 3.2-safe.
+NOTARY_AUTH_ARGS=()
+notarytool_auth_args() {
+  if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY_PATH:-}" ]]; then
+    NOTARY_AUTH_ARGS=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
+  elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+    NOTARY_AUTH_ARGS=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+  else
+    return 1
+  fi
+}
+
+# Notarize + staple a standalone artifact (e.g. the .dmg). Tauri notarizes and
+# staples the .app inside the bundle, but the disk image wrapping it gets no
+# ticket of its own — so `stapler validate <dmg>` (which `publish` enforces)
+# fails until we submit the dmg itself. Idempotent: skips if already stapled.
+notarize_and_staple() {
+  local artifact="$1"
+  if xcrun stapler validate "$artifact" >/dev/null 2>&1; then
+    echo "Already notarized: $(basename "$artifact") ✓"
+    return 0
+  fi
+  if ! notarytool_auth_args; then
+    echo "warning: no notarization credentials — $(basename "$artifact") left un-notarized;" >&2
+    echo "         'publish' will refuse it. Set APPLE_API_* or APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID." >&2
+    return 1
+  fi
+  echo "Notarizing $(basename "$artifact")…"
+  xcrun notarytool submit "$artifact" "${NOTARY_AUTH_ARGS[@]}" --wait
+  xcrun stapler staple "$artifact"
 }
 
 usage() {
@@ -202,9 +239,27 @@ cmd_build() {
   spctl --assess --type execute --verbose=4 "$app" || true
 
   if xcrun stapler validate "$app" >/dev/null 2>&1; then
-    echo "Notarization ticket: stapled ✓"
+    echo "App notarization ticket: stapled ✓"
   else
-    echo "Notarization ticket: not stapled"
+    echo "App notarization ticket: not stapled"
+  fi
+
+  # The .dmg needs its own notarization ticket — tauri only staples the .app
+  # inside it. publish enforces `stapler validate <dmg>`, so do it here.
+  local version dmg dmgs
+  version="$(read_version)"
+  dmgs=(backend/target/release/bundle/dmg/mAIestro_"${version}"_*.dmg)
+  dmg="${dmgs[0]}"
+  echo
+  if [[ -f "$dmg" ]]; then
+    notarize_and_staple "$dmg" || true
+    if xcrun stapler validate "$dmg" >/dev/null 2>&1; then
+      echo "DMG notarization ticket: stapled ✓"
+    else
+      echo "DMG notarization ticket: not stapled — 'publish' will refuse it"
+    fi
+  else
+    echo "warning: no .dmg found for $version to notarize" >&2
   fi
 
   echo
