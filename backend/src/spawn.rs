@@ -464,14 +464,22 @@ fn window_marker(work_dir: &Path) -> Option<String> {
     Some(format!("{parent}/{name}"))
 }
 
+/// Sanitize a value for embedding inside an AppleScript double-quoted string
+/// literal: drop both `"` (would close the literal early) and `\` (AppleScript's
+/// escape character — a trailing one would escape the closing quote and break the
+/// script). `marker` is already path-safe in normal use; this is belt-and-braces.
+fn applescript_literal_safe(s: &str) -> String {
+    s.replace(['"', '\\'], "")
+}
+
 /// Look for an open VS Code window whose title contains `marker` and, if found,
 /// raise it to the front and activate the app. Returns true when one was
 /// focused. Requires Accessibility permission for System Events; any failure
 /// (including a missing grant) is treated as "not found" so the caller can fall
 /// back to launching a window.
 async fn focus_editor_window(marker: &str) -> bool {
-    // marker is path-safe (slug + repo dir name); strip quotes defensively.
-    let safe = marker.replace('"', "");
+    // marker is path-safe (slug + repo dir name); sanitize defensively.
+    let safe = applescript_literal_safe(marker);
     let script = format!(
         r#"tell application "System Events"
   if not (exists process "Code") then return "notfound"
@@ -756,6 +764,20 @@ async fn finish_spawn(bg: SpawnBg) {
     .await;
 }
 
+/// True if `rel` is a safe *relative* path to copy inside the checkout/worktree:
+/// non-empty, not absolute, and with no `..` component — so `checkout.join(rel)`
+/// and `work_dir.join(rel)` cannot escape their base dirs. An `env_files` entry is
+/// user-authored (repo settings) and normally a bare name like `.env.local`, but an
+/// absolute (`/Users/me/.ssh/id_rsa`) or `..`-laden entry would otherwise copy an
+/// arbitrary file *into* the worktree, or write the copy *outside* it.
+fn is_contained_relpath(rel: &str) -> bool {
+    use std::path::{Component, Path};
+    !rel.is_empty()
+        && Path::new(rel)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
 /// The actual worktree build, factored out so `finish_spawn` can map its result
 /// to the status record. Returns non-fatal warnings on success; an `Err` is a
 /// fatal failure (e.g. `git worktree add`) that leaves no usable worktree.
@@ -774,6 +796,12 @@ async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
 
     // Copy configured env files (relative to checkout) into the worktree.
     for rel in &bg.env_files {
+        // Reject absolute or `..`-escaping entries so the copy can't read outside
+        // the checkout or write outside the worktree.
+        if !is_contained_relpath(rel) {
+            warnings.push(format!("env file path not contained in checkout, skipped: {rel}"));
+            continue;
+        }
         let src = bg.checkout.join(rel);
         if !src.is_file() {
             warnings.push(format!("env file not found, skipped: {rel}"));
@@ -1449,7 +1477,7 @@ pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> 
 /// grant that we'd never prompted for — so the close was failing silently.
 /// No-op if VS Code isn't running.
 async fn close_editor_window(marker: &str) {
-    let safe = marker.replace('"', "");
+    let safe = applescript_literal_safe(marker);
     let script = format!(
         r#"tell application "System Events"
   if not (exists process "Code") then return
@@ -1483,7 +1511,7 @@ enum WinProbe {
 /// Probe for an open VS Code window whose title contains `marker`, via the
 /// accessibility API (System Events).
 async fn probe_editor_window(marker: &str) -> WinProbe {
-    let safe = marker.replace('"', "");
+    let safe = applescript_literal_safe(marker);
     let script = format!(
         r#"tell application "System Events"
   if not (exists process "Code") then return "absent"
@@ -1689,12 +1717,18 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
 
     // 4. Remove the leftover wrapper dir (`<prefix><workspace>`), gating removal
     //    on the path actually starting with the repo's configured worktree
-    //    prefix so we never remove_dir_all something outside it.
+    //    prefix so we never remove_dir_all something outside it. A spawn-generated
+    //    path never contains `..`; reject any that does before the string-prefix
+    //    check, so a tampered session record can't tunnel out of the prefix (e.g.
+    //    `.../work-x/../../../etc`) while still matching the prefix literally.
     if let Some(parent) = work_dir.parent() {
         let prefix = effective_worktree_prefix(settings.worktree_prefix.as_deref());
         let expanded = expand_tilde(&prefix);
+        let has_dotdot = parent
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir));
         let under_prefix = parent.to_string_lossy().starts_with(&*expanded.to_string_lossy());
-        if under_prefix && parent.exists() {
+        if !has_dotdot && under_prefix && parent.exists() {
             if let Err(e) = std::fs::remove_dir_all(parent) {
                 tracing::warn!(dir = %parent.display(), error = %e, "could not remove worktree wrapper dir during teardown");
             }

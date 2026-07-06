@@ -83,6 +83,22 @@ fn status_path(ws: &str) -> PathBuf {
     status_dir().join(format!("{ws}.json"))
 }
 
+/// True if `ws` is safe to use as a single status-file component — non-empty, not
+/// `.`/`..`, and containing no path separator or NUL. Internally generated ids
+/// (`<issue>-<slug>`, slug is `[a-z0-9-]`) always pass; this only rejects crafted
+/// input reaching the untrusted boundaries (`run_hook_cli`'s `--workspace` argv and
+/// the `clear_session_error` command), which could otherwise make `status_path`
+/// escape `~/.maiestro/status/` via `..`/`/` and write attacker-controlled JSON to
+/// an arbitrary user-writable path.
+fn is_safe_workspace_id(ws: &str) -> bool {
+    !ws.is_empty()
+        && ws != "."
+        && ws != ".."
+        && !ws.contains('/')
+        && !ws.contains('\\')
+        && !ws.contains('\0')
+}
+
 // ── Hook CLI (`maiestro hook <state> --workspace <ws-id>`) ──────────────────────
 
 /// Map the CLI state argument + the parsed hook payload into the record's
@@ -186,7 +202,7 @@ pub fn run_hook_cli(args: &[String]) {
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or_default();
-    if state_arg.is_empty() || workspace.is_empty() {
+    if state_arg.is_empty() || !is_safe_workspace_id(&workspace) {
         return;
     }
 
@@ -243,10 +259,48 @@ fn extract_error_message(payload: &serde_json::Value) -> String {
     for c in candidates.into_iter().flatten() {
         let trimmed = c.trim();
         if !trimmed.is_empty() {
-            return trimmed.to_string();
+            return redact_secrets(trimmed);
         }
     }
     "Tool call failed".to_string()
+}
+
+/// Redact credentials that can appear in a tool's error text before it is written
+/// to the persistent log or shown in the popover. A failed session command (e.g.
+/// `curl https://user:token@host/…`) can put a secret in stderr; this masks the
+/// `user:pass@` userinfo of any URL in the message, and bounds the length so a huge
+/// error can't bloat the log. Dependency-free (no regex) to keep the hook helper
+/// minimal, matching the rest of the hook path.
+fn redact_secrets(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i..].starts_with("://") {
+            out.push_str("://");
+            i += 3;
+            // The authority runs until the next path/query/fragment/quote/space.
+            let start = i;
+            while i < s.len()
+                && !matches!(bytes[i], b'/' | b'?' | b'#' | b' ' | b'\t' | b'"' | b'\'')
+            {
+                i += 1;
+            }
+            let authority = &s[start..i];
+            match authority.rfind('@') {
+                Some(at) => {
+                    out.push_str("***@");
+                    out.push_str(&authority[at + 1..]);
+                }
+                None => out.push_str(authority),
+            }
+        } else {
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out.chars().take(500).collect()
 }
 
 /// Read a workspace's current status record from disk, if present and valid.
@@ -258,6 +312,14 @@ fn read_record(ws: &str) -> Option<StatusRecord> {
 /// Write `~/.maiestro/status/<ws>.json` atomically (temp file + rename) so the
 /// watcher never reads a half-written record.
 fn write_record_atomic(record: &StatusRecord) -> std::io::Result<()> {
+    // Defense in depth: never let a crafted workspace id escape the status dir via
+    // the temp/final path, even if a future caller skips the entry-point checks.
+    if !is_safe_workspace_id(&record.workspace) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsafe workspace id",
+        ));
+    }
     let dir = status_dir();
     std::fs::create_dir_all(&dir)?;
     let data = serde_json::to_string_pretty(record).unwrap_or_default();
@@ -354,6 +416,9 @@ pub fn sessions_status_list() -> Vec<StatusRecord> {
 /// record is missing or already clear.
 #[tauri::command]
 pub fn clear_session_error(workspace: String) {
+    if !is_safe_workspace_id(&workspace) {
+        return;
+    }
     let Some(mut record) = read_record(&workspace) else {
         return;
     };
@@ -508,6 +573,37 @@ mod tests {
         let prior = Some(err("Bash", 1, false));
         let e = next_last_error("idle", prior, None, "t").unwrap();
         assert!(e.surfaced);
+    }
+
+    // Real ids pass; path-traversal / separator / dot ids are rejected so a
+    // crafted `--workspace` can't make status_path escape ~/.maiestro/status/.
+    #[test]
+    fn workspace_id_validation() {
+        assert!(is_safe_workspace_id("8-surface-per-session"));
+        assert!(is_safe_workspace_id("123"));
+        assert!(!is_safe_workspace_id(""));
+        assert!(!is_safe_workspace_id("."));
+        assert!(!is_safe_workspace_id(".."));
+        assert!(!is_safe_workspace_id("../../etc/passwd"));
+        assert!(!is_safe_workspace_id("a/b"));
+        assert!(!is_safe_workspace_id("a\\b"));
+        assert!(!is_safe_workspace_id("a\0b"));
+    }
+
+    // Credentialed URLs in tool stderr are masked; ordinary text is untouched.
+    #[test]
+    fn redact_masks_url_userinfo() {
+        assert_eq!(
+            redact_secrets("curl https://user:tok3n@github.com/x failed"),
+            "curl https://***@github.com/x failed"
+        );
+        assert_eq!(
+            redact_secrets("connect to postgres://admin:s3cret@db:5432/app"),
+            "connect to postgres://***@db:5432/app"
+        );
+        // No userinfo → unchanged; plain messages pass through verbatim.
+        assert_eq!(redact_secrets("GET https://api.github.com/x 404"), "GET https://api.github.com/x 404");
+        assert_eq!(redact_secrets("file not found: /tmp/x"), "file not found: /tmp/x");
     }
 
     // A new turn/session clears any error; other events carry it forward.

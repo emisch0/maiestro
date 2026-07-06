@@ -180,8 +180,8 @@ export const api = {
   listCredentialTypes: () =>
     invoke<CredentialTypeDto[]>("plugins_list_credential_types"),
 
-  getCredential: (type_id: string, scope: CredentialScope) =>
-    invoke<string>("credentials_get", { typeId: type_id, scope }),
+  credentialExists: (type_id: string, scope: CredentialScope) =>
+    invoke<boolean>("credentials_exists", { typeId: type_id, scope }),
 
   setCredential: (type_id: string, scope: CredentialScope, secret: string) =>
     invoke<void>("credentials_set", { typeId: type_id, scope, secret }),
