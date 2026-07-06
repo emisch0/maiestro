@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 #
-# Build a signed, notarized macOS release of mAIestro.
+# Release pipeline for mAIestro. Three phases, each independently runnable and
+# idempotent so a partially-failed release can be resumed by re-running it:
+#
+#   release.sh bump <patch|minor|major|X.Y.Z>
+#       Bump the version in backend/tauri.conf.json, package.json,
+#       backend/Cargo.toml, and backend/Cargo.lock, then assert they agree.
+#       Does NOT commit — the caller commits.
+#
+#   release.sh build
+#       Source .env.release, validate the signing identity, `tauri build`, and
+#       verify the signature / Gatekeeper assessment / notarization staple.
+#
+#   release.sh publish [--notes-file <file>]
+#       Tag vX.Y.Z, create the GitHub Release (REST API, not `gh`), and upload
+#       the signed+notarized .dmg. Each step is skipped if already done.
 #
 # Why signing matters here (beyond distribution): macOS binds a Keychain item's
 # "Always Allow" decision to the app's *designated requirement*. For an ad-hoc /
@@ -15,11 +29,13 @@
 #     will not launch on other people's Macs.
 #   * Notarization credentials (see below). Without them the build is signed but
 #     not notarized, and Gatekeeper will block it on other machines.
+#   * For `publish`: a GITHUB_TOKEN with contents:write on this repo.
 #
 # Configuration lives in a gitignored .env.release at the repo root (see
 # .env.release.example). The script sources it, so you never export by hand.
 #
 #   APPLE_SIGNING_IDENTITY   e.g. "Developer ID Application: Your Name (CCMY5ZR77Q)"
+#   GITHUB_TOKEN             fine-grained PAT, contents:write on this repo
 #
 # Notarization — provide EITHER an App Store Connect API key:
 #   APPLE_API_ISSUER, APPLE_API_KEY, APPLE_API_KEY_PATH
@@ -31,59 +47,307 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# --- shared helpers ---------------------------------------------------------
+
+die() { echo "error: $*" >&2; exit 1; }
+
 # Load signing identity + notarization secrets from the gitignored env file.
-if [[ -f .env.release ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env.release
-  set +a
-fi
+source_env() {
+  if [[ -f .env.release ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source .env.release
+    set +a
+  fi
+}
 
-if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
-  echo "error: APPLE_SIGNING_IDENTITY is not set." >&2
-  echo "       Copy .env.release.example to .env.release and fill it in." >&2
-  exit 1
-fi
+# The version is single-sourced from tauri.conf.json.
+read_version() {
+  python3 -c 'import json;print(json.load(open("backend/tauri.conf.json"))["version"])'
+}
 
-if ! security find-identity -v -p codesigning | grep -qF "$APPLE_SIGNING_IDENTITY"; then
-  echo "error: signing identity not found in keychain: $APPLE_SIGNING_IDENTITY" >&2
-  exit 1
-fi
+usage() {
+  cat >&2 <<'EOF'
+usage: scripts/release.sh <command>
 
-case "$APPLE_SIGNING_IDENTITY" in
-  "Developer ID Application:"*) ;;
-  *)
-    echo "warning: '$APPLE_SIGNING_IDENTITY' is not a 'Developer ID Application'" >&2
-    echo "         identity; the resulting app may not run on other Macs." >&2
-    ;;
+  bump <patch|minor|major|X.Y.Z>   bump version across all manifests
+  build                            build, sign, notarize, and verify the .app
+  publish [--notes-file <file>]    tag + create GitHub Release + upload .dmg
+
+Each command is idempotent; re-run to resume a partial release.
+EOF
+}
+
+# --- bump -------------------------------------------------------------------
+
+cmd_bump() {
+  local spec="${1:-}"
+  [[ -n "$spec" ]] || die "bump needs a spec: patch | minor | major | X.Y.Z"
+
+  local current new
+  current="$(read_version)"
+  new="$(python3 - "$current" "$spec" <<'PY'
+import re, sys
+cur, spec = sys.argv[1], sys.argv[2]
+if re.fullmatch(r'\d+\.\d+\.\d+', spec):
+    print(spec); sys.exit(0)
+try:
+    maj, minr, pat = (int(x) for x in cur.split('.'))
+except ValueError:
+    sys.exit(f"error: current version {cur!r} is not X.Y.Z")
+if spec == 'major':   maj, minr, pat = maj + 1, 0, 0
+elif spec == 'minor': minr, pat = minr + 1, 0
+elif spec == 'patch': pat = pat + 1
+else: sys.exit(f"error: unknown bump spec {spec!r} (want patch|minor|major|X.Y.Z)")
+print(f'{maj}.{minr}.{pat}')
+PY
+)"
+
+  echo "Bumping $current -> $new"
+
+  # Format-preserving edits: replace only the version token in each file.
+  # Cargo.lock's `maiestro` entry is edited directly rather than via `cargo`:
+  # `maiestro` is the root workspace member (nothing depends on it), so its
+  # version can be rewritten in place without re-resolving the graph — which
+  # would need the network for platform-only deps not in the local cache.
+  python3 - "$new" <<'PY'
+import re, sys
+new = sys.argv[1]
+edits = [
+    ("backend/tauri.conf.json", r'("version"\s*:\s*")[^"]*(")', rf'\g<1>{new}\g<2>'),
+    ("package.json",            r'("version"\s*:\s*")[^"]*(")', rf'\g<1>{new}\g<2>'),
+    ("backend/Cargo.toml",      r'(?m)^version = "[^"]*"',       f'version = "{new}"'),
+    ("backend/Cargo.lock",      r'(?m)(^name = "maiestro"\nversion = ")[^"]*(")',
+                                rf'\g<1>{new}\g<2>'),
+]
+for path, pat, repl in edits:
+    s = open(path).read()
+    s2, n = re.subn(pat, repl, s, count=1)
+    if n != 1:
+        sys.exit(f"error: expected exactly one version field in {path}, found {n}")
+    open(path, "w").write(s2)
+PY
+
+  # Assert every manifest (and the lockfile) now agree.
+  python3 - "$new" <<'PY'
+import json, re, sys
+want = sys.argv[1]
+def cargo_lock_version():
+    s = open("backend/Cargo.lock").read()
+    m = re.search(r'(?m)^name = "maiestro"\nversion = "([^"]*)"', s)
+    return m.group(1) if m else None
+def cargo_toml_version():
+    s = open("backend/Cargo.toml").read()
+    m = re.search(r'(?m)^version = "([^"]*)"', s)
+    return m.group(1) if m else None
+found = {
+    "backend/tauri.conf.json": json.load(open("backend/tauri.conf.json"))["version"],
+    "package.json":            json.load(open("package.json"))["version"],
+    "backend/Cargo.toml":      cargo_toml_version(),
+    "backend/Cargo.lock":      cargo_lock_version(),
+}
+bad = {k: v for k, v in found.items() if v != want}
+if bad:
+    sys.exit("error: version mismatch after bump: " +
+             ", ".join(f"{k}={v!r}" for k, v in bad.items()) + f" (want {want!r})")
+print(f"All manifests at {want}")
+PY
+
+  echo
+  echo "Bumped to $new. Review, commit, then: scripts/release.sh build && scripts/release.sh publish"
+}
+
+# --- build ------------------------------------------------------------------
+
+cmd_build() {
+  source_env
+
+  [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]] || {
+    echo "error: APPLE_SIGNING_IDENTITY is not set." >&2
+    echo "       Copy .env.release.example to .env.release and fill it in." >&2
+    exit 1
+  }
+
+  if ! security find-identity -v -p codesigning | grep -qF "$APPLE_SIGNING_IDENTITY"; then
+    die "signing identity not found in keychain: $APPLE_SIGNING_IDENTITY"
+  fi
+
+  case "$APPLE_SIGNING_IDENTITY" in
+    "Developer ID Application:"*) ;;
+    *)
+      echo "warning: '$APPLE_SIGNING_IDENTITY' is not a 'Developer ID Application'" >&2
+      echo "         identity; the resulting app may not run on other Macs." >&2
+      ;;
+  esac
+
+  # Tauri auto-notarizes when these are present at build time. Warn if absent so
+  # a silently un-notarized build doesn't slip out.
+  if [[ -z "${APPLE_API_KEY:-}" && -z "${APPLE_PASSWORD:-}" ]]; then
+    echo "warning: no notarization credentials set — build will be signed but NOT" >&2
+    echo "         notarized, and Gatekeeper will block it on other machines." >&2
+  fi
+
+  echo "Building signed release as: $APPLE_SIGNING_IDENTITY"
+  pnpm tauri build
+
+  local app="backend/target/release/bundle/macos/mAIestro.app"
+  echo
+  echo "Verifying signature…"
+  codesign --verify --deep --strict --verbose=2 "$app"
+  echo "Designated requirement:"
+  codesign -d -r- "$app" 2>&1 | sed -n 's/^designated => /  /p'
+
+  echo
+  echo "Gatekeeper assessment:"
+  spctl --assess --type execute --verbose=4 "$app" || true
+
+  if xcrun stapler validate "$app" >/dev/null 2>&1; then
+    echo "Notarization ticket: stapled ✓"
+  else
+    echo "Notarization ticket: not stapled"
+  fi
+
+  echo
+  echo "Done. Bundle: $app"
+}
+
+# --- publish ----------------------------------------------------------------
+
+# Prints the response body then a trailing line with the HTTP status code.
+github_request() {
+  local method="$1" url="$2" body_file="${3:-}" ctype="${4:-application/json}"
+  local args=(-sS -X "$method"
+    -H "Authorization: Bearer $GITHUB_TOKEN"
+    -H "Accept: application/vnd.github+json"
+    -H "X-GitHub-Api-Version: 2022-11-28"
+    -w $'\n%{http_code}')
+  if [[ -n "$body_file" ]]; then
+    args+=(-H "Content-Type: $ctype" --data-binary @"$body_file")
+  fi
+  curl "${args[@]}" "$url"
+}
+
+cmd_publish() {
+  local notes_file=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --notes-file) notes_file="${2:-}"; shift 2 ;;
+      *) die "unknown publish arg: $1" ;;
+    esac
+  done
+  [[ -z "$notes_file" || -f "$notes_file" ]] || die "notes file not found: $notes_file"
+
+  source_env
+  [[ -n "${GITHUB_TOKEN:-}" ]] || die "GITHUB_TOKEN is not set (add it to .env.release)"
+
+  command -v git >/dev/null || die "git not found"
+  [[ -z "$(git status --porcelain)" ]] || die "working tree is dirty — commit the release before publishing"
+
+  local version tag
+  version="$(read_version)"
+  tag="v$version"
+
+  # Derive owner/repo from the origin remote (https or ssh form).
+  local origin owner_repo owner repo
+  origin="$(git remote get-url origin)"
+  owner_repo="$(printf '%s' "$origin" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')"
+  owner="${owner_repo%%/*}"
+  repo="${owner_repo##*/}"
+  [[ "$owner" != "$owner_repo" && -n "$owner" && -n "$repo" ]] \
+    || die "could not parse owner/repo from origin: $origin"
+
+  # Locate the signed dmg and confirm it is notarized before publishing.
+  local dmg dmgs=(backend/target/release/bundle/dmg/mAIestro_"${version}"_*.dmg)
+  dmg="${dmgs[0]}"
+  [[ -f "$dmg" ]] || die "no .dmg for $version — run 'scripts/release.sh build' first"
+  xcrun stapler validate "$dmg" >/dev/null 2>&1 \
+    || die "$dmg is not notarized (stapler validate failed) — refusing to publish"
+
+  local api="https://api.github.com"
+  local resp status data
+
+  # 1. Tag. Reuse if it already points at HEAD; conflict if it's elsewhere.
+  local head_sha; head_sha="$(git rev-parse HEAD)"
+  if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    local tag_sha; tag_sha="$(git rev-parse "$tag^{commit}")"
+    [[ "$tag_sha" == "$head_sha" ]] \
+      || die "tag $tag already exists at $tag_sha, not HEAD ($head_sha)"
+    echo "Tag $tag already at HEAD ✓"
+  else
+    echo "Creating tag $tag"
+    git tag "$tag"
+  fi
+  # Push the tag (no-op if the remote already has it at this sha).
+  git push origin "$tag"
+
+  # 2. Release. Reuse an existing one for the tag, else create it.
+  resp="$(github_request GET "$api/repos/$owner/$repo/releases/tags/$tag")"
+  status="${resp##*$'\n'}"; data="${resp%$'\n'*}"
+
+  local release_id upload_url
+  if [[ "$status" == "200" ]]; then
+    echo "Release $tag already exists — reusing"
+    release_id="$(printf '%s' "$data" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')"
+    upload_url="$(printf '%s' "$data" | python3 -c 'import json,sys;print(json.load(sys.stdin)["upload_url"])')"
+  elif [[ "$status" == "404" ]]; then
+    echo "Creating release $tag"
+    local body_json
+    body_json="$(NOTES_FILE="$notes_file" TAG="$tag" python3 <<'PY'
+import json, os
+notes_file = os.environ.get("NOTES_FILE") or ""
+tag = os.environ["TAG"]
+body = open(notes_file).read() if notes_file else ""
+print(json.dumps({
+    "tag_name": tag, "name": tag, "body": body,
+    "draft": False, "prerelease": False,
+}))
+PY
+)"
+    local tmp_payload; tmp_payload="$(mktemp)"
+    printf '%s' "$body_json" > "$tmp_payload"
+    resp="$(github_request POST "$api/repos/$owner/$repo/releases" "$tmp_payload")"
+    rm -f "$tmp_payload"
+    status="${resp##*$'\n'}"; data="${resp%$'\n'*}"
+    [[ "$status" == "201" ]] || die "creating release failed (HTTP $status): $data"
+    release_id="$(printf '%s' "$data" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')"
+    upload_url="$(printf '%s' "$data" | python3 -c 'import json,sys;print(json.load(sys.stdin)["upload_url"])')"
+  else
+    die "looking up release $tag failed (HTTP $status): $data"
+  fi
+
+  # 3. Asset. Skip if a same-named asset is already attached.
+  local dmg_name; dmg_name="$(basename "$dmg")"
+  resp="$(github_request GET "$api/repos/$owner/$repo/releases/$release_id/assets")"
+  status="${resp##*$'\n'}"; data="${resp%$'\n'*}"
+  [[ "$status" == "200" ]] || die "listing assets failed (HTTP $status): $data"
+
+  if printf '%s' "$data" | NAME="$dmg_name" python3 -c \
+      'import json,os,sys;sys.exit(0 if any(a["name"]==os.environ["NAME"] for a in json.load(sys.stdin)) else 1)'; then
+    echo "Asset $dmg_name already uploaded ✓"
+  else
+    # upload_url is templated: ".../assets{?name,label}" — strip the template.
+    local upload_base="${upload_url%%\{*}"
+    echo "Uploading $dmg_name"
+    resp="$(github_request POST "$upload_base?name=$dmg_name" "$dmg" "application/x-apple-diskimage")"
+    status="${resp##*$'\n'}"; data="${resp%$'\n'*}"
+    [[ "$status" == "201" ]] || die "uploading $dmg_name failed (HTTP $status): $data"
+    echo "Uploaded $dmg_name ✓"
+  fi
+
+  local html_url; html_url="$(github_request GET "$api/repos/$owner/$repo/releases/$release_id" \
+    | sed '$d' | python3 -c 'import json,sys;print(json.load(sys.stdin)["html_url"])')"
+  echo
+  echo "Released $tag: $html_url"
+}
+
+# --- dispatch ---------------------------------------------------------------
+
+cmd="${1:-}"
+[[ $# -gt 0 ]] && shift || true
+case "$cmd" in
+  bump)    cmd_bump "$@" ;;
+  build)   cmd_build "$@" ;;
+  publish) cmd_publish "$@" ;;
+  ""|-h|--help|help) usage; [[ "$cmd" == "" ]] && exit 1 || exit 0 ;;
+  *) echo "error: unknown command: $cmd" >&2; usage; exit 1 ;;
 esac
-
-# Tauri auto-notarizes when these are present at build time. Warn if absent so a
-# silently un-notarized build doesn't slip out.
-if [[ -z "${APPLE_API_KEY:-}" && -z "${APPLE_PASSWORD:-}" ]]; then
-  echo "warning: no notarization credentials set — build will be signed but NOT" >&2
-  echo "         notarized, and Gatekeeper will block it on other machines." >&2
-fi
-
-echo "Building signed release as: $APPLE_SIGNING_IDENTITY"
-pnpm tauri build
-
-APP="backend/target/release/bundle/macos/mAIestro.app"
-echo
-echo "Verifying signature…"
-codesign --verify --deep --strict --verbose=2 "$APP"
-echo "Designated requirement:"
-codesign -d -r- "$APP" 2>&1 | sed -n 's/^designated => /  /p'
-
-echo
-echo "Gatekeeper assessment:"
-spctl --assess --type execute --verbose=4 "$APP" || true
-
-if xcrun stapler validate "$APP" >/dev/null 2>&1; then
-  echo "Notarization ticket: stapled ✓"
-else
-  echo "Notarization ticket: not stapled"
-fi
-
-echo
-echo "Done. Bundle: $APP"

@@ -51,7 +51,15 @@ Keychain-stored tokens still matter, but **only for mAIestro's own GitHub API ca
 
 Release builds must be signed with a **Developer ID Application** certificate and notarized. Beyond distribution, this is also what makes the app's Keychain access usable: macOS binds a Keychain item's "Always Allow" decision to the app's *designated requirement*. For an ad-hoc/unsigned build that requirement is the binary's cdhash, which changes on every rebuild — so the access prompt returns each launch. A stable Developer ID signature anchors the requirement to the certificate, so the grant persists.
 
-Dev builds (`tauri dev`) run the raw, ad-hoc-signed binary and will re-prompt on each rebuild — that is expected and accepted. Signing is **not** committed to `tauri.conf.json`; the signing identity and notarization secrets live in a gitignored `.env.release` (template: `.env.release.example`). Run `scripts/release.sh`, which sources that file, builds via `tauri build`, and verifies the signature/notarization.
+Dev builds (`tauri dev`) run the raw, ad-hoc-signed binary and will re-prompt on each rebuild — that is expected and accepted. Signing is **not** committed to `tauri.conf.json`; the signing identity and notarization secrets live in a gitignored `.env.release` (template: `.env.release.example`).
+
+`scripts/release.sh` is the release pipeline, split into three idempotent phases so a partially-failed release resumes by re-running it:
+
+- **`bump <patch|minor|major|X.Y.Z>`** — version is single-sourced from `backend/tauri.conf.json`; this bumps it there plus `package.json` and `backend/Cargo.toml`, syncs `backend/Cargo.lock` (via `cargo metadata --offline`, no full build), and asserts all four agree. It does not commit.
+- **`build`** — sources `.env.release`, validates the `APPLE_SIGNING_IDENTITY`, runs `pnpm tauri build` (Tauri auto-notarizes when the Apple credentials are present), and verifies the signature / Gatekeeper assessment / notarization staple.
+- **`publish [--notes-file <file>]`** — reads the version, derives `owner/repo` from the `origin` remote, then tags `vX.Y.Z`, creates the GitHub Release, and uploads the notarized `.dmg`. It talks to GitHub via the **REST API** (`curl` + `GITHUB_TOKEN` from `.env.release`), not `gh`, matching the backend's "Talk to GitHub directly" decision. Each step (tag, release, asset) is skipped if already present, and it refuses to publish a dirty tree or an un-notarized `.dmg`.
+
+The **`/release` skill** (`.claude/skills/release/SKILL.md`) drives the whole pipeline, adding the judgment steps (release-notes drafting, user confirmation). It always runs from the **primary checkout** (the first `git worktree list` entry) on `main`, so it works even when invoked from a mAIestro-spawned feature worktree — which has no `.env.release` and must never be released from.
 
 ### Backend logging
 
