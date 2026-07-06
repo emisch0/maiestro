@@ -174,7 +174,7 @@ fn main() {
         }))
         .invoke_handler(tauri::generate_handler![
             credentials::credentials_set,
-            credentials::credentials_get,
+            credentials::credentials_exists,
             credentials::credentials_delete,
             plugins_list_credential_types,
             repo_settings::repos_list,

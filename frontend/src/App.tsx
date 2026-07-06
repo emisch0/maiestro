@@ -243,8 +243,8 @@ function Settings() {
       await Promise.all(
         credTypes.map(async (t) => {
           try {
-            await api.getCredential(t.type_id, scope);
-            patchCred(t.type_id, { isSet: true });
+            const isSet = await api.credentialExists(t.type_id, scope);
+            patchCred(t.type_id, { isSet });
           } catch {
             patchCred(t.type_id, { isSet: false });
           }

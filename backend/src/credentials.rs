@@ -75,17 +75,23 @@ pub fn credentials_set(
     Ok(())
 }
 
+/// Whether a credential is stored for this type + scope. Returns only a boolean —
+/// the secret value is never handed to the webview (the frontend only needs "is it
+/// set?"). The backend reads the token itself via `GitHub::for_identity` when it
+/// actually needs it, so no command exposes the raw value across the IPC boundary.
 #[tauri::command]
-pub fn credentials_get(
+pub fn credentials_exists(
     type_id: String,
     scope: CredentialScope,
-) -> Result<String, CredentialError> {
+) -> Result<bool, CredentialError> {
     let CredentialScope::Identity { identity_id } = &scope;
     // Log the credential type + identity scope only — never the secret value.
-    crate::log_invoke_debug!("credentials_get", type_id = %type_id, identity = %identity_id);
-    let value = CredentialStore::get(&type_id, &scope)?;
-    crate::identities::register(identity_id);
-    Ok(value)
+    crate::log_invoke_debug!("credentials_exists", type_id = %type_id, identity = %identity_id);
+    match CredentialStore::get(&type_id, &scope) {
+        Ok(_) => Ok(true),
+        Err(CredentialError::NotFound) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 #[tauri::command]
