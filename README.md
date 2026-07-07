@@ -47,6 +47,56 @@ auth.
 5. When the work is ready, create the PR from the workspace row (Claude drafts
    the description), merge it once checks pass, and tear the workspace down.
 
+## The main window
+
+An annotated tour of the popover (illustrative diagram, not a screenshot):
+
+<p align="center">
+  <img src="docs/images/main-window.svg" width="680" alt="Annotated diagram of the mAIestro popover: header, repo groups, lifecycle zones, workspace rows with status pills, and the per-workspace command strip">
+</p>
+
+1. **Show-hidden toggle and Settings** — the eye reveals hidden/snoozed repos
+   and workspaces; the gear opens the Settings window (identities, repos,
+   appearance).
+2. **Repo group** — one section per tracked repo, with a button to open its
+   checkout in VS Code.
+3. **Start Work** — opens the issue picker for this repo (next diagram).
+4. **Claude status pill** — the session's live state, fed by Claude Code hooks:
+   *Working* (rainbow ring), *Needs you* (amber — e.g. a permission prompt),
+   *Ready*/*Idle* (muted). Click it to jump into the session's editor. A red
+   tint means a tool call failed and Claude stopped without recovering; the
+   error shows inline and can be dismissed.
+5. **Lifecycle zones** — workspaces are grouped as *Planning* → *Implementing*
+   (a PR exists) → *Merged*, and slide between zones as their phase changes.
+6. **PR pill** — links to the workspace's pull request; the dot is the live
+   checks status (green passing, spinning while running).
+7. **Quick links** — open the issue on GitHub, reveal the worktree in Finder,
+   or open it in VS Code.
+8. **Command strip** (expand a row with its chevron) — *Create PR* (Claude
+   drafts the description from the diff), *Merge PR* (creates the PR if
+   needed, waits for checks, merges), *Hide…* (snooze the row), and *Tear
+   Down* (remove the worktree; warns about uncommitted or unpushed work).
+   While an operation runs, the row shows a busy pill — *Creating…*,
+   *Creating PR…*, *Merging…*, *Tearing down…*.
+
+Clicking **Start Work** opens the issue picker:
+
+<p align="center">
+  <img src="docs/images/start-work.svg" width="680" alt="Annotated diagram of the Start Work overlay: idea box, issue list with refresh, and the expanded spawn preview with session label, branch, and worktree path">
+</p>
+
+1. **Idea box** — describe what you want in plain words; Claude turns it into
+   a titled GitHub issue.
+2. **Create Issue / Create Issue and Spawn** — file the drafted issue, or file
+   it and immediately spawn a workspace for it.
+3. **Open issues** — the repo's open issues, refreshable; issues that already
+   have a workspace sink to the bottom with their phase.
+4. **Spawn preview** — expanding an issue shows what will be created: an
+   editable short session label (drafted by Claude) plus the derived
+   workspace, branch, and worktree path.
+5. **Spawn Work** — creates the worktree, copies env files, runs post-spawn
+   commands, and opens the editor with Claude briefed on the issue.
+
 ## Configuration
 
 Everything lives under `~/.maiestro/`, in human-editable JSON that plays well
