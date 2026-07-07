@@ -1,31 +1,101 @@
 # mAIestro
 
-A menu-bar launcher for per-issue development workspaces. It creates and tears
-down git worktrees (one per GitHub issue) behind a small always-on menu-bar UI.
+A macOS menu-bar app that launches a development workspace per GitHub issue:
+pick an issue, and mAIestro creates a dedicated git worktree and opens a
+[Claude Code](https://claude.com/claude-code) session on it in VS Code or a
+terminal. It is a launcher and dashboard — the conversation with Claude lives
+in the editor or terminal it opens, not in the app.
 
-Built with [Tauri v2](https://tauri.app) — a Rust backend with a React + Vite +
-TypeScript frontend. macOS is the primary target; Windows/Linux are a goal.
+- **One worktree per issue.** Spawn Work on an issue creates a branch and a
+  worktree (e.g. `~/src/work-42-fix-thing/repo`), runs your setup commands, and
+  opens your editor with Claude already briefed on the issue.
+- **Live session status.** Each row shows what Claude is doing — working,
+  waiting for you, idle — fed by Claude Code hooks, plus surfaced errors when a
+  session gets stuck.
+- **Idea → issue.** Type a rough idea and Claude drafts the GitHub issue title
+  and body before anything is created.
+- **PRs from the dashboard.** Create a Claude-drafted pull request for a
+  workspace, watch its checks, and merge it — then tear the worktree down.
+- **Per-identity GitHub access.** GitHub tokens are stored in the macOS
+  Keychain per identity; each repo is tracked under the identity you choose.
 
-> **Status:** Phase 0 — app shell only. A menu-bar (tray) icon that toggles a
-> window. Worktree and GitHub logic come later. See issue #1.
+## Installation
 
-## Project layout
+Download the latest `.dmg` from the
+[Releases page](https://github.com/emisch0/maiestro/releases) and drag
+**mAIestro** to Applications. Builds are signed and notarized, so the app opens
+without Gatekeeper warnings.
+
+macOS only for now (Windows/Linux are a goal, not a promise). You'll also want
+`git` and [Claude Code](https://claude.com/claude-code) installed and logged
+in — spawned sessions run under your own `claude` login and your ambient git
+auth.
+
+## Quick start
+
+1. Click the wizard-hat icon in the menu bar and open **Settings**.
+2. In **Identities**, add an identity (e.g. `default`) and save a GitHub
+   personal access token for it. The token goes into the macOS Keychain;
+   `~/.maiestro/profiles.json` keeps only a reference to it.
+3. In **Repos**, click **Add Repo**, pick the identity, and choose a repository
+   from the fetched list. Point its settings at your local checkout if it isn't
+   at the default `~/src/<repo-name>`.
+4. Back in the popover, the repo lists its open issues. Hit **Spawn Work** on
+   one — mAIestro creates the worktree, copies your env files, runs your
+   post-spawn commands, and opens the editor with Claude working the issue.
+   Or write your own idea and let Claude draft the issue first.
+5. When the work is ready, create the PR from the workspace row (Claude drafts
+   the description), merge it once checks pass, and tear the workspace down.
+
+## Configuration
+
+Everything lives under `~/.maiestro/`, in human-editable JSON that plays well
+with dotfile tooling. The Settings window is the GUI over the same files.
+
+| Path | What it holds |
+| --- | --- |
+| `profiles.json` | Identities and references to their Keychain credentials (never the secrets themselves) |
+| `repos/<owner>-<name>.json` | Per-repo settings (see below) |
+| `settings.json` | App-wide settings: popover size, theme (`light`/`dark`/`system`) |
+| `sessions/` / `status/` | Workspace records and live session status (managed by the app) |
+
+Per-repo settings cover the local checkout path (`checkout_dir`), where
+worktrees are created (`worktree_prefix`), `.env` files to copy into each new
+worktree (`env_files`), shell commands to run after a worktree is created
+(`post_spawn_commands`, e.g. `pnpm install`), and overrides for the prompts
+mAIestro sends Claude when drafting issues, labels, and PRs (`prompts`).
+
+The format is specified by a JSON Schema at
+[`backend/schemas/repo-settings.schema.json`](backend/schemas/repo-settings.schema.json)
+(bundled with the app at
+`/Applications/mAIestro.app/Contents/Resources/schemas/repo-settings.schema.json`).
+Point a `$schema` key at it for autocomplete when hand-editing.
+
+Logs are written to `~/Library/Logs/com.maiestro.app/lYYYYMM/maiestro-YYYYMMDD.log`
+(UTC-dated, daily rollover) and are viewable from the app's Logs window.
+
+## Development
+
+Built with [Tauri v2](https://tauri.app): a Rust backend and a React + Vite +
+TypeScript frontend.
 
 ```
 maiestro/
-  backend/          # Rust / Tauri: tray icon, window toggle, activation policy
+  backend/          # Rust / Tauri: tray, windows, git/GitHub, spawning, hooks
     src/main.rs
     tauri.conf.json
-    icons/          # app + tray icons (wizard-hat placeholder)
-  frontend/         # React + Vite frontend (the window content)
+    schemas/        # JSON Schema for the per-repo settings file
+    icons/          # app + tray icons
+  frontend/         # React + Vite frontend (popover, Settings, Logs windows)
+  scripts/          # release.sh — bump / build / publish pipeline
   vite.config.ts    # Vite config (root = frontend/)
   package.json      # JS deps + scripts (dev/build/tauri)
 ```
 
-## Prerequisites
+### Prerequisites
 
-Install these once on your machine. Versions in parentheses are what this was
-developed against.
+Install these once. Versions in parentheses are what this was developed
+against.
 
 | Tool | Why | Install |
 | --- | --- | --- |
@@ -38,45 +108,55 @@ developed against.
 After installing Rust, restart your shell (or `source "$HOME/.cargo/env"`) so
 `cargo` is on your `PATH`.
 
-> On Windows/Linux the Node/pnpm/Rust steps are the same; the system
-> prerequisites differ (Tauri's [prerequisites guide](https://tauri.app/start/prerequisites/)
-> lists the WebView2 / `webkit2gtk` packages you'll need instead of Xcode).
-
-## Setup
+### Develop
 
 ```bash
-pnpm install
+pnpm install     # frontend deps + Tauri CLI (use pnpm, not npm)
+pnpm tauri dev   # Vite dev server + the app
 ```
 
-This installs the frontend dependencies and the Tauri CLI. The first run also
-fetches Rust crates (handled automatically on first build).
+The first build compiles the full Rust dependency tree and takes a few
+minutes; later builds are incremental. Dev builds are ad-hoc-signed, so macOS
+re-prompts for Keychain access after each rebuild — expected; only the signed
+release build keeps the grant.
 
-## Develop
-
-```bash
-pnpm tauri dev
-```
-
-This starts the Vite dev server and launches the app. A wizard-hat icon appears
-in the menu bar — click it to toggle the window. The first build compiles the
-full Rust dependency tree and takes a few minutes; later builds are incremental.
-
-## Build a release bundle
+### Build and release
 
 ```bash
 pnpm tauri build
 ```
 
-Produces a `.app` (and `.dmg`) under `backend/target/release/bundle/`.
+produces a `.app` and `.dmg` under `backend/target/release/bundle/` (unsigned
+unless you provide signing credentials).
 
-> Release bundles are unsigned for now, so macOS Gatekeeper will warn on first
-> open (right-click → Open to bypass). Signing/notarization is out of scope for
-> Phase 0.
+Real releases go through [`scripts/release.sh`](scripts/release.sh) — three
+idempotent phases (`bump`, `build`, `publish`) that version-bump, build a
+signed + notarized `.dmg`, and publish a GitHub Release. Signing and
+notarization credentials live in a gitignored `.env.release` (template:
+[`.env.release.example`](.env.release.example)). The `/release` Claude Code
+skill drives the whole pipeline.
 
-## Regenerating icons
-
-The icon set in `backend/icons/` is generated from a single source PNG:
+To regenerate the icon set in `backend/icons/` from a source PNG:
 
 ```bash
 pnpm tauri icon path/to/source.png -o backend/icons
 ```
+
+## Architecture
+
+The recorded design decisions live in [`CLAUDE.md`](CLAUDE.md) — that file is
+the source of truth; the short version:
+
+- **mAIestro launches sessions, it doesn't host them.** Starting work opens a
+  real VS Code window or terminal running `claude`; the app never owns the
+  conversation or its stdio.
+- **Session status comes from Claude Code hooks.** Spawning writes hooks into
+  the worktree's `.claude/settings.local.json` that call the mAIestro binary,
+  which writes status files the app watches.
+- **GitHub via the REST API, never `gh`.** The app talks to GitHub directly
+  with per-identity tokens read from the Keychain at call time.
+- **Secrets in the Keychain, references in JSON.** `~/.maiestro/` holds only
+  human-editable configuration; token values never touch disk.
+- **Launched sessions get your ambient environment.** Launches go through
+  Launch Services / your login shell, so sessions inherit your PATH, git auth,
+  and `claude` login — mAIestro injects nothing.
