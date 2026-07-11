@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Component, ErrorInfo, ReactNode } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
 import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, Theme, WorkState } from "./api";
 import { JsonForms } from "@jsonforms/react";
@@ -132,6 +132,39 @@ interface CredState {
   input: string;
   status: SaveStatus;
   error?: string;
+}
+
+// Guards the Settings detail panel so a render failure in one item (e.g. the
+// JsonForms repo form) degrades to an inline message instead of unmounting the
+// whole window and stranding the user with no sidebar to navigate back. Reset
+// by keying it on the current selection, so picking another item remounts clean.
+class DetailErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Settings detail panel crashed:", error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="cred-list">
+          <div className="cleanup-confirm">
+            <p className="cleanup-lead">Couldn't display this panel</p>
+            <pre className="tool-error-message">{this.state.error.message || String(this.state.error)}</pre>
+            <p className="cleanup-confirm-body" style={{ opacity: 0.7 }}>
+              Pick another item on the left, or reopen Settings.
+            </p>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function Settings() {
@@ -270,6 +303,14 @@ function Settings() {
   }
 
   const selectedRepo = selection?.kind === "repo" ? selection.repo : null;
+
+  // Identifies the current detail selection, used to key the error boundary so
+  // navigating to a different item clears any prior render error.
+  const selectionKey =
+    selection == null ? "none"
+      : selection.kind === "repo" ? `repo:${selection.repo}`
+      : selection.kind === "identity" ? `identity:${selection.id}`
+      : selection.kind;
 
   useEffect(() => {
     if (!selectedRepo) return;
@@ -557,6 +598,7 @@ function Settings() {
 
         {/* ── Detail panel ── */}
         <div className="settings-detail">
+          <DetailErrorBoundary key={selectionKey}>
           {!selection ? (
             <div className="cred-list">
               <div className="empty-state">
@@ -790,6 +832,7 @@ function Settings() {
               </div>
             </>
           )}
+          </DetailErrorBoundary>
         </div>
       </div>
     </main>
