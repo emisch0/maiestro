@@ -2035,7 +2035,6 @@ function MainView() {
                         <div className="lifecycle-zone-header">
                           <span className="lifecycle-zone-dot" />
                           <span className="lifecycle-zone-name">{LIFECYCLE_LABELS[zone]}</span>
-                          <span className="lifecycle-zone-count">{zoneItems.length}</span>
                         </div>
                         {zoneItems.map((s) => {
                     const cmdOpen = commandsOpen === s.id;

@@ -434,12 +434,6 @@ body {
 }
 
 /* The count sits at the far right, dimmed. */
-.lifecycle-zone-count {
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.7;
-}
-
 /* Per-phase accent on the heading + its dot. Planning stays muted. */
 .lifecycle-zone--implementing .lifecycle-zone-name { color: var(--blue); }
 .lifecycle-zone--implementing .lifecycle-zone-dot { background: var(--blue); }
