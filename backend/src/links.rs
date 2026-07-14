@@ -11,9 +11,7 @@ pub fn open_url(url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err(format!("refusing to open non-http url: {url}"));
     }
-    Command::new("open")
-        .arg(&url)
-        .spawn()
+    crate::tools::spawn_reaped(Command::new("open").arg(&url))
         .map_err(|e| format!("failed to open {url}: {e}"))?;
     Ok(())
 }
@@ -26,9 +24,7 @@ pub fn open_path(path: String) -> Result<(), String> {
     if !p.exists() {
         return Err(format!("path does not exist: {path}"));
     }
-    Command::new("open")
-        .arg(&p)
-        .spawn()
+    crate::tools::spawn_reaped(Command::new("open").arg(&p))
         .map_err(|e| format!("failed to open {path}: {e}"))?;
     Ok(())
 }
@@ -58,10 +54,7 @@ pub fn reveal_path(path: String) -> Result<(), String> {
     if !p.exists() {
         return Err(format!("path does not exist: {path}"));
     }
-    Command::new("open")
-        .arg("-R")
-        .arg(&p)
-        .spawn()
+    crate::tools::spawn_reaped(Command::new("open").arg("-R").arg(&p))
         .map_err(|e| format!("failed to reveal {path}: {e}"))?;
     Ok(())
 }

@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// Serializes read-modify-write cycles on `identities.json`. `register`,
+/// `identities_set_default`, and `identities_remove` all load the store, mutate
+/// it, and save; without a shared lock two interleaving (e.g. a `credentials_set`
+/// registering while the user removes an identity) would lose one update. Held
+/// across each op's whole load→save. Not re-entrant — `identities_add` delegates
+/// to `register` (which takes the lock) rather than taking it itself.
+static IDENTITIES_LOCK: Mutex<()> = Mutex::new(());
 
 fn identities_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -32,12 +41,13 @@ fn save_store(store: &Store) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let data = serde_json::to_string_pretty(store).unwrap();
-    std::fs::write(path, data)
+    crate::paths::write_atomic(&path, data.as_bytes())
 }
 
 /// Register an identity ID in the persistent list. Best-effort: silently ignores IO errors.
 /// The first identity ever registered also becomes the default.
 pub fn register(identity_id: &str) {
+    let _guard = IDENTITIES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut store = load_store();
     let mut changed = false;
     if !store.identities.iter().any(|i| i == identity_id) {
@@ -75,6 +85,7 @@ pub fn identities_get_default() -> Option<String> {
 #[tauri::command]
 pub fn identities_set_default(identity_id: String) -> Result<(), String> {
     crate::log_invoke!("identities_set_default", identity = %identity_id);
+    let _guard = IDENTITIES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut store = load_store();
     if !store.identities.iter().any(|i| i == &identity_id) {
         store.identities.push(identity_id.clone());
@@ -115,12 +126,14 @@ pub fn identities_remove(
             Err(e) => return Err(format!("Failed to delete {} credential: {e}", t.display_name)),
         }
     }
+    let guard = IDENTITIES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut store = load_store();
     store.identities.retain(|i| i != &identity_id);
     if store.default.as_deref() == Some(identity_id.as_str()) {
         store.default = store.identities.first().cloned();
     }
     save_store(&store).map_err(|e| e.to_string())?;
+    drop(guard);
     crate::repo_settings::clear_identity_references(&identity_id);
     Ok(())
 }

@@ -15,6 +15,7 @@
 //! Forms renderer.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri_plugin_autostart::ManagerExt;
@@ -165,14 +166,35 @@ pub fn load_validated() -> Result<AppSettings, String> {
     serde_json::from_value(value).map_err(|e| format!("{label} does not match AppSettings: {e}"))
 }
 
-/// Write the global settings, creating `~/.maiestro/` if needed.
+/// Write the global settings, creating `~/.maiestro/` if needed. Atomic
+/// (temp+rename) so a crash mid-write can't truncate the file. Prefer
+/// [`update`] over a bare `load` + `save`, so concurrent read-modify-writes
+/// don't lose each other's changes.
 pub fn save(settings: &AppSettings) -> std::io::Result<()> {
     let path = settings_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let data = serde_json::to_string_pretty(settings).unwrap();
-    std::fs::write(path, data)
+    crate::paths::write_atomic(&path, data.as_bytes())
+}
+
+/// Serializes read-modify-write cycles on `settings.json`. The popover-size and
+/// Settings-window-size persisters and the Preferences form all load-merge-save
+/// this file; without a shared lock two of them interleaving would lose one
+/// update (last writer wins on the *whole* file, not the field). See [`update`].
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+/// Read-modify-write the settings file under [`SETTINGS_LOCK`]: load the current
+/// on-disk settings, apply `f`, and save — all while holding the lock, so a
+/// concurrent persister can't clobber the field `f` just changed. Use this for
+/// every partial update (window sizes, theme, tool paths) instead of a bare
+/// `load()` + mutate + `save()`.
+pub fn update<F: FnOnce(&mut AppSettings)>(f: F) -> std::io::Result<()> {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut settings = load();
+    f(&mut settings);
+    save(&settings)
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────
@@ -212,27 +234,30 @@ pub fn app_settings_set(app: tauri::AppHandle, settings: AppSettings) -> Result<
     let value = serde_json::to_value(&settings).map_err(|e| e.to_string())?;
     validate_against_schema(&value).map_err(|msg| format!("Invalid settings — {msg}"))?;
 
-    let mut current = load();
-    let theme_changed = current.theme != settings.theme;
+    // Apply the OS-level launch-at-login change *before* persisting, so a failed
+    // enable/disable returns an error (surfaced as a form banner) and the stored
+    // pref stays consistent with reality; startup reconcile retries next launch.
     let want_launch = settings.launch_at_login.unwrap_or(false);
-    let launch_changed = current.launch_at_login.unwrap_or(false) != want_launch;
-    current.theme = settings.theme;
-    current.tool_paths = settings.tool_paths;
-    current.launch_at_login = settings.launch_at_login;
-    // onboarding_completed / window / settings_window are deliberately kept
-    // from disk (machine-managed).
-
-    // Apply the OS-level change *before* persisting, so a failed enable/disable
-    // returns an error (surfaced as a form banner) and the stored pref stays
-    // consistent with reality; startup reconcile retries on the next launch.
-    if launch_changed {
+    if load().launch_at_login.unwrap_or(false) != want_launch {
         set_autolaunch(&app, want_launch)?;
     }
-    save(&current).map_err(|e| e.to_string())?;
+
+    // Load-merge under the shared lock so a concurrent window-size persister
+    // (which also load-merges) can't drop the theme/tool-paths change or vice versa.
+    let mut theme_changed = false;
+    update(|current| {
+        theme_changed = current.theme != settings.theme;
+        current.theme = settings.theme;
+        current.tool_paths = settings.tool_paths.clone();
+        current.launch_at_login = settings.launch_at_login;
+        // onboarding_completed / window / settings_window are deliberately kept
+        // from disk (machine-managed).
+    })
+    .map_err(|e| e.to_string())?;
 
     if theme_changed {
         use tauri::Emitter;
-        let _ = app.emit("theme-changed", current.theme.unwrap_or_default());
+        let _ = app.emit("theme-changed", settings.theme.unwrap_or_default());
     }
     Ok(())
 }
@@ -302,10 +327,12 @@ pub fn complete_onboarding(app: &tauri::AppHandle, launch_at_login: bool) {
     if let Err(e) = set_autolaunch(app, launch_at_login) {
         tracing::warn!(error = %e, "onboarding launch-at-login toggle failed");
     }
-    let mut settings = load();
-    settings.launch_at_login = Some(launch_at_login);
-    settings.onboarding_completed = Some(true);
-    if let Err(e) = save(&settings) {
+    // Load-merge under the shared lock (like app_settings_set), so a concurrent
+    // window-size persist can't clobber these fields or vice versa.
+    if let Err(e) = update(|s| {
+        s.launch_at_login = Some(launch_at_login);
+        s.onboarding_completed = Some(true);
+    }) {
         tracing::error!(error = %e, "failed to persist onboarding choices");
     }
 }

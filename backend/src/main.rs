@@ -3,18 +3,26 @@
 
 mod app_settings;
 mod credentials;
+mod drafting;
+mod editor;
+mod gitops;
 mod health;
+mod hooks;
 mod identities;
 mod links;
 mod logging;
+mod naming;
 mod paths;
 mod plugin;
 mod plugins;
+mod pr;
 mod prompts;
+mod repo_context;
 mod repo_settings;
 mod sessions;
 mod spawn;
 mod status;
+mod theming;
 mod tools;
 
 use std::sync::Mutex;
@@ -80,13 +88,15 @@ fn persist_popover_size(window: &tauri::Window) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical = physical.to_logical::<f64>(scale);
-    // Load-merge so we don't clobber other fields (e.g. the chosen theme).
-    let mut settings = app_settings::load();
-    settings.window = Some(app_settings::WindowSize {
-        width: logical.width,
-        height: logical.height,
+    // Load-merge under the shared lock so we don't clobber other fields (e.g. the
+    // chosen theme) nor race a concurrent settings write.
+    let result = app_settings::update(|settings| {
+        settings.window = Some(app_settings::WindowSize {
+            width: logical.width,
+            height: logical.height,
+        });
     });
-    if let Err(e) = app_settings::save(&settings) {
+    if let Err(e) = result {
         tracing::warn!(error = %e, "failed to persist popover size");
     } else {
         tracing::debug!(
@@ -123,13 +133,15 @@ fn persist_settings_size(window: &tauri::Window) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical = physical.to_logical::<f64>(scale);
-    // Load-merge so we don't clobber other fields (popover size, theme).
-    let mut settings = app_settings::load();
-    settings.settings_window = Some(app_settings::WindowSize {
-        width: logical.width,
-        height: logical.height,
+    // Load-merge under the shared lock so we don't clobber other fields (popover
+    // size, theme) nor race a concurrent settings write.
+    let result = app_settings::update(|settings| {
+        settings.settings_window = Some(app_settings::WindowSize {
+            width: logical.width,
+            height: logical.height,
+        });
     });
-    if let Err(e) = app_settings::save(&settings) {
+    if let Err(e) = result {
         tracing::warn!(error = %e, "failed to persist settings size");
     } else {
         tracing::debug!(
@@ -297,21 +309,21 @@ fn main() {
             links::reveal_path,
             spawn::spawn_work,
             spawn::prepare_spawn,
-            spawn::suggest_short_title,
+            drafting::suggest_short_title,
             spawn::draft_spawn_preview,
             spawn::confirm_spawn,
             spawn::create_issue,
             spawn::create_issue_direct,
             spawn::create_issue_and_spawn,
-            spawn::open_in_editor,
-            spawn::open_repo_in_editor,
+            editor::open_in_editor,
+            editor::open_repo_in_editor,
             spawn::teardown,
-            spawn::open_accessibility_settings,
-            spawn::session_pr,
-            spawn::session_create_pr,
-            spawn::session_pr_checks,
-            spawn::session_work_state,
-            spawn::session_merge_pr,
+            editor::open_accessibility_settings,
+            pr::session_pr,
+            pr::session_create_pr,
+            pr::session_pr_checks,
+            pr::session_work_state,
+            pr::session_merge_pr,
             sessions::sessions_list,
             sessions::session_set_visibility,
             status::sessions_status_list,
@@ -346,10 +358,14 @@ fn main() {
             // `session-status` events. The watcher must outlive setup(), so park
             // it in managed state (dropping it would stop the watch).
             status::sweep_stale();
+            // Rescue any session left stuck in `creating` by a spawn the app
+            // quit/crashed out of mid-flight: surface it as a spawn error the row
+            // can be torn down from, rather than a permanent "Creating…" pill (#101).
+            status::reconcile_stale_creating();
             // Heal any worktree hooks still pointing at a now-stale binary path
             // (a torn-down/rebuilt spawner), so live status survives across
             // teardowns and `tauri dev` rebuilds. See spawn.rs / issue #35.
-            spawn::reconcile_all_session_hooks();
+            hooks::reconcile_all_session_hooks();
 
             // Bring the launch-at-login LaunchAgent into agreement with the stored
             // pref (healing a stale baked binary path), then — on the very first

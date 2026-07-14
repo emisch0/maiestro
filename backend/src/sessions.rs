@@ -67,7 +67,7 @@ pub fn save(session: &Session) -> std::io::Result<()> {
     let dir = sessions_dir();
     std::fs::create_dir_all(&dir)?;
     let data = serde_json::to_string_pretty(session).unwrap();
-    std::fs::write(session_path(&session.id), data)
+    crate::paths::write_atomic(&session_path(&session.id), data.as_bytes())
 }
 
 pub fn load_all() -> Vec<Session> {

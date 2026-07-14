@@ -1,0 +1,273 @@
+//! Editor (VS Code) control: generate a worktree's `.vscode` workspace files,
+//! launch/focus a window for a folder, and — for teardown — find, probe, and close
+//! the window via the macOS accessibility API.
+//!
+//! mAIestro launches sessions but does not host them (see CLAUDE.md): these fns
+//! open a real VS Code window whose integrated terminal starts the user-facing
+//! Claude session, and later close it. Window control goes through System Events
+//! (`osascript`) rather than direct Apple events, matching `focus_editor_window`
+//! and avoiding a second Automation grant. Extracted from `spawn.rs` (issue #99).
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::tools::shell_quote;
+
+// ── VS Code workspace files ─────────────────────────────────────────────────────
+
+/// Write the worktree's `.vscode/{settings,tasks}.json`: title-bar theming keyed
+/// to `color`, a `window.title` marker teardown finds the window by, and a
+/// folder-open task that starts the user-facing Claude session in the integrated
+/// terminal.
+pub fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, session_title: &str) -> Result<(), String> {
+    let vscode = work_dir.join(".vscode");
+    std::fs::create_dir_all(&vscode).map_err(|e| e.to_string())?;
+
+    let settings = serde_json::json!({
+        "workbench.colorCustomizations": {
+            "titleBar.activeBackground": color,
+            "titleBar.inactiveBackground": format!("{color}99"),
+            "statusBar.background": color,
+            "activityBar.background": color,
+        },
+        "task.allowAutomaticTasks": "on",
+        "workbench.startupEditor": "none",
+        "workbench.secondarySideBar.visible": false,
+        // Let teardown close the window without a "Are you sure?" prompt blocking
+        // the programmatic close (dirty files are preserved via hot exit).
+        "window.confirmBeforeClose": "never",
+        // Marker used by teardown to find this window via AppleScript.
+        "window.title": format!("${{dirty}}${{activeEditorShort}}${{separator}}{work_parent}/${{rootName}}"),
+        "terminal.integrated.gpuAcceleration": "off",
+    });
+    std::fs::write(
+        vscode.join("settings.json"),
+        serde_json::to_string_pretty(&settings).unwrap() + "\n",
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Folder-open task that starts a real, user-facing Claude session in the
+    // integrated terminal. --remote-control lets the user drive the session
+    // remotely; mAIestro still only launches it, it does not host it. --name
+    // gives the session the same display name mAIestro tracks it by.
+    let command = format!(
+        "claude --remote-control --name {}",
+        shell_quote(session_title)
+    );
+    let tasks = serde_json::json!({
+        "version": "2.0.0",
+        "tasks": [{
+            "label": "Start Claude",
+            "type": "shell",
+            "command": command,
+            "isBackground": true,
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "new", "focus": true },
+            "runOptions": { "runOn": "folderOpen" },
+        }],
+    });
+    std::fs::write(
+        vscode.join("tasks.json"),
+        serde_json::to_string_pretty(&tasks).unwrap() + "\n",
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ── Launch / focus ──────────────────────────────────────────────────────────────
+
+/// Open `dir` in VS Code, preferring the `code` CLI so we can pass
+/// `--disable-workspace-trust` (skipping the trust prompt on every fresh
+/// worktree), falling back to Launch Services when the CLI isn't found.
+pub fn open_vscode(dir: &Path) -> Result<(), String> {
+    // Prefer the `code` CLI so we can pass --disable-workspace-trust and skip the
+    // "Do you trust the authors of the files in this folder?" prompt on every
+    // freshly spawned worktree. The CLI forwards the flag even to an already
+    // running VS Code, which `open -a --args` cannot.
+    if crate::tools::find_tool("code").is_some() {
+        crate::tools::spawn_reaped(
+            crate::tools::command("code")
+                .arg("--disable-workspace-trust")
+                .arg(dir),
+        )
+        .map_err(|e| format!("failed to open VS Code: {e}"))?;
+        return Ok(());
+    }
+    // Fallback: Launch Services. --args forwards the flag, but only honored when
+    // VS Code isn't already running.
+    crate::tools::spawn_reaped(
+        Command::new("open")
+            .args(["-a", "Visual Studio Code", "--args", "--disable-workspace-trust"])
+            .arg(dir),
+    )
+    .map_err(|e| format!("failed to open VS Code: {e}"))?;
+    Ok(())
+}
+
+/// The substring that identifies a worktree's VS Code window — the same
+/// `work_parent/rootName` we bake into `window.title` on spawn.
+pub fn window_marker(work_dir: &Path) -> Option<String> {
+    let name = work_dir.file_name()?.to_str()?;
+    let parent = work_dir.parent()?.file_name()?.to_str()?;
+    Some(format!("{parent}/{name}"))
+}
+
+/// Sanitize a value for embedding inside an AppleScript double-quoted string
+/// literal: drop both `"` (would close the literal early) and `\` (AppleScript's
+/// escape character — a trailing one would escape the closing quote and break the
+/// script). `marker` is already path-safe in normal use; this is belt-and-braces.
+fn applescript_literal_safe(s: &str) -> String {
+    s.replace(['"', '\\'], "")
+}
+
+/// Look for an open VS Code window whose title contains `marker` and, if found,
+/// raise it to the front and activate the app. Returns true when one was
+/// focused. Requires Accessibility permission for System Events; any failure
+/// (including a missing grant) is treated as "not found" so the caller can fall
+/// back to launching a window.
+async fn focus_editor_window(marker: &str) -> bool {
+    // marker is path-safe (slug + repo dir name); sanitize defensively.
+    let safe = applescript_literal_safe(marker);
+    let script = format!(
+        r#"tell application "System Events"
+  if not (exists process "Code") then return "notfound"
+  tell process "Code"
+    repeat with w in windows
+      if name of w contains "{safe}" then
+        perform action "AXRaise" of w
+        set frontmost to true
+        return "focused"
+      end if
+    end repeat
+  end tell
+end tell
+return "notfound""#
+    );
+    match tokio::process::Command::new("osascript").arg("-e").arg(&script).output().await {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim() == "focused",
+        Err(_) => false,
+    }
+}
+
+/// Open the worktree in VS Code: focus (and bring to the front) an existing
+/// window for that folder if one is open, otherwise launch a new window.
+#[tauri::command]
+pub async fn open_in_editor(work_dir: String) -> Result<(), String> {
+    crate::log_invoke!("open_in_editor", work_dir = %work_dir);
+    let path = PathBuf::from(&work_dir);
+    if let Some(marker) = window_marker(&path) {
+        if focus_editor_window(&marker).await {
+            return Ok(());
+        }
+    }
+    open_vscode(&path)
+}
+
+/// Open a tracked repo's main cloned repo directory in VS Code. Unlike
+/// `open_in_editor` this is a pure launch — no worktree, no session, no status —
+/// reusing the same `open_vscode` path logic as spawned worktrees.
+#[tauri::command]
+pub async fn open_repo_in_editor(repo: String) -> Result<(), String> {
+    crate::log_invoke!("open_repo_in_editor", repo = %repo);
+    let settings = crate::repo_settings::repo_settings_get(repo)?;
+    let cloned_repo = crate::repo_context::validated_cloned_repo(&settings)?;
+    open_vscode(&cloned_repo)
+}
+
+// ── Teardown window control ─────────────────────────────────────────────────────
+
+/// Close the VS Code window(s) for this worktree by pressing each matching
+/// window's native close button via the accessibility API. We deliberately use
+/// System Events here (the same path `focus_editor_window` uses) rather than
+/// direct Apple events to "Visual Studio Code": Electron's scripting suite is
+/// unreliable, and the direct-events path also needs a *separate* Automation
+/// grant that we'd never prompted for — so the close was failing silently.
+/// No-op if VS Code isn't running.
+pub async fn close_editor_window(marker: &str) {
+    let safe = applescript_literal_safe(marker);
+    let script = format!(
+        r#"tell application "System Events"
+  if not (exists process "Code") then return
+  tell process "Code"
+    repeat with w in windows
+      if name of w contains "{safe}" then
+        try
+          perform action "AXPress" of (first button of w whose subrole is "AXCloseButton")
+        end try
+      end if
+    end repeat
+  end tell
+end tell"#
+    );
+    let _ = tokio::process::Command::new("osascript").arg("-e").arg(&script).output().await;
+}
+
+/// What we could learn about a worktree's VS Code window. The `Denied` case is
+/// critical: when mAIestro lacks Accessibility permission, osascript errors and
+/// we genuinely cannot see the window — which must NOT be mistaken for "closed",
+/// or teardown would delete the folder out from under a live VS Code and crash it.
+pub enum WinProbe {
+    /// A window whose title contains the marker is open.
+    Open,
+    /// VS Code isn't running, or no window matches the marker.
+    Absent,
+    /// Couldn't determine — almost always a missing Accessibility grant.
+    Denied,
+}
+
+/// Probe for an open VS Code window whose title contains `marker`, via the
+/// accessibility API (System Events).
+pub async fn probe_editor_window(marker: &str) -> WinProbe {
+    let safe = applescript_literal_safe(marker);
+    let script = format!(
+        r#"tell application "System Events"
+  if not (exists process "Code") then return "absent"
+  tell process "Code"
+    repeat with w in windows
+      if name of w contains "{safe}" then return "open"
+    end repeat
+  end tell
+end tell
+return "absent""#
+    );
+    match tokio::process::Command::new("osascript").arg("-e").arg(&script).output().await {
+        Ok(out) if out.status.success() => {
+            match String::from_utf8_lossy(&out.stdout).trim() {
+                "open" => WinProbe::Open,
+                _ => WinProbe::Absent,
+            }
+        }
+        // Non-zero exit (e.g. "-25211 not allowed assistive access") or spawn failure.
+        _ => WinProbe::Denied,
+    }
+}
+
+/// Permission-free safety net: is any process's working directory inside this
+/// worktree? Our spawned `claude` runs in VS Code's integrated terminal with its
+/// cwd in the worktree, so this catches the common "still open" case without
+/// needing Accessibility. Uses `lsof -d cwd` (process CWDs only) to avoid the
+/// slow tree walk that `lsof +D` would do over a full cloned repo.
+pub async fn worktree_in_use(work_dir: &Path) -> bool {
+    let dir = work_dir.to_string_lossy();
+    // Async so the reachable-from-`teardown` `lsof` scan doesn't block a tokio
+    // worker (#101). `lsof` is a system binary always on the minimal PATH, so it
+    // doesn't go through `tools`.
+    match tokio::process::Command::new("lsof").args(["-d", "cwd", "-Fn"]).output().await {
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|l| l.strip_prefix('n').is_some_and(|p| p.starts_with(&*dir))),
+        Err(_) => false,
+    }
+}
+
+/// Open System Settings → Privacy & Security → Accessibility so the user can
+/// grant mAIestro the permission teardown needs to close VS Code windows.
+/// Triggered only by an explicit user click — we never launch it automatically.
+#[tauri::command]
+pub fn open_accessibility_settings() {
+    crate::log_invoke!("open_accessibility_settings");
+    let _ = crate::tools::spawn_reaped(
+        Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+    );
+}
