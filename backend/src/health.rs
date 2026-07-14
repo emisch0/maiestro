@@ -59,23 +59,23 @@ pub async fn repo_health_check(repo: String) -> Result<HealthReport, String> {
     let settings = repo_settings::repo_settings_get(repo.clone())?;
 
     let checks = vec![
-        check_cloned_repo(settings.checkout_dir.as_deref()),
+        check_cloned_repo(settings.cloned_repo_dir.as_deref()),
         check_cli("git", "Git available"),
         check_cli("claude", "Claude available"),
         check_github(&repo, settings.identity_id.as_deref()).await,
         check_editor(),
-        check_env_files(settings.checkout_dir.as_deref(), &settings.env_files),
+        check_env_files(settings.cloned_repo_dir.as_deref(), &settings.env_files),
     ];
 
     Ok(HealthReport { repo, checks })
 }
 
-/// `checkout_dir` is set, exists, and is a valid git repository.
-fn check_cloned_repo(checkout_dir: Option<&str>) -> HealthCheck {
+/// `cloned_repo_dir` is set, exists, and is a valid git repository.
+fn check_cloned_repo(cloned_repo_dir: Option<&str>) -> HealthCheck {
     let id = "cloned_repo";
     let label = "Cloned repo exists";
-    let Some(dir) = checkout_dir.filter(|d| !d.trim().is_empty()) else {
-        return HealthCheck::new(id, label, HealthStatus::Fail, "No checkout_dir configured");
+    let Some(dir) = cloned_repo_dir.filter(|d| !d.trim().is_empty()) else {
+        return HealthCheck::new(id, label, HealthStatus::Fail, "No cloned_repo_dir configured");
     };
     let path = expand_tilde(dir);
     if !path.is_dir() {
@@ -123,19 +123,20 @@ fn check_editor() -> HealthCheck {
     }
 }
 
-/// Every configured env file (resolved relative to `checkout_dir`, as the spawn
-/// path copies them) exists. Pass with none configured; warn listing any missing.
-fn check_env_files(checkout_dir: Option<&str>, env_files: &[String]) -> HealthCheck {
+/// Every configured env file (resolved relative to `cloned_repo_dir`, as the
+/// spawn path copies them) exists. Pass with none configured; warn listing any
+/// missing.
+fn check_env_files(cloned_repo_dir: Option<&str>, env_files: &[String]) -> HealthCheck {
     let id = "env_files";
     let label = "Configured env files exist";
     if env_files.is_empty() {
         return HealthCheck::new(id, label, HealthStatus::Pass, "None configured");
     }
-    let checkout = checkout_dir.map(expand_tilde);
+    let base_dir = cloned_repo_dir.map(expand_tilde);
     let missing: Vec<&String> = env_files
         .iter()
         .filter(|rel| {
-            let path = match &checkout {
+            let path = match &base_dir {
                 Some(base) => base.join(rel.as_str()),
                 None => expand_tilde(rel),
             };
