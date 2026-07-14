@@ -15,6 +15,7 @@
 use crate::paths::expand_tilde;
 use crate::plugins::GitHub;
 use crate::repo_settings;
+use crate::tools::snippet;
 
 #[derive(serde::Serialize, Clone, Copy, PartialEq, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -422,15 +423,6 @@ fn classify_claude_envelope(env: &serde_json::Value, model: &str, login_command:
             HealthCheck::new(model_id, &model_label, HealthStatus::Fail, message),
         ),
     }
-}
-
-/// Trim and cap a CLI output snippet for a health detail line.
-fn snippet(s: &str) -> String {
-    let s = s.trim();
-    if s.is_empty() {
-        return "<no output>".into();
-    }
-    s.chars().take(200).collect()
 }
 
 /// The session editor. Today mAIestro always launches VS Code (`open_vscode`),
