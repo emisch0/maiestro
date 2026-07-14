@@ -41,17 +41,30 @@ export interface AppFormConfig {
 function ThemeControl(props: ControlProps) {
   const { data, handleChange, path, description } = props;
   const value = (data ?? "system") as Theme;
+  const opts: Theme[] = ["light", "dark", "system"];
   return (
     <div className="control jsf-control">
       <label className="jsf-label">Theme</label>
       {description && <div className="jsf-help">{description}</div>}
       <div className="theme-options" role="radiogroup" aria-label="Theme">
-        {(["light", "dark", "system"] as Theme[]).map((opt) => (
+        {opts.map((opt, idx) => (
           <button
             key={opt}
             className={`theme-option ${value === opt ? "active" : ""}`}
             role="radio"
             aria-checked={value === opt}
+            // Roving tabindex + arrow navigation so the group is one tab stop and
+            // the arrow keys move between options like a native radio group.
+            tabIndex={value === opt ? 0 : -1}
+            onKeyDown={(e) => {
+              const dir = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1
+                : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+              if (!dir) return;
+              e.preventDefault();
+              const next = (idx + dir + opts.length) % opts.length;
+              handleChange(path, opts[next]);
+              (e.currentTarget.parentElement?.children[next] as HTMLElement | undefined)?.focus();
+            }}
             onClick={() => handleChange(path, opt)}
           >
             {opt === "light" ? "Light" : opt === "dark" ? "Dark" : "System"}
