@@ -62,13 +62,29 @@ fn hash_index(s: &str, salt: u64, len: usize) -> usize {
     (h.finish() % len as u64) as usize
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = crate::tools::command("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+/// Network git ops (`fetch`/`push`) can wedge on a black-holed SSH/HTTPS
+/// connection. Bound them so a hung connection surfaces as an error the UI can
+/// recover from (the "Merging…"/"Creating…" pill resolves) instead of pinning a
+/// tokio worker forever. Local ops are unbounded (`None`) — they can't stall on
+/// the network. Mirrors `claude_text`'s 90s / post-spawn's 600s bounds (#101).
+const GIT_NET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Run `git -C <dir> <args>` asynchronously via the resolved binary + enriched
+/// PATH. Async (not `std::process::Command`) so it never blocks a tokio worker
+/// when reached from an async command — including the polled `session_work_state`
+/// and the network ops below (#101). `timeout` bounds network ops; local ops pass
+/// `None`. `kill_on_drop` ensures a timed-out/cancelled git is reaped, not left
+/// mutating the worktree.
+async fn git_run(dir: &Path, args: &[&str], timeout: Option<std::time::Duration>) -> Result<String, String> {
+    let mut cmd = crate::tools::tokio_command("git");
+    cmd.arg("-C").arg(dir).args(args).kill_on_drop(true);
+    let out = match timeout {
+        Some(d) => tokio::time::timeout(d, cmd.output())
+            .await
+            .map_err(|_| format!("git {} timed out after {}s", args.join(" "), d.as_secs()))?
+            .map_err(|e| format!("failed to run git: {e}"))?,
+        None => cmd.output().await.map_err(|e| format!("failed to run git: {e}"))?,
+    };
     if !out.status.success() {
         return Err(format!(
             "git {} failed: {}",
@@ -79,12 +95,24 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn local_branch_exists(cloned_repo: &Path, name: &str) -> bool {
-    crate::tools::command("git")
+/// A local (network-free) git op — unbounded, since it can't stall on a wedged
+/// connection. Most call sites use this.
+async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    git_run(dir, args, None).await
+}
+
+/// A network git op (`fetch`/`push`), bounded by [`GIT_NET_TIMEOUT`].
+async fn git_net(dir: &Path, args: &[&str]) -> Result<String, String> {
+    git_run(dir, args, Some(GIT_NET_TIMEOUT)).await
+}
+
+async fn local_branch_exists(cloned_repo: &Path, name: &str) -> bool {
+    crate::tools::tokio_command("git")
         .arg("-C")
         .arg(cloned_repo)
         .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")])
         .output()
+        .await
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -208,7 +236,7 @@ fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, session_t
 ///
 /// Merges into any existing file rather than overwriting, so user/repo settings
 /// and unrelated hooks survive.
-fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
+async fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
     let bin = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
 
     let dir = work_dir.join(".claude");
@@ -227,7 +255,7 @@ fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
     std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap() + "\n")
         .map_err(|e| e.to_string())?;
 
-    exclude_generated_files(work_dir);
+    exclude_generated_files(work_dir).await;
     Ok(())
 }
 
@@ -369,11 +397,11 @@ pub fn reconcile_all_session_hooks() {
 /// they don't show up as untracked changes (which would trip teardown's
 /// `git status --porcelain` dirty check before Claude has run / in repos that
 /// don't already ignore them). Idempotent and best-effort.
-fn exclude_generated_files(work_dir: &Path) {
+async fn exclude_generated_files(work_dir: &Path) {
     // Worktrees share the main repo's exclude via the common git dir; resolve it
     // rather than assuming `<work_dir>/.git` is a directory (in a worktree it's a
     // file pointing elsewhere).
-    let Ok(common) = git(work_dir, &["rev-parse", "--git-common-dir"]) else {
+    let Ok(common) = git(work_dir, &["rev-parse", "--git-common-dir"]).await else {
         return;
     };
     let common = expand_tilde(&common);
@@ -411,20 +439,22 @@ fn open_vscode(dir: &Path) -> Result<(), String> {
     // freshly spawned worktree. The CLI forwards the flag even to an already
     // running VS Code, which `open -a --args` cannot.
     if crate::tools::find_tool("code").is_some() {
-        crate::tools::command("code")
-            .arg("--disable-workspace-trust")
-            .arg(dir)
-            .spawn()
-            .map_err(|e| format!("failed to open VS Code: {e}"))?;
+        crate::tools::spawn_reaped(
+            crate::tools::command("code")
+                .arg("--disable-workspace-trust")
+                .arg(dir),
+        )
+        .map_err(|e| format!("failed to open VS Code: {e}"))?;
         return Ok(());
     }
     // Fallback: Launch Services. --args forwards the flag, but only honored when
     // VS Code isn't already running.
-    Command::new("open")
-        .args(["-a", "Visual Studio Code", "--args", "--disable-workspace-trust"])
-        .arg(dir)
-        .spawn()
-        .map_err(|e| format!("failed to open VS Code: {e}"))?;
+    crate::tools::spawn_reaped(
+        Command::new("open")
+            .args(["-a", "Visual Studio Code", "--args", "--disable-workspace-trust"])
+            .arg(dir),
+    )
+    .map_err(|e| format!("failed to open VS Code: {e}"))?;
     Ok(())
 }
 
@@ -600,7 +630,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         return Err(format!("cloned repo dir is not a git repo: {}", cloned_repo.display()));
     }
     let repo_name = repo.split('/').next_back().unwrap_or(repo).to_string();
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
 
     let short_label = {
         let t = short_label.trim();
@@ -644,7 +674,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     let mut work_dir = base_dir.clone();
     let mut session_label = format!("{prefix}{short_label}");
     let mut n = 2;
-    while work_dir.is_dir() || local_branch_exists(&cloned_repo, &branch) {
+    while work_dir.is_dir() || local_branch_exists(&cloned_repo, &branch).await {
         workspace = format!("{base_workspace}-{n}");
         branch = format!("{base_branch}-{n}");
         work_dir = worktree_dir(&workspace);
@@ -758,11 +788,11 @@ async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
 
     // Create the worktree from the repo's default branch.
     std::fs::create_dir_all(bg.work_dir.parent().unwrap()).map_err(|e| e.to_string())?;
-    if let Err(e) = git(&bg.cloned_repo, &["fetch", "origin", "--quiet"]) {
+    if let Err(e) = git_net(&bg.cloned_repo, &["fetch", "origin", "--quiet"]).await {
         tracing::warn!(error = %e, "git fetch before spawn failed (continuing)");
     }
-    git(&bg.cloned_repo, &["worktree", "add", &bg.work_dir.to_string_lossy(), "-b", &bg.branch, &format!("origin/{}", bg.default_branch)])?;
-    if let Err(e) = git(&bg.work_dir, &["branch", "--unset-upstream"]) {
+    git(&bg.cloned_repo, &["worktree", "add", &bg.work_dir.to_string_lossy(), "-b", &bg.branch, &format!("origin/{}", bg.default_branch)]).await?;
+    if let Err(e) = git(&bg.work_dir, &["branch", "--unset-upstream"]).await {
         tracing::warn!(error = %e, "git branch --unset-upstream failed (continuing)");
     }
 
@@ -812,7 +842,7 @@ async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
     }
 
     write_vscode_files(&bg.work_dir, &bg.work_parent, &bg.color, &bg.session_title)?;
-    write_claude_hooks(&bg.work_dir, &bg.workspace)?;
+    write_claude_hooks(&bg.work_dir, &bg.workspace).await?;
 
     // Run the repo's post-spawn commands (e.g. `pnpm install`) in the new
     // worktree before opening the editor, so the session starts ready.
@@ -850,7 +880,7 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
     let (issue_title, issue_url, _) = issue_facts(&gh, &repo, issue_number).await?;
     let default_branch = gh.repo(&repo).await?["default_branch"].as_str().unwrap_or("main").to_string();
     let short_label = default_short_title(&issue_title);
@@ -1132,7 +1162,7 @@ pub async fn suggest_short_title(repo: String, issue_number: u64) -> Result<Stri
     if !cloned_repo.join(".git").exists() {
         return Err(format!("cloned repo dir is not a git repo: {}", cloned_repo.display()));
     }
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
     let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
     let instruction = crate::prompts::short_label(&settings.prompts);
     let model = crate::prompts::model(&settings.prompt_model);
@@ -1177,7 +1207,7 @@ async fn resolve_draft(
     if !cloned_repo.join(".git").exists() {
         return Err(format!("cloned repo dir is not a git repo: {}", cloned_repo.display()));
     }
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
 
     let step = if use_raw_fallback {
         let title = trim_to_word(idea, 70);
@@ -1249,7 +1279,7 @@ pub async fn create_issue_direct(repo: String, title: String, body: String) -> R
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
     let number = gh.create_issue(&repo, title, &body).await?;
     Ok(CreateIssueOutcome::Created {
         number,
@@ -1319,7 +1349,7 @@ pub async fn prepare_spawn(repo: String, issue_number: u64) -> Result<SpawnPlan,
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
     let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
     let short_title = default_short_title(&issue_title);
     let seed = format!("{issue_number}-{}", slugify(&short_title, 25));
@@ -1408,7 +1438,7 @@ pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> 
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
 
     let number = match edits.issue_number {
         Some(n) => {
@@ -1509,9 +1539,12 @@ return "absent""#
 /// cwd in the worktree, so this catches the common "still open" case without
 /// needing Accessibility. Uses `lsof -d cwd` (process CWDs only) to avoid the
 /// slow tree walk that `lsof +D` would do over a full cloned repo.
-fn worktree_in_use(work_dir: &Path) -> bool {
+async fn worktree_in_use(work_dir: &Path) -> bool {
     let dir = work_dir.to_string_lossy();
-    match Command::new("lsof").args(["-d", "cwd", "-Fn"]).output() {
+    // Async so the reachable-from-`teardown` `lsof` scan doesn't block a tokio
+    // worker (#101). `lsof` is a system binary always on the minimal PATH, so it
+    // doesn't go through `tools`.
+    match tokio::process::Command::new("lsof").args(["-d", "cwd", "-Fn"]).output().await {
         Ok(out) => String::from_utf8_lossy(&out.stdout)
             .lines()
             .any(|l| l.strip_prefix('n').is_some_and(|p| p.starts_with(&*dir))),
@@ -1525,9 +1558,10 @@ fn worktree_in_use(work_dir: &Path) -> bool {
 #[tauri::command]
 pub fn open_accessibility_settings() {
     crate::log_invoke!("open_accessibility_settings");
-    let _ = Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .spawn();
+    let _ = crate::tools::spawn_reaped(
+        Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+    );
 }
 
 #[derive(serde::Serialize)]
@@ -1565,6 +1599,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     let mut warnings = Vec::new();
 
     let dirty = git(&work_dir, &["status", "--porcelain"])
+        .await
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     if dirty {
@@ -1575,7 +1610,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     let mut pr_merged = false;
     let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     if let Some(identity_id) = settings.identity_id {
-        if let Ok(gh) = GitHub::for_identity(&identity_id) {
+        if let Ok(gh) = GitHub::for_identity(&identity_id).await {
             if let Ok(prs) = gh.pulls_for_branch(&session.repo, &branch).await {
                 pr_merged = prs.iter().any(|p| p["merged_at"].is_string());
                 if let Some(open) = prs.iter().find(|p| p["state"].as_str() == Some("open")) {
@@ -1587,7 +1622,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
             // we'd wrongly conclude "no work on this branch". Resolve by the
             // branch's tip commit instead, which still points at the merged PR.
             if !pr_merged {
-                if let Ok(sha) = git(&work_dir, &["rev-parse", "HEAD"]) {
+                if let Ok(sha) = git(&work_dir, &["rev-parse", "HEAD"]).await {
                     if let Ok(prs) = gh.pulls_for_commit(&session.repo, &sha).await {
                         pr_merged = prs.iter().any(|p| p["merged_at"].is_string());
                     }
@@ -1598,6 +1633,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
 
     // Commits on the branch not yet on the base, when no merged PR accounts for them.
     let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{base}..{branch}")])
+        .await
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
@@ -1633,7 +1669,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
                     // is using the worktree, proceed; otherwise stop and let the
                     // user close the window, grant Accessibility, or force it.
                     WinProbe::Denied => {
-                        if worktree_in_use(&work_dir) {
+                        if worktree_in_use(&work_dir).await {
                             return Ok(TeardownOutcome::BlockedByEditor {
                                 message:
                                     "I couldn't tear down because the Visual Studio Code window \
@@ -1671,15 +1707,15 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     //    record whose worktree was never created — tolerate a missing dir so the
     //    broken row can still be torn down, just pruning any dangling admin entry.
     if work_dir.exists() {
-        git(&cloned_repo, &["worktree", "remove", "--force", &work_dir.to_string_lossy()])?;
+        git(&cloned_repo, &["worktree", "remove", "--force", &work_dir.to_string_lossy()]).await?;
     } else {
-        let _ = git(&cloned_repo, &["worktree", "prune"]);
+        let _ = git(&cloned_repo, &["worktree", "prune"]).await;
     }
 
     // 3. Delete the local branch (-D: spawn unset the upstream and -d checks the
     //    wrong base, so it would refuse even for merged branches).
-    if local_branch_exists(&cloned_repo, &branch) {
-        if let Err(e) = git(&cloned_repo, &["branch", "-D", &branch]) {
+    if local_branch_exists(&cloned_repo, &branch).await {
+        if let Err(e) = git(&cloned_repo, &["branch", "-D", &branch]).await {
             tracing::warn!(branch = %branch, error = %e, "could not delete local branch during teardown");
         }
     }
@@ -1768,7 +1804,7 @@ pub async fn session_pr(session_id: String) -> Result<Option<PrLink>, String> {
     let Some(identity_id) = settings.identity_id else {
         return Ok(None);
     };
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
     let prs = gh.pulls_for_branch(&session.repo, &session.branch).await?;
 
     // `created_at` is ISO-8601, so lexicographic order is chronological.
@@ -1801,13 +1837,13 @@ fn pr_link_from(pr: &serde_json::Value) -> PrLink {
 /// Build a context blob describing the branch's changes for the PR drafter: the
 /// commit log plus the diff against the base, capped so a huge diff falls back
 /// to a file-level `--stat` rather than blowing past the prompt budget.
-fn change_summary(work_dir: &Path, base: &str) -> String {
+async fn change_summary(work_dir: &Path, base: &str) -> String {
     let range = format!("origin/{base}..HEAD");
-    let log = git(work_dir, &["log", "--oneline", &range]).unwrap_or_default();
-    let diff = git(work_dir, &["diff", &format!("origin/{base}...HEAD")]).unwrap_or_default();
+    let log = git(work_dir, &["log", "--oneline", &range]).await.unwrap_or_default();
+    let diff = git(work_dir, &["diff", &format!("origin/{base}...HEAD")]).await.unwrap_or_default();
     const MAX_DIFF: usize = 12_000;
     let diff_section = if diff.chars().count() > MAX_DIFF {
-        let stat = git(work_dir, &["diff", "--stat", &format!("origin/{base}...HEAD")]).unwrap_or_default();
+        let stat = git(work_dir, &["diff", "--stat", &format!("origin/{base}...HEAD")]).await.unwrap_or_default();
         format!("Diff too large to include in full; file-level summary:\n{stat}")
     } else {
         diff
@@ -1837,6 +1873,7 @@ pub async fn session_create_pr(
     // Guard: uncommitted changes wouldn't make it into the PR (it's built from the
     // pushed branch), so block and ask the user to commit them first.
     let dirty = git(&work_dir, &["status", "--porcelain"])
+        .await
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     if dirty {
@@ -1847,13 +1884,14 @@ pub async fn session_create_pr(
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
 
     // Refresh the base ref so the ahead-count and diff compare against current origin.
-    git(&work_dir, &["fetch", "origin", &base, "--quiet"]).ok();
+    git_net(&work_dir, &["fetch", "origin", &base, "--quiet"]).await.ok();
 
     // Guard: nothing to open a PR for.
     let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{base}..HEAD")])
+        .await
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
@@ -1873,7 +1911,7 @@ pub async fn session_create_pr(
     let issue_title = issue["title"].as_str().unwrap_or("");
     let issue_body = issue["body"].as_str().unwrap_or("");
 
-    let summary = change_summary(&work_dir, &base);
+    let summary = change_summary(&work_dir, &base).await;
     // Instruction (default or per-repo override) first; the issue context and
     // diff are appended here so an override can't drop them. See prompts.rs.
     let instruction = crate::prompts::draft_pr(&settings.prompts);
@@ -1900,7 +1938,8 @@ pub async fn session_create_pr(
 
     // Draft succeeded — now push the branch so GitHub can see the head ref. -u
     // sets upstream for the user's later pushes from the session.
-    git(&work_dir, &["push", "-u", "origin", &branch])
+    git_net(&work_dir, &["push", "-u", "origin", &branch])
+        .await
         .map_err(|e| format!("could not push branch {branch}: {e}"))?;
 
     let pr = gh
@@ -1966,7 +2005,7 @@ pub async fn session_pr_checks(session_id: String) -> Result<Option<PrChecks>, S
     let Some(identity_id) = settings.identity_id else {
         return Ok(None);
     };
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
     let prs = gh.pulls_for_branch(&session.repo, &session.branch).await?;
 
     let created_at = |p: &&serde_json::Value| p["created_at"].as_str().unwrap_or("").to_string();
@@ -2025,9 +2064,11 @@ pub async fn session_work_state(session_id: String) -> Result<Option<WorkState>,
     let base = session.default_branch;
 
     let dirty = git(&work_dir, &["status", "--porcelain"])
+        .await
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{base}..HEAD")])
+        .await
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
@@ -2062,11 +2103,12 @@ pub async fn session_merge_pr(
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
 
     // Guard: uncommitted work would be silently excluded — the merge lands the
     // pushed branch, not the worktree. Block and ask the user to commit first.
     let dirty = git(&work_dir, &["status", "--porcelain"])
+        .await
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     if dirty {
@@ -2075,13 +2117,15 @@ pub async fn session_merge_pr(
 
     // Reconcile committed-but-unpushed local commits before merging: refresh the
     // remote ref, and if local HEAD is ahead, push so the PR head includes them.
-    git(&work_dir, &["fetch", "origin", &branch, "--quiet"]).ok();
+    git_net(&work_dir, &["fetch", "origin", &branch, "--quiet"]).await.ok();
     let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{branch}..HEAD")])
+        .await
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
     if ahead > 0 {
-        git(&work_dir, &["push", "origin", &branch])
+        git_net(&work_dir, &["push", "origin", &branch])
+            .await
             .map_err(|e| format!("could not push local commits before merging: {e}"))?;
     }
 

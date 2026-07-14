@@ -48,20 +48,59 @@ fn login_path() -> &'static Option<String> {
     LOGIN_PATH.get_or_init(resolve_login_path)
 }
 
+/// How long to wait for the login-shell PATH probe before giving up. A shell
+/// profile that prompts (or otherwise hangs) must not block startup with no tray
+/// icon — bail and fall back to the process PATH + known locations instead.
+const LOGIN_PATH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Run the user's login shell to capture the PATH it would set up. Mirrors how
 /// `run_post_spawn_commands` invokes the shell (`$SHELL -l -c …`) so the two see
-/// the same environment.
+/// the same environment. Bounded by [`LOGIN_PATH_TIMEOUT`]: a hanging/prompting
+/// profile is killed and treated as "couldn't resolve" rather than freezing the
+/// app before the tray even appears (#101).
 fn resolve_login_path() -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::Instant;
+
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let out = std::process::Command::new(&shell)
+    let mut child = std::process::Command::new(&shell)
         .args(["-l", "-c", "echo $PATH"])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    if !out.status.success() {
+
+    // Poll for exit rather than `output()` (which would block unbounded). `echo
+    // $PATH` writes far less than a pipe buffer, so the child never blocks on the
+    // unread stdout while we wait — safe to read it only after it exits.
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= LOGIN_PATH_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::warn!(shell = %shell, "login shell timed out while resolving PATH");
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(e) => {
+                tracing::warn!(shell = %shell, error = %e, "failed to poll login shell while resolving PATH");
+                return None;
+            }
+        }
+    };
+    if !status.success() {
         tracing::warn!(shell = %shell, "login shell exited non-zero while resolving PATH");
         return None;
     }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    let path = out.trim().to_string();
     if path.is_empty() {
         None
     } else {
@@ -199,6 +238,21 @@ pub fn tokio_command(name: &str) -> tokio::process::Command {
     let mut c = tokio::process::Command::new(resolve_tool(name));
     c.env("PATH", enriched_path());
     c
+}
+
+/// Spawn a fire-and-forget child (e.g. `open`, `code`) and reap it in a detached
+/// thread. mAIestro is a weeks-running menu-bar process, so a child that's spawned
+/// and never `wait()`ed leaves a zombie for the life of the app; each launched
+/// URL/editor/Finder-reveal would accumulate one. The detached `wait` collects the
+/// exit status without blocking the caller — the child's actual work (opening the
+/// URL, launching VS Code) is unaffected. Errors spawning propagate; the reaping
+/// itself is best-effort.
+pub fn spawn_reaped(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    let mut child = cmd.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// The directly-invoked tools whose resolution the Settings UI surfaces.
