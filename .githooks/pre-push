@@ -1,0 +1,18 @@
+#!/bin/sh
+# Block direct pushes to main — every change to main must go through a pull
+# request. This is a local guardrail (see CLAUDE.md "Git workflow"); GitHub-side
+# enforcement isn't available on this private free-plan repo.
+#
+# Enabled per-clone with:  git config core.hooksPath .githooks
+# Emergency bypass (use sparingly):  git push --no-verify
+protected="refs/heads/main"
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+	if [ "$remote_ref" = "$protected" ]; then
+		echo "✖ Direct pushes to main are blocked — open a pull request instead." >&2
+		echo "  (real emergency? re-run with: git push --no-verify)" >&2
+		exit 1
+	fi
+done
+
+exit 0

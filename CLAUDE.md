@@ -10,6 +10,12 @@ Directory layout: `backend/` (Rust/Tauri) and `frontend/` (web). Not Tauri's def
 
 The frontend uses **pnpm** (`pnpm-lock.yaml`), not npm or yarn. Use `pnpm install` / `pnpm dev` — `npm install` fails on the `link:` workspace deps.
 
+## Git workflow
+
+**Every change to `main` must go through a pull request.** Do not commit or push directly to `main`: branch, push the branch, open a PR, and merge it on GitHub. This holds even for small fixes and the release flow.
+
+Because the repo is private on a free plan, GitHub-side branch protection isn't available, so this is enforced locally by a committed `pre-push` hook (`.githooks/pre-push`) that rejects any push to `main`. Enable it once per clone with `git config core.hooksPath .githooks` (already set in the primary checkout; worktrees share it via the common git dir). The hook is a guardrail, not a hard wall — an emergency override is `git push --no-verify`, to be used sparingly.
+
 ## Architectural decisions
 
 ### mAIestro launches sessions; it does not host them
