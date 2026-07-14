@@ -1038,11 +1038,20 @@ body {
   overflow-x: hidden;
 }
 
-.settings-sidebar::-webkit-scrollbar { width: 4px; }
+.settings-sidebar::-webkit-scrollbar { width: 12px; }
 .settings-sidebar::-webkit-scrollbar-track { background: transparent; }
 .settings-sidebar::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 2px;
+  /* Transparent border + padding-box clip insets the thumb so it looks slim
+     while the whole 12px width stays a draggable hit target. */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+  min-height: 32px;
+}
+.settings-sidebar::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+  background-clip: padding-box;
 }
 
 .settings-detail {
@@ -1436,6 +1445,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Results are diagnostic text worth copying — opt back into selection, since
+     the app container sets user-select: none. */
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .health-footer {
@@ -1498,6 +1511,42 @@ body {
   word-break: break-word;
 }
 
+.health-progress {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+}
+
+.health-spinner {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  border-top-color: transparent;
+  animation: check-spin 0.7s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .health-spinner { animation: none; }
+}
+
+.health-command {
+  margin-top: 3px;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 3px 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .health-row--nested .health-label { font-weight: 400; }
 
 /* ── Credential list ─────────────────────────────────────────────────── */
@@ -1511,11 +1560,20 @@ body {
   gap: 8px;
 }
 
-.cred-list::-webkit-scrollbar { width: 4px; }
+.cred-list::-webkit-scrollbar { width: 12px; }
 .cred-list::-webkit-scrollbar-track { background: transparent; }
 .cred-list::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 2px;
+  /* Transparent border + padding-box clip insets the thumb so it looks slim
+     while the whole 12px width stays a draggable hit target. */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+  min-height: 32px;
+}
+.cred-list::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+  background-clip: padding-box;
 }
 
 .cred-row {

@@ -202,6 +202,8 @@ export interface HealthCheck {
   status: HealthStatus;
   detail: string;
   sub: HealthCheck[];
+  /** Suggested remediation command (e.g. a `git clone` when not checked out). */
+  command?: string;
 }
 
 export interface HealthReport {

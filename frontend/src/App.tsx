@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Component, ErrorInfo, ReactNode } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, AppSettings, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HealthCheck, HealthReport, HealthStatus, HideState, IssueNode, PrChecks, PrLink, RepoSettings, ResolvedTool, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
+import { api, AppSettings, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HealthCheck, HealthStatus, HideState, IssueNode, PrChecks, PrLink, RepoSettings, ResolvedTool, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
 import { JsonForms } from "@jsonforms/react";
 import {
   repoSettingsRenderers,
@@ -206,9 +206,19 @@ function Settings() {
   const [repoRemoveConfirm, setRepoRemoveConfirm] = useState(false);
   // Set when removing the selected repo fails.
   const [repoRemoveError, setRepoRemoveError] = useState<string | null>(null);
-  // Repo health-check modal (#93): the report to show, and its loading/error state.
+  // Repo health-check modal (#93). Checks stream in one at a time via the
+  // `health-check` event; `total` (known once the first event lands) lets the
+  // modal stop the spinner. `loading` stays true until the command resolves.
   const [health, setHealth] = useState<
-    { repo: string; report: HealthReport | null; loading: boolean; error: string | null } | null
+    {
+      repo: string;
+      checks: HealthCheck[];
+      total: number | null;
+      /** Title of the check currently running, shown beside the spinner. */
+      running: string | null;
+      loading: boolean;
+      error: string | null;
+    } | null
   >(null);
   // Last persisted form data, to skip the no-op onChange JsonForms fires on load.
   const lastSavedRef = useRef<string>("");
@@ -480,14 +490,48 @@ function Settings() {
     }
   }
 
-  // Run the repo health check and show its report in a modal (#93).
+  // Run the repo health check and stream results into the modal (#93). Each
+  // check arrives as a `health-check` event; the command's return value is the
+  // authoritative final list (reconciles any missed event).
   async function runHealthCheck(repo: string) {
-    setHealth({ repo, report: null, loading: true, error: null });
+    setHealth({ repo, checks: [], total: null, running: null, loading: true, error: null });
+    const win = getCurrentWindow();
+    // A check announces itself (running) before it executes, then reports its
+    // result — subscribe to both. Both are scoped to `repo`.
+    const unlistenRunning = await win.listen<{ repo: string; total: number; label: string }>(
+      "health-check-running",
+      (e) => {
+        if (e.payload.repo !== repo) return;
+        setHealth((h) =>
+          h && h.repo === repo ? { ...h, running: e.payload.label, total: e.payload.total } : h
+        );
+      }
+    );
+    const unlistenDone = await win.listen<{ repo: string; total: number; check: HealthCheck }>(
+      "health-check",
+      (e) => {
+        if (e.payload.repo !== repo) return;
+        setHealth((h) =>
+          h && h.repo === repo
+            ? { ...h, checks: [...h.checks, e.payload.check], total: e.payload.total }
+            : h
+        );
+      }
+    );
     try {
       const report = await api.repoHealthCheck(repo);
-      setHealth({ repo, report, loading: false, error: null });
+      setHealth((h) =>
+        h && h.repo === repo
+          ? { ...h, checks: report.checks, total: report.checks.length, running: null, loading: false }
+          : h
+      );
     } catch (e) {
-      setHealth({ repo, report: null, loading: false, error: String(e) });
+      setHealth((h) =>
+        h && h.repo === repo ? { ...h, running: null, loading: false, error: String(e) } : h
+      );
+    } finally {
+      unlistenRunning();
+      unlistenDone();
     }
   }
 
@@ -949,6 +993,7 @@ function HealthCheckRow({ check, nested }: { check: HealthCheck; nested?: boolea
         <div className="health-row-text">
           <span className="health-label">{check.label}</span>
           {check.detail && <span className="health-detail">{check.detail}</span>}
+          {check.command && <code className="health-command">{check.command}</code>}
         </div>
       </div>
       {check.sub.map((s) => (
@@ -963,10 +1008,19 @@ function HealthModal({
   onRetry,
   onClose,
 }: {
-  state: { repo: string; report: HealthReport | null; loading: boolean; error: string | null };
+  state: {
+    repo: string;
+    checks: HealthCheck[];
+    total: number | null;
+    running: string | null;
+    loading: boolean;
+    error: string | null;
+  };
   onRetry: () => void;
   onClose: () => void;
 }) {
+  // Spin while the run is in flight and more checks are still expected.
+  const spinning = state.loading && (state.total === null || state.checks.length < state.total);
   return (
     <div className="overlay" onClick={onClose}>
       <div className="overlay-panel health-dialog" onClick={(e) => e.stopPropagation()}>
@@ -975,9 +1029,7 @@ function HealthModal({
           <button className="icon-btn" onClick={onClose} aria-label="Close">✕</button>
         </div>
         <div className="health-body">
-          {state.loading ? (
-            <p className="session-hint" style={{ padding: "8px 2px" }}>Running checks…</p>
-          ) : state.error ? (
+          {state.error ? (
             <div className="cleanup-confirm">
               <p className="cleanup-lead">Couldn't run health check</p>
               <pre className="tool-error-message">{state.error}</pre>
@@ -985,9 +1037,20 @@ function HealthModal({
                 <button className="btn-save" onClick={onRetry}>Retry</button>
               </div>
             </div>
-          ) : state.report ? (
-            state.report.checks.map((c) => <HealthCheckRow key={c.id} check={c} />)
-          ) : null}
+          ) : (
+            <>
+              {state.checks.map((c) => <HealthCheckRow key={c.id} check={c} />)}
+              {spinning && (
+                <div className="health-progress">
+                  <span className="health-spinner" aria-hidden="true" />
+                  <span className="health-label">{state.running ?? "Running checks…"}</span>
+                  {state.total !== null && (
+                    <span className="health-detail">{state.checks.length + 1}/{state.total}</span>
+                  )}
+                </div>
+              )}
+            </>
+          )}
         </div>
         <div className="health-footer">
           <button className="btn-save" onClick={onClose}>Done</button>
