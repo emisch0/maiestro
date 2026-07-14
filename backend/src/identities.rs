@@ -1,9 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
-/// Serializes the read-modify-write sequences on `identities.json` (register /
-/// remove), so two interleaved edits can't clobber each other's list/default.
-static IDENTITIES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Serializes read-modify-write cycles on `identities.json`. `register` and
+/// `identities_remove` both load the store, mutate it, and save; without a shared
+/// lock two interleaving (e.g. a `credentials_set` registering while the user
+/// removes an identity) would lose one update. Held across each op's whole
+/// load→save. Not re-entrant — `identities_add` delegates to `register` (which
+/// takes the lock) rather than taking it itself.
+static IDENTITIES_LOCK: Mutex<()> = Mutex::new(());
 
 fn identities_path() -> PathBuf {
     crate::paths::maiestro_dir("identities.json")
@@ -30,7 +35,12 @@ fn load_store() -> Store {
 }
 
 fn save_store(store: &Store) -> std::io::Result<()> {
-    crate::json_store::write_json_atomic(&identities_path(), store)
+    let path = identities_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_string_pretty(store).unwrap();
+    crate::paths::write_atomic(&path, data.as_bytes())
 }
 
 /// Register an identity ID in the persistent list. Best-effort: silently ignores IO errors.
@@ -102,12 +112,14 @@ pub fn identities_remove(
             Err(e) => return Err(format!("Failed to delete {} credential: {e}", t.display_name)),
         }
     }
+    let guard = IDENTITIES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut store = load_store();
     store.identities.retain(|i| i != &identity_id);
     if store.default.as_deref() == Some(identity_id.as_str()) {
         store.default = store.identities.first().cloned();
     }
     save_store(&store).map_err(|e| e.to_string())?;
+    drop(guard);
     crate::repo_settings::clear_identity_references(&identity_id);
     Ok(())
 }

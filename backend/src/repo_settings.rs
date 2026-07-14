@@ -163,7 +163,10 @@ fn parse_and_validate(data: &str, label: &str) -> Result<RepoSettings, String> {
 }
 
 fn save(repo: &str, settings: &RepoSettings) -> std::io::Result<()> {
-    crate::json_store::write_json_atomic(&settings_path(repo), settings)
+    let dir = repos_dir();
+    std::fs::create_dir_all(&dir)?;
+    let data = serde_json::to_string_pretty(settings).unwrap();
+    crate::paths::write_atomic(&settings_path(repo), data.as_bytes())
 }
 
 /// Clear `identity_id` from every repo settings file that references the given
@@ -188,7 +191,8 @@ pub fn clear_identity_references(identity_id: &str) {
             continue;
         }
         value["identity_id"] = serde_json::Value::Null;
-        if let Err(e) = crate::json_store::write_json_atomic(&path, &value) {
+        let out = serde_json::to_string_pretty(&value).expect("Value is always serializable");
+        if let Err(e) = crate::paths::write_atomic(&path, out.as_bytes()) {
             tracing::warn!(error = %e, path = %path.display(), "failed to clear identity reference");
         }
     }

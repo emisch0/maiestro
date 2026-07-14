@@ -452,6 +452,34 @@ pub fn sweep_stale() {
     }
 }
 
+/// Rescue sessions left stuck in `creating` by a spawn that never finished.
+///
+/// A fresh spawn's background task (`finish_spawn`) is the only thing that clears
+/// the `creating` marker — on success (`clear_creating`) or failure
+/// (`write_spawn_error`). If the app quits or crashes mid-spawn (plausible during
+/// a long `post_spawn_commands` run), that task dies with its `JoinHandle`
+/// dropped, so the marker is never cleared and the row shows "Creating…" forever
+/// (`sweep_stale` keeps the file because the `Session` record still exists). On
+/// the next launch the background task is gone for good, so any surviving
+/// `creating` record is definitively orphaned: convert it into a surfaced spawn
+/// error the popover shows on the row, so the user can tear the broken workspace
+/// down and retry. Run once at startup, after `sweep_stale`.
+pub fn reconcile_stale_creating() {
+    let stuck: Vec<String> = load_all()
+        .into_iter()
+        .filter(|r| r.state == "creating")
+        .map(|r| r.workspace)
+        .collect();
+    for ws in stuck {
+        tracing::warn!(session = %ws, "found a session stuck in `creating` at startup; surfacing as a spawn error");
+        write_spawn_error(
+            &ws,
+            "Spawn was interrupted before it finished (mAIestro quit or crashed mid-spawn). \
+             Tear this workspace down and start it again.",
+        );
+    }
+}
+
 /// The workspace id a status file path corresponds to (its file stem).
 fn workspace_of(path: &Path) -> Option<String> {
     if path.extension().is_none_or(|ext| ext != "json") {

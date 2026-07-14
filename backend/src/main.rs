@@ -3,20 +3,27 @@
 
 mod app_settings;
 mod credentials;
+mod drafting;
+mod editor;
+mod gitops;
 mod health;
+mod hooks;
 mod identities;
-mod json_store;
 mod links;
 mod logging;
+mod naming;
 mod paths;
 mod plugin;
 mod plugins;
+mod pr;
 mod prompts;
+mod repo_context;
 mod repo_settings;
 mod schema;
 mod sessions;
 mod spawn;
 mod status;
+mod theming;
 mod tools;
 
 use std::sync::Mutex;
@@ -82,10 +89,15 @@ fn persist_popover_size(window: &tauri::Window) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical = physical.to_logical::<f64>(scale);
-    // Load-merge under the settings lock so we don't clobber other fields (e.g.
-    // the chosen theme) written concurrently by app_settings_set.
-    let size = app_settings::WindowSize { width: logical.width, height: logical.height };
-    if let Err(e) = app_settings::persist_popover_size(size) {
+    // Load-merge under the shared lock so we don't clobber other fields (e.g. the
+    // chosen theme) nor race a concurrent settings write.
+    let result = app_settings::update(|settings| {
+        settings.window = Some(app_settings::WindowSize {
+            width: logical.width,
+            height: logical.height,
+        });
+    });
+    if let Err(e) = result {
         tracing::warn!(error = %e, "failed to persist popover size");
     } else {
         tracing::debug!(
@@ -122,10 +134,15 @@ fn persist_settings_size(window: &tauri::Window) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical = physical.to_logical::<f64>(scale);
-    // Load-merge under the settings lock so we don't clobber other fields
-    // (popover size, theme) written concurrently.
-    let size = app_settings::WindowSize { width: logical.width, height: logical.height };
-    if let Err(e) = app_settings::persist_settings_size(size) {
+    // Load-merge under the shared lock so we don't clobber other fields (popover
+    // size, theme) nor race a concurrent settings write.
+    let result = app_settings::update(|settings| {
+        settings.settings_window = Some(app_settings::WindowSize {
+            width: logical.width,
+            height: logical.height,
+        });
+    });
+    if let Err(e) = result {
         tracing::warn!(error = %e, "failed to persist settings size");
     } else {
         tracing::debug!(
@@ -258,6 +275,11 @@ fn main() {
         .manage(PopoverState::default())
         .manage(registry)
         .plugin(tauri_plugin_positioner::init())
+        // Launch-at-login writes a per-user LaunchAgent (issue #98).
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Relaunch focuses the existing app instead of spawning a second.
             show_popover(app);
@@ -286,19 +308,19 @@ fn main() {
             links::path_exists,
             links::reveal_path,
             spawn::prepare_spawn,
-            spawn::suggest_short_title,
+            drafting::suggest_short_title,
             spawn::draft_spawn_preview,
             spawn::confirm_spawn,
             spawn::create_issue_direct,
-            spawn::open_in_editor,
-            spawn::open_repo_in_editor,
+            editor::open_in_editor,
+            editor::open_repo_in_editor,
             spawn::teardown,
-            spawn::open_accessibility_settings,
-            spawn::session_pr,
-            spawn::session_create_pr,
-            spawn::session_pr_checks,
-            spawn::session_work_state,
-            spawn::session_merge_pr,
+            editor::open_accessibility_settings,
+            pr::session_pr,
+            pr::session_create_pr,
+            pr::session_pr_checks,
+            pr::session_work_state,
+            pr::session_merge_pr,
             sessions::sessions_list,
             sessions::session_set_visibility,
             status::sessions_status_list,
@@ -309,6 +331,7 @@ fn main() {
             app_settings::app_settings_schema,
             app_settings::app_settings_get,
             app_settings::app_settings_set,
+            app_settings::onboarding_complete,
             tools::tools_resolved,
         ])
         .setup(|app| {
@@ -332,10 +355,21 @@ fn main() {
             // `session-status` events. The watcher must outlive setup(), so park
             // it in managed state (dropping it would stop the watch).
             status::sweep_stale();
+            // Rescue any session left stuck in `creating` by a spawn the app
+            // quit/crashed out of mid-flight: surface it as a spawn error the row
+            // can be torn down from, rather than a permanent "Creating…" pill (#101).
+            status::reconcile_stale_creating();
             // Heal any worktree hooks still pointing at a now-stale binary path
             // (a torn-down/rebuilt spawner), so live status survives across
             // teardowns and `tauri dev` rebuilds. See spawn.rs / issue #35.
-            spawn::reconcile_all_session_hooks();
+            hooks::reconcile_all_session_hooks();
+
+            // Bring the launch-at-login LaunchAgent into agreement with the stored
+            // pref (healing a stale baked binary path), then — on the very first
+            // run only — run onboarding (which offers launch-at-login). Issue #98.
+            app_settings::reconcile_launch_at_login(app.handle());
+            app_settings::maybe_show_onboarding(app.handle());
+
             match status::start_watcher(app.handle().clone()) {
                 Ok(watcher) => {
                     app.manage(Mutex::new(watcher));
@@ -444,6 +478,13 @@ fn main() {
                 }
                 _ => {}
             },
+            // Closing the onboarding window without pressing "Get started" accepts
+            // the defaults — record completion so it doesn't reappear.
+            "onboarding" => {
+                if let WindowEvent::CloseRequested { .. } = event {
+                    app_settings::complete_onboarding_if_pending(window.app_handle());
+                }
+            }
             _ => {}
         })
         .run(tauri::generate_context!())

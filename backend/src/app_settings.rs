@@ -3,7 +3,8 @@
 //! Sibling to `profiles.json` and the per-repo `repos/<…>.json` files, but holds
 //! configuration that is neither a credential nor repo-scoped. Today that is the
 //! popover and Settings window persisted sizes (issue #40), the UI theme (issue #12),
-//! and per-tool CLI path overrides (issue #85); the file is intentionally
+//! per-tool CLI path overrides (issue #85), and the onboarding / launch-at-login
+//! state (issue #98); the file is intentionally
 //! human-editable and dotfile-manageable. A missing or partial file is fine —
 //! every field is optional and defaults to "not set".
 //!
@@ -14,8 +15,10 @@
 //! Forms renderer.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+use tauri_plugin_autostart::ManagerExt;
 
 /// Persisted size of a window, in logical pixels. Restored on launch before the
 /// window is first shown, saved when the window hides (popover on blur, the
@@ -69,6 +72,17 @@ pub struct AppSettings {
     /// Per-tool CLI path overrides. `None` (absent) means all tools auto-resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_paths: Option<ToolPaths>,
+    /// Whether to launch mAIestro automatically at login via a per-user
+    /// LaunchAgent (issue #98). `None` (absent) means `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_at_login: Option<bool>,
+    /// Whether the one-time onboarding flow has been completed. Machine-managed
+    /// (set once when the onboarding dialog is dismissed), hidden from the Settings
+    /// form. Gates the first-run onboarding window; `None`/`false` = not yet
+    /// onboarded. Kept as its own flag (not derived from another preference) so
+    /// onboarding can grow more options without changing the gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_completed: Option<bool>,
 }
 
 /// The user's explicit path override for a directly-invoked tool
@@ -105,13 +119,6 @@ fn validate_against_schema(value: &serde_json::Value) -> Result<(), String> {
 
 // ── Storage ─────────────────────────────────────────────────────────────────
 
-/// Serializes the read-merge-write sequences that update `settings.json`. The
-/// popover/Settings window-size persisters and `app_settings_set` each load the
-/// file, change one field, and save; without this lock two interleaved saves
-/// could clobber each other's field (e.g. a size save dropping a just-changed
-/// theme). Held across the whole load→save of each persister.
-static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn settings_path() -> PathBuf {
     crate::paths::maiestro_dir("settings.json")
 }
@@ -143,27 +150,34 @@ pub fn load_validated() -> Result<AppSettings, String> {
     serde_json::from_value(value).map_err(|e| format!("{label} does not match AppSettings: {e}"))
 }
 
-/// Write the global settings atomically, creating `~/.maiestro/` if needed.
+/// Write the global settings, creating `~/.maiestro/` if needed. Atomic
+/// (temp+rename) so a crash mid-write can't truncate the file. Prefer
+/// [`update`] over a bare `load` + `save`, so concurrent read-modify-writes
+/// don't lose each other's changes.
 pub fn save(settings: &AppSettings) -> std::io::Result<()> {
-    crate::json_store::write_json_atomic(&settings_path(), settings)
+    let path = settings_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let data = serde_json::to_string_pretty(settings).unwrap();
+    crate::paths::write_atomic(&path, data.as_bytes())
 }
 
-/// Persist the popover's size, merging it into the current file under the
-/// settings lock so a concurrent theme/tool-path or Settings-window-size save
-/// isn't clobbered. Best-effort: callers log the returned error.
-pub fn persist_popover_size(size: WindowSize) -> std::io::Result<()> {
-    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut settings = load();
-    settings.window = Some(size);
-    save(&settings)
-}
+/// Serializes read-modify-write cycles on `settings.json`. The popover-size and
+/// Settings-window-size persisters and the Preferences form all load-merge-save
+/// this file; without a shared lock two of them interleaving would lose one
+/// update (last writer wins on the *whole* file, not the field). See [`update`].
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
-/// Persist the Settings window's size, merged under the settings lock (see
-/// [`persist_popover_size`]).
-pub fn persist_settings_size(size: WindowSize) -> std::io::Result<()> {
+/// Read-modify-write the settings file under [`SETTINGS_LOCK`]: load the current
+/// on-disk settings, apply `f`, and save — all while holding the lock, so a
+/// concurrent persister can't clobber the field `f` just changed. Use this for
+/// every partial update (window sizes, theme, tool paths) instead of a bare
+/// `load()` + mutate + `save()`.
+pub fn update<F: FnOnce(&mut AppSettings)>(f: F) -> std::io::Result<()> {
     let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut settings = load();
-    settings.settings_window = Some(size);
+    f(&mut settings);
     save(&settings)
 }
 
@@ -204,21 +218,134 @@ pub fn app_settings_set(app: tauri::AppHandle, settings: AppSettings) -> Result<
     let value = serde_json::to_value(&settings).map_err(|e| e.to_string())?;
     validate_against_schema(&value).map_err(|msg| format!("Invalid settings — {msg}"))?;
 
-    // Held across load→save so a concurrent window-size persist can't clobber the
-    // theme/tool-path fields this writes (and vice versa).
-    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut current = load();
-    let theme_changed = current.theme != settings.theme;
-    current.theme = settings.theme;
-    current.tool_paths = settings.tool_paths;
-    // window / settings_window are deliberately kept from disk (machine-managed).
-    save(&current).map_err(|e| e.to_string())?;
+    // Apply the OS-level launch-at-login change *before* persisting, so a failed
+    // enable/disable returns an error (surfaced as a form banner) and the stored
+    // pref stays consistent with reality; startup reconcile retries next launch.
+    let want_launch = settings.launch_at_login.unwrap_or(false);
+    if load().launch_at_login.unwrap_or(false) != want_launch {
+        set_autolaunch(&app, want_launch)?;
+    }
+
+    // Load-merge under the shared lock so a concurrent window-size persister
+    // (which also load-merges) can't drop the theme/tool-paths change or vice versa.
+    let mut theme_changed = false;
+    update(|current| {
+        theme_changed = current.theme != settings.theme;
+        current.theme = settings.theme;
+        current.tool_paths = settings.tool_paths.clone();
+        current.launch_at_login = settings.launch_at_login;
+        // onboarding_completed / window / settings_window are deliberately kept
+        // from disk (machine-managed).
+    })
+    .map_err(|e| e.to_string())?;
 
     if theme_changed {
         use tauri::Emitter;
-        let _ = app.emit("theme-changed", current.theme.unwrap_or_default());
+        let _ = app.emit("theme-changed", settings.theme.unwrap_or_default());
     }
     Ok(())
+}
+
+// ── Onboarding + launch at login (issue #98) ────────────────────────────────
+
+/// Register (or remove) the per-user LaunchAgent so the app starts at login.
+/// `enable()` overwrites the plist with the current binary path (idempotent for a
+/// stable `/Applications` install; it also refreshes a stale `current_exe()` baked
+/// by a `tauri dev` build). `disable()` is only called when a plist actually
+/// exists, so removing when already-off is a no-op rather than a "file not found".
+fn set_autolaunch(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let mgr = app.autolaunch();
+    if enabled {
+        mgr.enable()
+            .map_err(|e| format!("Couldn't register launch-at-login: {e}"))
+    } else if mgr.is_enabled().unwrap_or(false) {
+        mgr.disable()
+            .map_err(|e| format!("Couldn't remove launch-at-login: {e}"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Bring the LaunchAgent into agreement with the stored preference on startup.
+/// Called from `setup()`. Never fails the app — a problem is logged, not fatal.
+/// When the pref is on, this also heals a stale baked binary path (see
+/// `set_autolaunch`).
+pub fn reconcile_launch_at_login(app: &tauri::AppHandle) {
+    let want = load().launch_at_login.unwrap_or(false);
+    match set_autolaunch(app, want) {
+        Ok(()) => tracing::debug!(launch_at_login = want, "reconciled launch-at-login"),
+        Err(e) => tracing::warn!(error = %e, "failed to reconcile launch-at-login"),
+    }
+}
+
+/// One-time onboarding: the very first time the app runs (before
+/// `onboarding_completed` is set), show the branded `onboarding` window. It's a
+/// real webview window (not a native alert) so it can display the mAIestro logo
+/// and name and grow more options over time — a native dialog can only show the
+/// generic OS icon and a fixed button set. The user's choices arrive via
+/// `onboarding_complete` (the "Get started" button) or `complete_onboarding`
+/// (window closed = accept defaults), either of which flips `onboarding_completed`
+/// true so this never reappears. Called from `setup()` after
+/// `reconcile_launch_at_login`.
+pub fn maybe_show_onboarding(app: &tauri::AppHandle) {
+    if load().onboarding_completed.unwrap_or(false) {
+        return;
+    }
+    use tauri::Manager;
+    match app.get_webview_window("onboarding") {
+        Some(window) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        None => tracing::warn!("onboarding window missing; skipping onboarding"),
+    }
+}
+
+/// Apply and persist the user's onboarding choices, marking onboarding complete so
+/// it never runs again — regardless of what was chosen. Today the only choice is
+/// launch-at-login; new options extend the parameters here and in
+/// `onboarding_complete`. Failure-tolerant: a failed LaunchAgent write is logged
+/// but onboarding is still marked complete, so we don't re-run it on every launch
+/// (the Preferences panel remains the way to change any setting afterwards).
+pub fn complete_onboarding(app: &tauri::AppHandle, launch_at_login: bool) {
+    if let Err(e) = set_autolaunch(app, launch_at_login) {
+        tracing::warn!(error = %e, "onboarding launch-at-login toggle failed");
+    }
+    // Load-merge under the shared lock (like app_settings_set), so a concurrent
+    // window-size persist can't clobber these fields or vice versa.
+    if let Err(e) = update(|s| {
+        s.launch_at_login = Some(launch_at_login);
+        s.onboarding_completed = Some(true);
+    }) {
+        tracing::error!(error = %e, "failed to persist onboarding choices");
+    }
+}
+
+/// Finish onboarding from the dialog's "Get started" button, then dismiss the
+/// window. `destroy()` (not `close()`) so it bypasses the CloseRequested handler —
+/// onboarding is already recorded, so the "closed = defaults" path must not also
+/// fire. Marks onboarding complete either way.
+#[tauri::command]
+pub fn onboarding_complete(app: tauri::AppHandle, launch_at_login: bool) {
+    crate::log_invoke!("onboarding_complete", launch_at_login = launch_at_login);
+    complete_onboarding(&app, launch_at_login);
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("onboarding") {
+        let _ = window.destroy();
+    }
+}
+
+/// Handle the user closing the onboarding window (the title-bar close button)
+/// without pressing "Get started": accept the defaults (launch-at-login off) and
+/// mark onboarding complete so it doesn't reappear. Guarded on the flag so it's a
+/// no-op when the button already recorded the choices (that path uses `destroy()`,
+/// which skips this, but the guard is belt-and-suspenders). Called from
+/// `main.rs`'s window-event handler.
+pub fn complete_onboarding_if_pending(app: &tauri::AppHandle) {
+    if load().onboarding_completed.unwrap_or(false) {
+        return;
+    }
+    complete_onboarding(app, false);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -262,6 +389,8 @@ mod tests {
                 git: Some("/opt/homebrew/bin/git".into()),
                 code: Some("/usr/local/bin/code".into()),
             }),
+            launch_at_login: Some(true),
+            onboarding_completed: Some(true),
         };
         let value = serde_json::to_value(&populated).unwrap();
         let struct_keys: BTreeSet<String> =

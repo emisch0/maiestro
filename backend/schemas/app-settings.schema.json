@@ -46,6 +46,14 @@
           "description": "Absolute path to the VS Code `code` CLI (used to open spawned worktrees). null/empty = auto-resolve."
         }
       }
+    },
+    "launch_at_login": {
+      "type": ["boolean", "null"],
+      "description": "Whether to launch mAIestro automatically when the user logs in, via a per-user LaunchAgent (~/Library/LaunchAgents/mAIestro.plist). Toggled in the Preferences panel. null/absent = false."
+    },
+    "onboarding_completed": {
+      "type": ["boolean", "null"],
+      "description": "Machine-managed. Whether the one-time onboarding flow has been completed; set once (to true) when the onboarding dialog is dismissed, so it never reappears. Gates the first-run onboarding window. Not user-editable in the Settings form. null/absent = not yet onboarded."
     }
   }
 }

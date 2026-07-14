@@ -15,6 +15,7 @@
 use crate::paths::expand_tilde;
 use crate::plugins::GitHub;
 use crate::repo_settings;
+use crate::tools::snippet;
 
 #[derive(serde::Serialize, Clone, Copy, PartialEq, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -104,7 +105,7 @@ pub async fn repo_health_check(window: tauri::Window, repo: String) -> Result<He
             checks.push(check);
         }};
     }
-    step!("Cloned repo exists", check_cloned_repo(&repo, settings.cloned_repo_dir.as_deref()));
+    step!("Cloned repo exists", check_cloned_repo(&repo, settings.cloned_repo_dir.as_deref()).await);
     step!("Git available", check_cli("git", "Git available"));
     // The Claude probe returns one row ("Claude logged in") with the model check
     // nested as a sub — logged-in and model-available are distinct facts, and the
@@ -150,7 +151,7 @@ fn emit_check(window: &tauri::Window, repo: &str, index: usize, total: usize, ch
 /// remote points at `repo` ("owner/name"). The remote-match is a sub-check, so a
 /// checkout that exists but points at a *different* project fails distinctly from
 /// a missing one.
-fn check_cloned_repo(repo: &str, cloned_repo_dir: Option<&str>) -> HealthCheck {
+async fn check_cloned_repo(repo: &str, cloned_repo_dir: Option<&str>) -> HealthCheck {
     let id = "cloned_repo";
     let label = "Cloned repo exists";
     let Some(dir) = cloned_repo_dir.filter(|d| !d.trim().is_empty()) else {
@@ -168,11 +169,12 @@ fn check_cloned_repo(repo: &str, cloned_repo_dir: Option<&str>) -> HealthCheck {
     }
     // A directory alone isn't enough — confirm it's actually a git checkout.
     log_command(repo, &format!("git -C {} rev-parse --git-dir", path.display()));
-    let is_git = crate::tools::command("git")
+    let is_git = crate::tools::tokio_command("git")
         .arg("-C")
         .arg(&path)
         .args(["rev-parse", "--git-dir"])
         .output()
+        .await
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !is_git {
@@ -182,21 +184,22 @@ fn check_cloned_repo(repo: &str, cloned_repo_dir: Option<&str>) -> HealthCheck {
     // Valid checkout: also confirm its `origin` points at this repo, so a
     // `cloned_repo_dir` aimed at the wrong project is caught here.
     let mut check = HealthCheck::new(id, label, HealthStatus::Pass, path.display().to_string());
-    check.sub.push(check_remote_matches(repo, &path));
+    check.sub.push(check_remote_matches(repo, &path).await);
     check.status = rollup(&check.sub);
     check
 }
 
 /// The checkout's `origin` remote URL resolves to `repo` ("owner/name").
-fn check_remote_matches(repo: &str, path: &std::path::Path) -> HealthCheck {
+async fn check_remote_matches(repo: &str, path: &std::path::Path) -> HealthCheck {
     let id = "cloned_repo_remote";
     let label = "Remote matches this repo";
     log_command(repo, &format!("git -C {} remote get-url origin", path.display()));
-    let out = crate::tools::command("git")
+    let out = crate::tools::tokio_command("git")
         .arg("-C")
         .arg(path)
         .args(["remote", "get-url", "origin"])
-        .output();
+        .output()
+        .await;
     let url = match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         // Non-zero exit is git's "No such remote 'origin'".
@@ -424,15 +427,6 @@ fn classify_claude_envelope(env: &serde_json::Value, model: &str, login_command:
     }
 }
 
-/// Trim and cap a CLI output snippet for a health detail line.
-fn snippet(s: &str) -> String {
-    let s = s.trim();
-    if s.is_empty() {
-        return "<no output>".into();
-    }
-    s.chars().take(200).collect()
-}
-
 /// The session editor. Today mAIestro always launches VS Code (`open_vscode`),
 /// preferring the `code` CLI and falling back to the app bundle — so mirror that:
 /// pass if the `code` CLI resolves, warn (with the fallback still viable) if not.
@@ -511,7 +505,7 @@ async fn check_github(repo: &str, identity_id: Option<&str>) -> HealthCheck {
     let Some(identity) = identity_id.filter(|i| !i.trim().is_empty()) else {
         return HealthCheck::new(id, label, HealthStatus::Skipped, "No identity assigned to this repo");
     };
-    let gh = match GitHub::for_identity(identity) {
+    let gh = match GitHub::for_identity(identity).await {
         Ok(gh) => gh,
         Err(e) => return HealthCheck::new(id, label, HealthStatus::Fail, e),
     };

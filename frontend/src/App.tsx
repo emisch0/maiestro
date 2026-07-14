@@ -4,6 +4,7 @@ import { initTheme } from "./theme";
 import { MainView } from "./MainView";
 import { Settings } from "./Settings";
 import { LogsView } from "./LogsView";
+import { Onboarding } from "./Onboarding";
 
 export default function App() {
   // Apply the persisted theme to this window and keep it in sync with the
@@ -17,5 +18,6 @@ export default function App() {
   const label = getCurrentWindow().label;
   if (label === "settings") return <Settings />;
   if (label === "logs") return <LogsView />;
+  if (label === "onboarding") return <Onboarding />;
   return <MainView />;
 }

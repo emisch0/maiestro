@@ -63,7 +63,10 @@ pub fn delete(id: &str) -> std::io::Result<()> {
 }
 
 pub fn save(session: &Session) -> std::io::Result<()> {
-    crate::json_store::write_json_atomic(&session_path(&session.id), session)
+    let dir = sessions_dir();
+    std::fs::create_dir_all(&dir)?;
+    let data = serde_json::to_string_pretty(session).unwrap();
+    crate::paths::write_atomic(&session_path(&session.id), data.as_bytes())
 }
 
 pub fn load_all() -> Vec<Session> {

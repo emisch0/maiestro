@@ -46,10 +46,18 @@ fn etag_cache() -> &'static Mutex<HashMap<String, (String, String)>> {
 }
 
 impl GitHub {
-    pub fn for_identity(identity_id: &str) -> Result<Self, String> {
-        let scope = CredentialScope::Identity { identity_id: identity_id.to_string() };
-        let token = CredentialStore::get("github_token", &scope)
-            .map_err(|_| "No GitHub token found for this identity. Set one in Settings.".to_string())?;
+    pub async fn for_identity(identity_id: &str) -> Result<Self, String> {
+        // The Keychain read blocks — in dev builds it can block for the whole
+        // duration of a macOS permission prompt. Run it off the async runtime so a
+        // slow/prompting Keychain can't pin a tokio worker (issue #101).
+        let id = identity_id.to_string();
+        let token = tokio::task::spawn_blocking(move || {
+            let scope = CredentialScope::Identity { identity_id: id };
+            CredentialStore::get("github_token", &scope)
+        })
+        .await
+        .map_err(|e| format!("keychain read task failed: {e}"))?
+        .map_err(|_| "No GitHub token found for this identity. Set one in Settings.".to_string())?;
         let client = reqwest::Client::builder()
             .user_agent("maiestro/0.1")
             // Bound every GitHub call so a black-holed connection fails with an
@@ -341,7 +349,7 @@ pub struct RepoItem {
 #[tauri::command]
 pub async fn github_list_repos(identity_id: String) -> Result<Vec<RepoItem>, String> {
     crate::log_invoke_debug!("github_list_repos", identity = %identity_id);
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
 
     let mut repos = Vec::new();
     let mut page: u32 = 1;
@@ -407,7 +415,7 @@ pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec
         .split_once('/')
         .ok_or_else(|| format!("invalid repo (expected owner/name): {repo}"))?;
 
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
 
     // 1. Collect every open issue. The issues endpoint also returns PRs, so skip
     //    anything carrying a `pull_request` field. Remember which ones have
