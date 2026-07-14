@@ -16,6 +16,13 @@ impl Plugin for GitHubPlugin {
     fn credential_types(&self) -> &[CredentialTypeInfo] { TYPES }
 }
 
+/// Result of a token health probe (`GitHub::check_token`): the authenticated
+/// login and the classic-PAT OAuth scopes (empty for fine-grained tokens).
+pub struct TokenInfo {
+    pub login: String,
+    pub scopes: Vec<String>,
+}
+
 // ── Reusable REST client ────────────────────────────────────────────────────────
 
 /// Authenticated GitHub REST client, scoped to a single identity's token.
@@ -144,6 +151,41 @@ impl GitHub {
     pub async fn authenticated_login(&self) -> Result<String, String> {
         let v = self.get_json("https://api.github.com/user").await?;
         v["login"].as_str().map(str::to_string).ok_or_else(|| "could not resolve token user".to_string())
+    }
+
+    /// Health-check probe of the token itself: a raw (non-ETag-cached) `GET /user`
+    /// that returns the authenticated login plus the granted OAuth scopes read
+    /// from the `X-OAuth-Scopes` response header. The scopes list is present for
+    /// classic PATs and empty for fine-grained tokens / GitHub Apps (which don't
+    /// report scopes this way — their access is inspected via a repo's
+    /// `permissions` object instead). See #93.
+    pub async fn check_token(&self) -> Result<TokenInfo, String> {
+        let resp = self
+            .send(self.req(reqwest::Method::GET, "https://api.github.com/user"))
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(error_message(resp).await);
+        }
+        // Header is a comma-separated scope list, e.g. "repo, read:org". Absent
+        // (or empty) for fine-grained tokens.
+        let scopes: Vec<String> = resp
+            .headers()
+            .get("x-oauth-scopes")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| {
+                s.split(',')
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let login = v["login"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "could not resolve token user".to_string())?;
+        Ok(TokenInfo { login, scopes })
     }
 
     /// Repository metadata, including `default_branch`. `repo` is "owner/name".

@@ -192,6 +192,25 @@ export interface ResolvedTool {
   exists: boolean;
 }
 
+export type HealthStatus = "pass" | "fail" | "warn" | "skipped";
+
+/** One prerequisite check in a repo health report; `sub` nests the GitHub
+ *  token check's validity / read / write sub-checks. */
+export interface HealthCheck {
+  id: string;
+  label: string;
+  status: HealthStatus;
+  detail: string;
+  sub: HealthCheck[];
+  /** Suggested remediation command (e.g. a `git clone` when not checked out). */
+  command?: string;
+}
+
+export interface HealthReport {
+  repo: string;
+  checks: HealthCheck[];
+}
+
 export type CredentialScope = { kind: "identity"; identity_id: string };
 
 export interface CredentialTypeDto {
@@ -240,6 +259,11 @@ export const api = {
 
   scanEnvFiles: (clonedRepoDir: string) =>
     invoke<string[]>("repo_scan_env_files", { clonedRepoDir }),
+
+  /** Run per-repo prerequisite diagnostics (cloned checkout, CLIs, GitHub token
+   *  + permissions, env files) for the Settings window's health-check modal. */
+  repoHealthCheck: (repo: string) =>
+    invoke<HealthReport>("repo_health_check", { repo }),
 
   identitiesList: () =>
     invoke<string[]>("identities_list"),

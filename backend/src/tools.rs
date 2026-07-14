@@ -20,11 +20,14 @@
 //!    resolved binary itself shells out to (git's helpers, claude's node) resolve
 //!    too. This layer fixes all three tools — and any added later — with no config.
 //! 2. **Per-tool explicit override.** `~/.maiestro/settings.json`'s `tool_paths`
-//!    can pin an absolute path per tool, which wins over auto-resolution.
+//!    can pin an absolute path per tool. An override is **authoritative**: once
+//!    set it is the *only* source, so a pinned path can never silently resolve to
+//!    a different binary — a missing pin is a hard failure, not a fall-through.
 //!
-//! [`resolve_tool`] precedence: explicit override (if it exists) → `which` on the
-//! enriched PATH → known install locations → the bare name (let the OS try, as a
-//! last resort preserving prior behavior).
+//! [`resolve_tool`] precedence: an explicit override wins outright (invoked
+//! verbatim, so a broken pin fails loudly); only when **no** override is set do we
+//! auto-resolve — `which` on the enriched PATH → known install locations → the
+//! bare name (let the OS try, as a last resort preserving prior behavior).
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -125,30 +128,52 @@ fn fallbacks(name: &str) -> Vec<PathBuf> {
 }
 
 /// Resolve `name` to a concrete, existing binary, or `None` if nothing was found.
-/// Precedence: explicit override → `which` on the enriched PATH → known locations.
+///
+/// An explicit override is **authoritative**: once configured it is the *only*
+/// source — we never fall back to PATH or known locations, so a pinned path can
+/// never silently resolve to a *different* binary. A configured-but-missing
+/// override therefore returns `None` (a hard "not found" the health check
+/// surfaces), it does **not** fall through to auto-resolution. Only when no
+/// override is set do we auto-resolve: `which` on the enriched PATH → known
+/// locations.
 pub fn find_tool(name: &str) -> Option<PathBuf> {
-    // 1. Explicit override from settings, when it points at a real file. A
-    //    configured-but-missing path is a likely mistake worth a log line; we
-    //    then fall through to auto-resolution rather than failing hard.
+    // 1. Explicit override wins outright when set — existence decides Some/None,
+    //    with no fallback either way.
     if let Some(over) = crate::app_settings::tool_path_override(name) {
         let p = expand_tilde(&over);
-        if p.is_file() {
-            return Some(p);
-        }
-        tracing::warn!(tool = name, path = %over, "configured tool path does not exist; falling back to auto-resolution");
+        return p.is_file().then_some(p);
     }
-    // 2. The enriched (login-shell) PATH.
+    // 2. No override: the enriched (login-shell) PATH.
     if let Some(p) = which_on(&enriched_path(), name) {
         return Some(p);
     }
-    // 3. Known install locations.
+    // 3. Then known install locations.
     fallbacks(name).into_iter().find(|p| p.is_file())
 }
 
-/// The path to invoke `name` with. Falls back to the bare name (letting the OS
-/// resolve it) when nothing concrete was found, preserving prior behavior as a
-/// last resort.
+/// The configured `tool_paths` override for `name` when it's set but does *not*
+/// point at a real file. Returns the offending path so the health check can name
+/// it in a "configured path not found" failure; `None` when there's no override
+/// or it exists. (With the authoritative-override rule in [`find_tool`], this is
+/// exactly the case where `find_tool` returns `None` despite a pin being set.)
+pub fn stale_override(name: &str) -> Option<String> {
+    let over = crate::app_settings::tool_path_override(name)?;
+    if expand_tilde(&over).is_file() {
+        None
+    } else {
+        Some(over)
+    }
+}
+
+/// The path to invoke `name` with. A configured override is invoked **verbatim**,
+/// even if it doesn't exist, so a broken pin fails loudly (`No such file`) rather
+/// than silently running a different binary off PATH. Without an override, falls
+/// back to the bare name (letting the OS resolve it) when nothing concrete was
+/// found, preserving prior behavior as a last resort.
 pub fn resolve_tool(name: &str) -> PathBuf {
+    if let Some(over) = crate::app_settings::tool_path_override(name) {
+        return expand_tilde(&over);
+    }
     find_tool(name).unwrap_or_else(|| PathBuf::from(name))
 }
 
