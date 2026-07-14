@@ -234,7 +234,7 @@ fn walk_env_files(dir: &Path, depth: u8, results: &mut Vec<String>) {
             if !SKIP_DIRS.contains(&name_str.as_ref()) {
                 walk_env_files(&path, depth - 1, results);
             }
-        } else if name_str.starts_with(".env") {
+        } else if name_str.as_ref() == ".env" {
             if let Some(s) = path.to_str() {
                 results.push(s.to_owned());
             }

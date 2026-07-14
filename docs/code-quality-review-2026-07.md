@@ -38,9 +38,11 @@ filed as follow-up issues or recorded as recommendations.
   work). Now the wrapper is only removed once it is empty. *(High — the one
   behavior-changing fix in this PR, applied because it is a two-line guard
   against data loss.)*
-- `repo_settings.rs`: the env-file **Scan matched only the exact name `.env`**,
-  never `.env.local` / `.env.development` — contradicting the documented
-  "starts with `.env`" behavior and the feature's purpose. Now `starts_with`.
+- CLAUDE.md/schema: the env-file **Scan matches only the exact name `.env`**,
+  but the docs claimed "files whose name starts with `.env`" — a doc/code
+  mismatch. Exact-match is the intended behavior (variants like `.env.local`
+  are added manually), so the docs were corrected to match the code, not the
+  other way round.
 - `repo_settings.rs`: `repo_scan_env_files` didn't tilde-expand
   `cloned_repo_dir` (every other consumer does), so a `~/src/...` value made
   Scan silently return nothing. Now expanded.
