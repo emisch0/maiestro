@@ -139,6 +139,64 @@ interface CredState {
   error?: string;
 }
 
+// Module-level (not defined inside Settings' render): a nested definition gets a
+// new function identity every render, which React treats as a different element
+// type — remounting the subtree and dropping the token input's focus per keystroke.
+function CredRows({ credTypes, credStates, patchCred, onSave, onClear }: {
+  credTypes: CredentialTypeDto[];
+  credStates: Record<string, CredState>;
+  patchCred: (typeId: string, patch: Partial<CredState>) => void;
+  onSave: (typeId: string) => void;
+  onClear: (typeId: string) => void;
+}) {
+  return (
+    <>
+      {credTypes.map((t) => {
+        const state = credStates[t.type_id] ?? { isSet: false, input: "", status: "idle" as SaveStatus };
+        const isBusy = state.status === "saving" || state.status === "clearing";
+
+        return (
+          <div key={t.type_id} className="cred-row">
+            <div className="cred-header">
+              <span className="cred-name">{t.display_name}</span>
+              <span className={`cred-badge ${state.isSet ? "is-set" : "not-set"}`}>
+                {state.isSet ? "set" : "not set"}
+              </span>
+            </div>
+            <div className="cred-controls">
+              <input
+                className="text-input secret-input"
+                type="password"
+                placeholder={state.isSet ? "Update value…" : "Enter value…"}
+                value={state.input}
+                disabled={isBusy}
+                onChange={(e) => patchCred(t.type_id, { input: e.target.value, status: "idle" })}
+                onKeyDown={(e) => e.key === "Enter" && onSave(t.type_id)}
+              />
+              <button
+                className={`btn-save ${state.status === "saving" ? "btn-busy" : ""}`}
+                disabled={!state.input.trim() || isBusy}
+                onClick={() => onSave(t.type_id)}
+              >
+                {state.status === "saving" ? "…" : state.status === "saved" ? "✓" : "Save"}
+              </button>
+              <button
+                className={`btn-clear ${!state.isSet ? "hidden" : ""}`}
+                disabled={!state.isSet || isBusy}
+                onClick={() => onClear(t.type_id)}
+                title="Remove credential"
+              >
+                ✕
+              </button>
+            </div>
+            {state.status === "error" && <p className="cred-error">{state.error}</p>}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 // Guards the Settings detail panel so a render failure in one item (e.g. the
 // JsonForms repo form) degrades to an inline message instead of unmounting the
 // whole window and stranding the user with no sidebar to navigate back. Reset
@@ -345,7 +403,9 @@ function Settings() {
       );
     }, 300);
     return () => clearTimeout(timer);
-  }, [scopeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+    // `credTypes` must be a dep: on mount it races the default-identity fetch,
+    // and if it lands after scopeKey settles the badges would stay "not set".
+  }, [scopeKey, credTypes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleSave(type_id: string) {
     if (!activeScope) return;
@@ -538,58 +598,16 @@ function Settings() {
   async function handleSelectRepo(repo: string) {
     const iid = browse.identityId;
     setRepos((prev) => (prev.includes(repo) ? prev : [...prev, repo]));
+    // Persist the identity BEFORE selecting: selection triggers the detail-form
+    // load, and a load that races an in-flight write reads the pre-write file —
+    // the form then shows no identity and the next autosave clobbers it.
+    try {
+      const defaults = await api.getRepoSettings(repo);
+      await api.setRepoSettings(repo, { ...defaults, identity_id: iid ?? defaults.identity_id });
+    } catch (e) {
+      setBrowse((b) => ({ ...b, error: `Added ${repo}, but couldn't assign the identity: ${String(e)}` }));
+    }
     setSelection({ kind: "repo", repo });
-    const defaults = await api.getRepoSettings(repo);
-    await api.setRepoSettings(repo, { ...defaults, identity_id: iid ?? defaults.identity_id });
-  }
-
-  function CredRows() {
-    return (
-      <>
-        {credTypes.map((t) => {
-          const state = credStates[t.type_id] ?? { isSet: false, input: "", status: "idle" as SaveStatus };
-          const isBusy = state.status === "saving" || state.status === "clearing";
-
-          return (
-            <div key={t.type_id} className="cred-row">
-              <div className="cred-header">
-                <span className="cred-name">{t.display_name}</span>
-                <span className={`cred-badge ${state.isSet ? "is-set" : "not-set"}`}>
-                  {state.isSet ? "set" : "not set"}
-                </span>
-              </div>
-              <div className="cred-controls">
-                <input
-                  className="text-input secret-input"
-                  type="password"
-                  placeholder={state.isSet ? "Update value…" : "Enter value…"}
-                  value={state.input}
-                  disabled={isBusy}
-                  onChange={(e) => patchCred(t.type_id, { input: e.target.value, status: "idle" })}
-                  onKeyDown={(e) => e.key === "Enter" && handleSave(t.type_id)}
-                />
-                <button
-                  className={`btn-save ${state.status === "saving" ? "btn-busy" : ""}`}
-                  disabled={!state.input.trim() || isBusy}
-                  onClick={() => handleSave(t.type_id)}
-                >
-                  {state.status === "saving" ? "…" : state.status === "saved" ? "✓" : "Save"}
-                </button>
-                <button
-                  className={`btn-clear ${!state.isSet ? "hidden" : ""}`}
-                  disabled={!state.isSet || isBusy}
-                  onClick={() => handleClear(t.type_id)}
-                  title="Remove credential"
-                >
-                  ✕
-                </button>
-              </div>
-              {state.status === "error" && <p className="cred-error">{state.error}</p>}
-            </div>
-          );
-        })}
-      </>
-    );
   }
 
   return (
@@ -761,7 +779,13 @@ function Settings() {
                 <span className="detail-title">{selection.id}</span>
               </div>
               <div className="cred-list">
-                <CredRows />
+                <CredRows
+                  credTypes={credTypes}
+                  credStates={credStates}
+                  patchCred={patchCred}
+                  onSave={handleSave}
+                  onClear={handleClear}
+                />
                 <div className="settings-group">
                   {identityRemoveError && (
                     <div className="cleanup-confirm">
@@ -1082,6 +1106,7 @@ type Preview = {
   color: string;
   emoji: string;
   repoName: string;
+  worktreePrefix: string;
   origTitle: string;
   origBody: string;
   spawning: boolean;
@@ -1665,16 +1690,19 @@ function MainView() {
   async function openStartWork(repo: string) {
     setExpanded(null);
     setPicker({ repo, loading: true, issues: null, query: "" });
+    // Guarded functional updates: a late response must not resurrect a picker
+    // the user closed, nor clobber one they opened for another repo since.
+    const settle = (next: Picker) => setPicker((p) => (p && p.repo === repo ? next : p));
     try {
       const settings = await api.getRepoSettings(repo);
       if (!settings.identity_id) {
-        setPicker({ repo, loading: false, issues: null, query: "", error: "No identity assigned. Set one in Settings → Repo." });
+        settle({ repo, loading: false, issues: null, query: "", error: "No identity assigned. Set one in Settings → Repo." });
         return;
       }
       const issues = await api.githubListIssues(settings.identity_id, repo);
-      setPicker({ repo, loading: false, issues, query: "" });
+      settle({ repo, loading: false, issues, query: "" });
     } catch (e) {
-      setPicker({ repo, loading: false, issues: null, query: "", error: String(e) });
+      settle({ repo, loading: false, issues: null, query: "", error: String(e) });
     }
   }
 
@@ -1708,6 +1736,7 @@ function MainView() {
       color: plan.color,
       emoji: plan.emoji,
       repoName: plan.repo_name,
+      worktreePrefix: plan.worktree_prefix,
       origTitle: plan.issue_title,
       origBody: plan.issue_body,
       spawning: false,
@@ -2524,7 +2553,7 @@ function MainView() {
                         </div>
                         <div className="preview-derived-row">
                           <span className="preview-derived-label">Worktree</span>
-                          <code>~/src/work-{workspace}/{pv.repoName}</code>
+                          <code>{pv.worktreePrefix}{workspace}/{pv.repoName}</code>
                         </div>
                       </div>
                     )}

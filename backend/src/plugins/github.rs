@@ -6,7 +6,6 @@ use crate::plugin::{CredentialTypeInfo, Plugin};
 const TYPES: &[CredentialTypeInfo] = &[CredentialTypeInfo {
     type_id: "github_token",
     display_name: "GitHub Token",
-    env_var: "GITHUB_TOKEN",
     description: "Personal access token for GitHub API calls and git operations over HTTPS.",
 }];
 
@@ -53,6 +52,9 @@ impl GitHub {
             .map_err(|_| "No GitHub token found for this identity. Set one in Settings.".to_string())?;
         let client = reqwest::Client::builder()
             .user_agent("maiestro/0.1")
+            // Bound every GitHub call so a black-holed connection fails with an
+            // error the UI can degrade on instead of stalling a command forever.
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self { client, token, identity_id: identity_id.to_string() })
@@ -302,9 +304,9 @@ impl GitHub {
         let query = "mutation($id: ID!) { \
             markPullRequestReadyForReview(input: { pullRequestId: $id }) { \
                 pullRequest { isDraft } } }";
-        let resp = self.req(reqwest::Method::POST, "https://api.github.com/graphql")
-            .json(&serde_json::json!({ "query": query, "variables": { "id": node_id } }))
-            .send().await.map_err(|e| e.to_string())?;
+        let rb = self.req(reqwest::Method::POST, "https://api.github.com/graphql")
+            .json(&serde_json::json!({ "query": query, "variables": { "id": node_id } }));
+        let resp = self.send(rb).await.map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(error_message(resp).await);
         }
@@ -320,9 +322,9 @@ impl GitHub {
     /// "merge" / "squash" / "rebase".
     pub async fn merge_pull(&self, repo: &str, number: u64, method: &str) -> Result<(), String> {
         let url = format!("https://api.github.com/repos/{repo}/pulls/{number}/merge");
-        let resp = self.req(reqwest::Method::PUT, &url)
-            .json(&serde_json::json!({ "merge_method": method }))
-            .send().await.map_err(|e| e.to_string())?;
+        let rb = self.req(reqwest::Method::PUT, &url)
+            .json(&serde_json::json!({ "merge_method": method }));
+        let resp = self.send(rb).await.map_err(|e| e.to_string())?;
         if resp.status().is_success() { Ok(()) } else { Err(error_message(resp).await) }
     }
 }

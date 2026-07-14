@@ -314,7 +314,6 @@ fn main() {
             logging::logs_reveal,
             status::clear_session_error,
             app_settings::app_settings_get_theme,
-            app_settings::app_settings_set_theme,
             app_settings::app_settings_schema,
             app_settings::app_settings_get,
             app_settings::app_settings_set,

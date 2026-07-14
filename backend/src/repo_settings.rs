@@ -47,7 +47,8 @@ pub struct RepoSettings {
     /// original hardcoded behavior. Tilde-expanded via `expand_tilde` in spawn.
     #[serde(default)]
     pub worktree_prefix: Option<String>,
-    /// Env files relative to cloned_repo_dir to source when launching user-facing tools.
+    /// Env files relative to cloned_repo_dir, copied into a fresh worktree at spawn.
+    #[serde(default)]
     pub env_files: Vec<String>,
     /// Shell commands to run in a freshly-created worktree, in order, before the
     /// editor opens (e.g. `pnpm install`). Empty by default. Run via the user's
@@ -311,11 +312,12 @@ pub fn repo_set_visibility(repo: String, hidden: Option<HideState>) -> Result<()
 #[tauri::command]
 pub fn repo_scan_env_files(cloned_repo_dir: String) -> Vec<String> {
     crate::log_invoke!("repo_scan_env_files", cloned_repo_dir = %cloned_repo_dir);
-    let base = Path::new(&cloned_repo_dir);
+    // Tilde-expand like every other consumer of this setting (spawn, health).
+    let base = crate::paths::expand_tilde(&cloned_repo_dir);
     let mut abs = Vec::new();
-    walk_env_files(base, 4, &mut abs);
+    walk_env_files(&base, 4, &mut abs);
     abs.iter()
-        .filter_map(|p| Path::new(p).strip_prefix(base).ok())
+        .filter_map(|p| Path::new(p).strip_prefix(&base).ok())
         .map(|p| p.to_string_lossy().into_owned())
         .collect()
 }
@@ -397,6 +399,21 @@ mod tests {
         assert_eq!(settings.cloned_repo_dir.as_deref(), Some("/home/u/src/widget"));
         assert_eq!(settings.env_files, vec![".env".to_string()]);
         assert!(settings.identity_id.is_none());
+    }
+
+    /// Every field is schema-optional (no `required` array), so a hand-written
+    /// file that omits any of them — including the non-Option `env_files` — must
+    /// deserialize, not fail with a "missing field" error after passing schema
+    /// validation.
+    #[test]
+    fn schema_valid_file_without_env_files_loads() {
+        let data = json!({
+            "repo": "acme/widget",
+            "cloned_repo_dir": "~/src/widget"
+        })
+        .to_string();
+        let settings = parse_and_validate(&data, "test").expect("file without env_files should load");
+        assert!(settings.env_files.is_empty());
     }
 
     /// A wrong-typed field fails with a message naming that field.

@@ -22,12 +22,12 @@ pub fn open_url(url: String) -> Result<(), String> {
 #[tauri::command]
 pub fn open_path(path: String) -> Result<(), String> {
     crate::log_invoke!("open_path", path = %path);
-    let p = std::path::Path::new(&path);
+    let p = crate::paths::expand_tilde(&path);
     if !p.exists() {
         return Err(format!("path does not exist: {path}"));
     }
     Command::new("open")
-        .arg(p)
+        .arg(&p)
         .spawn()
         .map_err(|e| format!("failed to open {path}: {e}"))?;
     Ok(())

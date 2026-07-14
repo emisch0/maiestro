@@ -407,6 +407,7 @@ pub fn write_spawn_error(ws: &str, message: &str) {
 /// it shows correct state even if it missed live events while hidden/reloaded.
 #[tauri::command]
 pub fn sessions_status_list() -> Vec<StatusRecord> {
+    crate::log_invoke_debug!("sessions_status_list");
     load_all()
 }
 
@@ -416,6 +417,7 @@ pub fn sessions_status_list() -> Vec<StatusRecord> {
 /// record is missing or already clear.
 #[tauri::command]
 pub fn clear_session_error(workspace: String) {
+    crate::log_invoke!("clear_session_error", workspace = %workspace);
     if !is_safe_workspace_id(&workspace) {
         return;
     }
