@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the popover, the Settings window, and the Logs window",
-  "windows": ["main", "settings", "logs"],
+  "description": "Capabilities for the popover, the Settings window, the Logs window, and the onboarding dialog",
+  "windows": ["main", "settings", "logs", "onboarding"],
   "permissions": [
     "core:default",
     "core:window:allow-get-all-windows",

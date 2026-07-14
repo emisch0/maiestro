@@ -3,7 +3,8 @@
 //! Sibling to `profiles.json` and the per-repo `repos/<…>.json` files, but holds
 //! configuration that is neither a credential nor repo-scoped. Today that is the
 //! popover and Settings window persisted sizes (issue #40), the UI theme (issue #12),
-//! and per-tool CLI path overrides (issue #85); the file is intentionally
+//! per-tool CLI path overrides (issue #85), and the onboarding / launch-at-login
+//! state (issue #98); the file is intentionally
 //! human-editable and dotfile-manageable. A missing or partial file is fine —
 //! every field is optional and defaults to "not set".
 //!
@@ -16,6 +17,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use tauri_plugin_autostart::ManagerExt;
 
 /// Persisted size of a window, in logical pixels. Restored on launch before the
 /// window is first shown, saved when the window hides (popover on blur, the
@@ -69,6 +71,17 @@ pub struct AppSettings {
     /// Per-tool CLI path overrides. `None` (absent) means all tools auto-resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_paths: Option<ToolPaths>,
+    /// Whether to launch mAIestro automatically at login via a per-user
+    /// LaunchAgent (issue #98). `None` (absent) means `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_at_login: Option<bool>,
+    /// Whether the one-time onboarding flow has been completed. Machine-managed
+    /// (set once when the onboarding dialog is dismissed), hidden from the Settings
+    /// form. Gates the first-run onboarding window; `None`/`false` = not yet
+    /// onboarded. Kept as its own flag (not derived from another preference) so
+    /// onboarding can grow more options without changing the gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_completed: Option<bool>,
 }
 
 /// The user's explicit path override for a directly-invoked tool
@@ -215,9 +228,20 @@ pub fn app_settings_set(app: tauri::AppHandle, settings: AppSettings) -> Result<
 
     let mut current = load();
     let theme_changed = current.theme != settings.theme;
+    let want_launch = settings.launch_at_login.unwrap_or(false);
+    let launch_changed = current.launch_at_login.unwrap_or(false) != want_launch;
     current.theme = settings.theme;
     current.tool_paths = settings.tool_paths;
-    // window / settings_window are deliberately kept from disk (machine-managed).
+    current.launch_at_login = settings.launch_at_login;
+    // onboarding_completed / window / settings_window are deliberately kept
+    // from disk (machine-managed).
+
+    // Apply the OS-level change *before* persisting, so a failed enable/disable
+    // returns an error (surfaced as a form banner) and the stored pref stays
+    // consistent with reality; startup reconcile retries on the next launch.
+    if launch_changed {
+        set_autolaunch(&app, want_launch)?;
+    }
     save(&current).map_err(|e| e.to_string())?;
 
     if theme_changed {
@@ -225,6 +249,106 @@ pub fn app_settings_set(app: tauri::AppHandle, settings: AppSettings) -> Result<
         let _ = app.emit("theme-changed", current.theme.unwrap_or_default());
     }
     Ok(())
+}
+
+// ── Onboarding + launch at login (issue #98) ────────────────────────────────
+
+/// Register (or remove) the per-user LaunchAgent so the app starts at login.
+/// `enable()` overwrites the plist with the current binary path (idempotent for a
+/// stable `/Applications` install; it also refreshes a stale `current_exe()` baked
+/// by a `tauri dev` build). `disable()` is only called when a plist actually
+/// exists, so removing when already-off is a no-op rather than a "file not found".
+fn set_autolaunch(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let mgr = app.autolaunch();
+    if enabled {
+        mgr.enable()
+            .map_err(|e| format!("Couldn't register launch-at-login: {e}"))
+    } else if mgr.is_enabled().unwrap_or(false) {
+        mgr.disable()
+            .map_err(|e| format!("Couldn't remove launch-at-login: {e}"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Bring the LaunchAgent into agreement with the stored preference on startup.
+/// Called from `setup()`. Never fails the app — a problem is logged, not fatal.
+/// When the pref is on, this also heals a stale baked binary path (see
+/// `set_autolaunch`).
+pub fn reconcile_launch_at_login(app: &tauri::AppHandle) {
+    let want = load().launch_at_login.unwrap_or(false);
+    match set_autolaunch(app, want) {
+        Ok(()) => tracing::debug!(launch_at_login = want, "reconciled launch-at-login"),
+        Err(e) => tracing::warn!(error = %e, "failed to reconcile launch-at-login"),
+    }
+}
+
+/// One-time onboarding: the very first time the app runs (before
+/// `onboarding_completed` is set), show the branded `onboarding` window. It's a
+/// real webview window (not a native alert) so it can display the mAIestro logo
+/// and name and grow more options over time — a native dialog can only show the
+/// generic OS icon and a fixed button set. The user's choices arrive via
+/// `onboarding_complete` (the "Get started" button) or `complete_onboarding`
+/// (window closed = accept defaults), either of which flips `onboarding_completed`
+/// true so this never reappears. Called from `setup()` after
+/// `reconcile_launch_at_login`.
+pub fn maybe_show_onboarding(app: &tauri::AppHandle) {
+    if load().onboarding_completed.unwrap_or(false) {
+        return;
+    }
+    use tauri::Manager;
+    match app.get_webview_window("onboarding") {
+        Some(window) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        None => tracing::warn!("onboarding window missing; skipping onboarding"),
+    }
+}
+
+/// Apply and persist the user's onboarding choices, marking onboarding complete so
+/// it never runs again — regardless of what was chosen. Today the only choice is
+/// launch-at-login; new options extend the parameters here and in
+/// `onboarding_complete`. Failure-tolerant: a failed LaunchAgent write is logged
+/// but onboarding is still marked complete, so we don't re-run it on every launch
+/// (the Preferences panel remains the way to change any setting afterwards).
+pub fn complete_onboarding(app: &tauri::AppHandle, launch_at_login: bool) {
+    if let Err(e) = set_autolaunch(app, launch_at_login) {
+        tracing::warn!(error = %e, "onboarding launch-at-login toggle failed");
+    }
+    let mut settings = load();
+    settings.launch_at_login = Some(launch_at_login);
+    settings.onboarding_completed = Some(true);
+    if let Err(e) = save(&settings) {
+        tracing::error!(error = %e, "failed to persist onboarding choices");
+    }
+}
+
+/// Finish onboarding from the dialog's "Get started" button, then dismiss the
+/// window. `destroy()` (not `close()`) so it bypasses the CloseRequested handler —
+/// onboarding is already recorded, so the "closed = defaults" path must not also
+/// fire. Marks onboarding complete either way.
+#[tauri::command]
+pub fn onboarding_complete(app: tauri::AppHandle, launch_at_login: bool) {
+    crate::log_invoke!("onboarding_complete", launch_at_login = launch_at_login);
+    complete_onboarding(&app, launch_at_login);
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("onboarding") {
+        let _ = window.destroy();
+    }
+}
+
+/// Handle the user closing the onboarding window (the title-bar close button)
+/// without pressing "Get started": accept the defaults (launch-at-login off) and
+/// mark onboarding complete so it doesn't reappear. Guarded on the flag so it's a
+/// no-op when the button already recorded the choices (that path uses `destroy()`,
+/// which skips this, but the guard is belt-and-suspenders). Called from
+/// `main.rs`'s window-event handler.
+pub fn complete_onboarding_if_pending(app: &tauri::AppHandle) {
+    if load().onboarding_completed.unwrap_or(false) {
+        return;
+    }
+    complete_onboarding(app, false);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -268,6 +392,8 @@ mod tests {
                 git: Some("/opt/homebrew/bin/git".into()),
                 code: Some("/usr/local/bin/code".into()),
             }),
+            launch_at_login: Some(true),
+            onboarding_completed: Some(true),
         };
         let value = serde_json::to_value(&populated).unwrap();
         let struct_keys: BTreeSet<String> =

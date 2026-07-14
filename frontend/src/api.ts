@@ -180,8 +180,12 @@ export interface ToolPaths {
 export interface AppSettings {
   theme: Theme | null;
   tool_paths: ToolPaths | null;
+  /** Launch mAIestro automatically at login (per-user LaunchAgent). null = false. */
+  launch_at_login?: boolean | null;
   window?: { width: number; height: number } | null;
   settings_window?: { width: number; height: number } | null;
+  /** Machine-managed: whether onboarding has been completed. Not edited in the form. */
+  onboarding_completed?: boolean | null;
 }
 
 /** How a directly-invoked tool currently resolves, for the settings status line. */
@@ -384,6 +388,10 @@ export const api = {
 
   setAppSettings: (settings: AppSettings) =>
     invoke<void>("app_settings_set", { settings }),
+
+  /** Finish onboarding with the chosen options and dismiss the onboarding window. */
+  completeOnboarding: (launchAtLogin: boolean) =>
+    invoke<void>("onboarding_complete", { launchAtLogin }),
 
   /** Per-tool resolution (path + whether it exists), for the Tool paths status line. */
   toolsResolved: () =>
