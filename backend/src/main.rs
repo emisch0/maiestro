@@ -3,6 +3,7 @@
 
 mod app_settings;
 mod credentials;
+mod health;
 mod identities;
 mod links;
 mod logging;
@@ -277,6 +278,7 @@ fn main() {
             repo_settings::repo_set_visibility,
             repo_settings::repo_remove,
             repo_settings::repo_scan_env_files,
+            health::repo_health_check,
             github_list_repos,
             github_list_issues,
             identities::identities_list,
