@@ -6,7 +6,7 @@
 // two custom renderers for the cases the schema alone can't express — the
 // identity select (dynamic options) and the env-files list (Scan/Add/Remove).
 //
-// Everything else (checkout dir, worktree prefix) falls through to the vanilla
+// Everything else (cloned repo dir, worktree prefix) falls through to the vanilla
 // string-input renderer, styled in styles.css.
 
 import { useState } from "react";
@@ -25,7 +25,7 @@ import { api } from "./api";
 export const repoSettingsUISchema = {
   type: "VerticalLayout",
   elements: [
-    { type: "Control", scope: "#/properties/checkout_dir", label: "Checkout directory" },
+    { type: "Control", scope: "#/properties/cloned_repo_dir", label: "Cloned repo" },
     { type: "Control", scope: "#/properties/worktree_prefix", label: "Worktree prefix" },
     { type: "Control", scope: "#/properties/identity_id", label: "Identity" },
     { type: "Control", scope: "#/properties/env_files", label: "Environment files" },
@@ -39,8 +39,8 @@ export const repoSettingsUISchema = {
 export interface RepoFormConfig {
   /** Identities offered by the identity select. */
   knownIdentities: string[];
-  /** Current checkout dir, so the env-files Scan knows where to look. */
-  checkoutDir: string | null;
+  /** Current cloned repo dir, so the env-files Scan knows where to look. */
+  clonedRepoDir: string | null;
   /** Always show schema descriptions as help text, not only on focus. */
   showUnfocusedDescription: true;
 }
@@ -89,12 +89,12 @@ function IdentityControl(props: ControlProps) {
 export const identityTester = rankWith(20, scopeEndsWith("identity_id"));
 export const IdentityRenderer = withJsonFormsControlProps(IdentityControl);
 
-// ── Plain text fields (checkout dir, worktree prefix) ───────────────────────
+// ── Plain text fields (cloned repo dir, worktree prefix) ────────────────────
 // A text input with the label/description heading above it. `worktree_prefix`
 // surfaces its schema default as a disabled-looking placeholder so it's clear
 // what an empty field resolves to.
 
-function CheckoutDirControl(props: ControlProps) {
+function ClonedRepoDirControl(props: ControlProps) {
   const { data, handleChange, path, label, description } = props;
   return (
     <div className="control jsf-control">
@@ -113,8 +113,8 @@ function CheckoutDirControl(props: ControlProps) {
   );
 }
 
-export const checkoutDirTester = rankWith(20, scopeEndsWith("checkout_dir"));
-export const CheckoutDirRenderer = withJsonFormsControlProps(CheckoutDirControl);
+export const clonedRepoDirTester = rankWith(20, scopeEndsWith("cloned_repo_dir"));
+export const ClonedRepoDirRenderer = withJsonFormsControlProps(ClonedRepoDirControl);
 
 function WorktreePrefixControl(props: ControlProps) {
   const { data, handleChange, path, label, description, config } = props;
@@ -186,7 +186,7 @@ export const PromptModelRenderer = withJsonFormsControlProps(PromptModelControl)
 function EnvFilesControl(props: ControlProps) {
   const { data, handleChange, path, label, description, config } = props;
   const files: string[] = Array.isArray(data) ? data : [];
-  const checkoutDir: string | null = config?.checkoutDir ?? null;
+  const clonedRepoDir: string | null = config?.clonedRepoDir ?? null;
 
   const [adding, setAdding] = useState(false);
   const [input, setInput] = useState("");
@@ -195,10 +195,10 @@ function EnvFilesControl(props: ControlProps) {
   const setFiles = (next: string[]) => handleChange(path, next);
 
   async function doScan() {
-    if (!checkoutDir) return;
+    if (!clonedRepoDir) return;
     setScan("scanning");
     try {
-      const found = await api.scanEnvFiles(checkoutDir);
+      const found = await api.scanEnvFiles(clonedRepoDir);
       setFiles(found);
       setScan("done");
       setTimeout(() => setScan("idle"), 2000);
@@ -224,7 +224,7 @@ function EnvFilesControl(props: ControlProps) {
       <div className="settings-group-header">
         <span className="jsf-label" style={{ marginBottom: 0 }}>{label}</span>
         <div style={{ display: "flex", gap: 4 }}>
-          {checkoutDir && (
+          {clonedRepoDir && (
             <button
               className={`btn-add ${scan === "scanning" ? "btn-busy" : ""}`}
               disabled={scan === "scanning"}
@@ -263,7 +263,7 @@ function EnvFilesControl(props: ControlProps) {
 
       {files.length === 0 && !adding ? (
         <p className="session-hint" style={{ paddingTop: 2 }}>
-          No env files. Use Scan to find .env files in the checkout directory.
+          No env files. Use Scan to find .env files in the cloned repo directory.
         </p>
       ) : (
         <div className="env-file-list">
@@ -421,7 +421,7 @@ export const PromptsRenderer = withJsonFormsControlProps(PromptsControl);
 // Custom renderers first so they out-rank the vanilla defaults for their scopes.
 export const repoSettingsRenderers = [
   { tester: identityTester, renderer: IdentityRenderer },
-  { tester: checkoutDirTester, renderer: CheckoutDirRenderer },
+  { tester: clonedRepoDirTester, renderer: ClonedRepoDirRenderer },
   { tester: worktreePrefixTester, renderer: WorktreePrefixRenderer },
   { tester: envFilesTester, renderer: EnvFilesRenderer },
   { tester: postSpawnCommandsTester, renderer: PostSpawnCommandsRenderer },

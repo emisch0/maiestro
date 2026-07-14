@@ -13,9 +13,9 @@
       "type": ["string", "null"],
       "description": "Identity used for credentials and agent spawning for this repo."
     },
-    "checkout_dir": {
+    "cloned_repo_dir": {
       "type": ["string", "null"],
-      "description": "Absolute path to the local checkout directory."
+      "description": "Absolute path to the local cloned repo directory (the primary checkout mAIestro creates worktrees from)."
     },
     "worktree_prefix": {
       "type": ["string", "null"],
@@ -25,7 +25,7 @@
     "env_files": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Env files relative to checkout_dir to source when launching user-facing tools (VSCode, Terminal) for this repo."
+      "description": "Env files relative to cloned_repo_dir to source when launching user-facing tools (VSCode, Terminal) for this repo."
     },
     "post_spawn_commands": {
       "type": "array",

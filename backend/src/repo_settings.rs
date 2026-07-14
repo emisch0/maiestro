@@ -37,8 +37,9 @@ pub struct RepoSettings {
     pub repo: String,
     /// Identity used for credentials and agent spawning for this repo.
     pub identity_id: Option<String>,
-    /// Absolute path to the local checkout directory.
-    pub checkout_dir: Option<String>,
+    /// Absolute path to the local cloned repo directory (the primary checkout
+    /// mAIestro creates worktrees from).
+    pub cloned_repo_dir: Option<String>,
     /// Prefix for worktree locations. The full worktree path is
     /// `<worktree_prefix><workspace>/<repo>` (a string concatenation — the
     /// trailing segment is part of the directory name, not a path component).
@@ -46,7 +47,7 @@ pub struct RepoSettings {
     /// original hardcoded behavior. Tilde-expanded via `expand_tilde` in spawn.
     #[serde(default)]
     pub worktree_prefix: Option<String>,
-    /// Env files relative to checkout_dir to source when launching user-facing tools.
+    /// Env files relative to cloned_repo_dir to source when launching user-facing tools.
     pub env_files: Vec<String>,
     /// Shell commands to run in a freshly-created worktree, in order, before the
     /// editor opens (e.g. `pnpm install`). Empty by default. Run via the user's
@@ -77,7 +78,7 @@ impl RepoSettings {
         Self {
             repo: repo.to_owned(),
             identity_id: None,
-            checkout_dir: Some(format!("{home}/src/{name}")),
+            cloned_repo_dir: Some(format!("{home}/src/{name}")),
             worktree_prefix: None,
             env_files: Vec::new(),
             post_spawn_commands: Vec::new(),
@@ -308,9 +309,9 @@ pub fn repo_set_visibility(repo: String, hidden: Option<HideState>) -> Result<()
 }
 
 #[tauri::command]
-pub fn repo_scan_env_files(checkout_dir: String) -> Vec<String> {
-    crate::log_invoke!("repo_scan_env_files", checkout_dir = %checkout_dir);
-    let base = Path::new(&checkout_dir);
+pub fn repo_scan_env_files(cloned_repo_dir: String) -> Vec<String> {
+    crate::log_invoke!("repo_scan_env_files", cloned_repo_dir = %cloned_repo_dir);
+    let base = Path::new(&cloned_repo_dir);
     let mut abs = Vec::new();
     walk_env_files(base, 4, &mut abs);
     abs.iter()
@@ -355,7 +356,7 @@ mod tests {
         let populated = RepoSettings {
             repo: "acme/widget".into(),
             identity_id: Some("id-123".into()),
-            checkout_dir: Some("/home/u/src/widget".into()),
+            cloned_repo_dir: Some("/home/u/src/widget".into()),
             worktree_prefix: Some("/home/u/src/work-".into()),
             env_files: vec![".env".into(), ".env.local".into()],
             post_spawn_commands: vec!["pnpm install".into()],
@@ -383,17 +384,17 @@ mod tests {
         }
     }
 
-    /// A minimal old file (only `checkout_dir` + `env_files`) still loads —
+    /// A minimal file (only `cloned_repo_dir` + `env_files`) still loads —
     /// backward compatible with files written before newer fields existed.
     #[test]
     fn minimal_old_file_passes() {
         let data = json!({
-            "checkout_dir": "/home/u/src/widget",
+            "cloned_repo_dir": "/home/u/src/widget",
             "env_files": [".env"]
         })
         .to_string();
         let settings = parse_and_validate(&data, "test").expect("minimal file should load");
-        assert_eq!(settings.checkout_dir.as_deref(), Some("/home/u/src/widget"));
+        assert_eq!(settings.cloned_repo_dir.as_deref(), Some("/home/u/src/widget"));
         assert_eq!(settings.env_files, vec![".env".to_string()]);
         assert!(settings.identity_id.is_none());
     }
@@ -402,7 +403,7 @@ mod tests {
     #[test]
     fn wrong_type_fails_with_field_message() {
         let data = json!({
-            "checkout_dir": "/home/u/src/widget",
+            "cloned_repo_dir": "/home/u/src/widget",
             "env_files": "not-an-array"
         })
         .to_string();
@@ -416,7 +417,7 @@ mod tests {
     fn unknown_fields_tolerated() {
         let data = json!({
             "$schema": "./repo-settings.schema.json",
-            "checkout_dir": "/home/u/src/widget",
+            "cloned_repo_dir": "/home/u/src/widget",
             "env_files": [],
             "future_field": 42
         })

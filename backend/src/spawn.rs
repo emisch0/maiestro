@@ -92,10 +92,10 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn local_branch_exists(checkout: &Path, name: &str) -> bool {
+fn local_branch_exists(cloned_repo: &Path, name: &str) -> bool {
     crate::tools::command("git")
         .arg("-C")
-        .arg(checkout)
+        .arg(cloned_repo)
         .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")])
         .output()
         .map(|o| o.status.success())
@@ -500,18 +500,18 @@ pub async fn open_in_editor(work_dir: String) -> Result<(), String> {
     open_vscode(&path)
 }
 
-/// Open a tracked repo's main checkout directory in VS Code. Unlike
+/// Open a tracked repo's main cloned repo directory in VS Code. Unlike
 /// `open_in_editor` this is a pure launch — no worktree, no session, no status —
 /// reusing the same `open_vscode` path logic as spawned worktrees.
 #[tauri::command]
 pub async fn open_repo_in_editor(repo: String) -> Result<(), String> {
     crate::log_invoke!("open_repo_in_editor", repo = %repo);
     let settings = crate::repo_settings::repo_settings_get(repo)?;
-    let checkout = expand_tilde(settings.checkout_dir.as_deref().unwrap_or_default());
-    if !checkout.join(".git").exists() {
-        return Err(format!("checkout dir is not a git repo: {}", checkout.display()));
+    let cloned_repo = expand_tilde(settings.cloned_repo_dir.as_deref().unwrap_or_default());
+    if !cloned_repo.join(".git").exists() {
+        return Err(format!("cloned repo dir is not a git repo: {}", cloned_repo.display()));
     }
-    open_vscode(&checkout)
+    open_vscode(&cloned_repo)
 }
 
 // ── Command ─────────────────────────────────────────────────────────────────────
@@ -575,7 +575,7 @@ struct SpawnDecision<'a> {
 /// already returned. See `finish_spawn`.
 struct SpawnBg {
     gh: GitHub,
-    checkout: PathBuf,
+    cloned_repo: PathBuf,
     work_dir: PathBuf,
     work_parent: String,
     branch: String,
@@ -590,7 +590,7 @@ struct SpawnBg {
 }
 
 /// Core worktree + session creation, shared by every spawn path. Resolves the
-/// repo's settings/identity/checkout itself; the caller supplies the issue facts
+/// repo's settings/identity/cloned repo itself; the caller supplies the issue facts
 /// and the (reviewed) label/theming. The slug is `<n>-<slug(short_label)>`.
 ///
 /// Two-phase for a fresh spawn: this fast synchronous phase resolves the final
@@ -608,9 +608,9 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         .identity_id
         .clone()
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let checkout = expand_tilde(settings.checkout_dir.as_deref().unwrap_or_default());
-    if !checkout.join(".git").exists() {
-        return Err(format!("checkout dir is not a git repo: {}", checkout.display()));
+    let cloned_repo = expand_tilde(settings.cloned_repo_dir.as_deref().unwrap_or_default());
+    if !cloned_repo.join(".git").exists() {
+        return Err(format!("cloned repo dir is not a git repo: {}", cloned_repo.display()));
     }
     let repo_name = repo.split('/').next_back().unwrap_or(repo).to_string();
     let gh = GitHub::for_identity(&identity_id)?;
@@ -657,7 +657,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     let mut work_dir = base_dir.clone();
     let mut session_label = format!("{prefix}{short_label}");
     let mut n = 2;
-    while work_dir.is_dir() || local_branch_exists(&checkout, &branch) {
+    while work_dir.is_dir() || local_branch_exists(&cloned_repo, &branch) {
         workspace = format!("{base_workspace}-{n}");
         branch = format!("{base_branch}-{n}");
         work_dir = worktree_dir(&workspace);
@@ -682,7 +682,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         branch: branch.clone(),
         default_branch: default_branch.to_string(),
         work_dir: work_dir.display().to_string(),
-        checkout_dir: checkout.display().to_string(),
+        cloned_repo_dir: cloned_repo.display().to_string(),
         session_title: session_title.clone(),
         color: color.to_string(),
         emoji: emoji.to_string(),
@@ -697,7 +697,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     // Hand the slow work off to a background task and return at once.
     let bg = SpawnBg {
         gh,
-        checkout,
+        cloned_repo,
         work_dir: work_dir.clone(),
         work_parent,
         branch: branch.clone(),
@@ -749,8 +749,8 @@ async fn finish_spawn(bg: SpawnBg) {
     .await;
 }
 
-/// True if `rel` is a safe *relative* path to copy inside the checkout/worktree:
-/// non-empty, not absolute, and with no `..` component — so `checkout.join(rel)`
+/// True if `rel` is a safe *relative* path to copy inside the cloned repo/worktree:
+/// non-empty, not absolute, and with no `..` component — so `cloned_repo.join(rel)`
 /// and `work_dir.join(rel)` cannot escape their base dirs. An `env_files` entry is
 /// user-authored (repo settings) and normally a bare name like `.env.local`, but an
 /// absolute (`/Users/me/.ssh/id_rsa`) or `..`-laden entry would otherwise copy an
@@ -771,23 +771,23 @@ async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
 
     // Create the worktree from the repo's default branch.
     std::fs::create_dir_all(bg.work_dir.parent().unwrap()).map_err(|e| e.to_string())?;
-    if let Err(e) = git(&bg.checkout, &["fetch", "origin", "--quiet"]) {
+    if let Err(e) = git(&bg.cloned_repo, &["fetch", "origin", "--quiet"]) {
         tracing::warn!(error = %e, "git fetch before spawn failed (continuing)");
     }
-    git(&bg.checkout, &["worktree", "add", &bg.work_dir.to_string_lossy(), "-b", &bg.branch, &format!("origin/{}", bg.default_branch)])?;
+    git(&bg.cloned_repo, &["worktree", "add", &bg.work_dir.to_string_lossy(), "-b", &bg.branch, &format!("origin/{}", bg.default_branch)])?;
     if let Err(e) = git(&bg.work_dir, &["branch", "--unset-upstream"]) {
         tracing::warn!(error = %e, "git branch --unset-upstream failed (continuing)");
     }
 
-    // Copy configured env files (relative to checkout) into the worktree.
+    // Copy configured env files (relative to the cloned repo) into the worktree.
     for rel in &bg.env_files {
         // Reject absolute or `..`-escaping entries so the copy can't read outside
-        // the checkout or write outside the worktree.
+        // the cloned repo or write outside the worktree.
         if !is_contained_relpath(rel) {
-            warnings.push(format!("env file path not contained in checkout, skipped: {rel}"));
+            warnings.push(format!("env file path not contained in the cloned repo, skipped: {rel}"));
             continue;
         }
-        let src = bg.checkout.join(rel);
+        let src = bg.cloned_repo.join(rel);
         if !src.is_file() {
             warnings.push(format!("env file not found, skipped: {rel}"));
             continue;
@@ -1024,7 +1024,7 @@ impl Drop for ClaudeActivityGuard<'_> {
 ///
 /// `--tools ""` disables ALL tools: these calls only need to generate text, so
 /// the model must not be able to read arbitrary files, run Bash, edit, or fetch
-/// URLs — even though it runs in the real checkout/worktree with the user's
+/// URLs — even though it runs in the real cloned repo/worktree with the user's
 /// ambient permissions. That contains prompt injection from the input text (or
 /// from repo files like CLAUDE.md, which is still loaded as context) to, at
 /// worst, a bad title/body the user reviews — not code execution or exfiltration.
@@ -1061,12 +1061,12 @@ async fn claude_text(
     Ok(envelope["result"].as_str().unwrap_or("").to_string())
 }
 
-/// Ask Claude (haiku), running in the repo checkout for context, to turn the
+/// Ask Claude (haiku), running in the cloned repo for context, to turn the
 /// user's free-text idea into an issue title + markdown body + a short label.
 /// The `short_title` is produced in the *same* call (no extra Claude run): it's
 /// a punchy branch/session label, distinct from the full issue title.
 async fn draft_issue(
-    checkout: &Path,
+    cloned_repo: &Path,
     idea: &str,
     instruction: &str,
     model: &str,
@@ -1075,7 +1075,7 @@ async fn draft_issue(
     // Instruction (default or per-repo override) first; the idea is appended
     // here so an override can't drop it. See prompts.rs.
     let prompt = format!("{instruction}\n\nIdea: {idea}");
-    let reply = claude_text(checkout, &prompt, model, "drafting the issue", Some(activity)).await?;
+    let reply = claude_text(cloned_repo, &prompt, model, "drafting the issue", Some(activity)).await?;
     parse_issue_draft(&reply)
 }
 
@@ -1103,12 +1103,12 @@ fn parse_short_label(text: &str) -> Result<String, String> {
     Ok(label.to_string())
 }
 
-/// Ask Claude (haiku), running in the repo checkout for context, to compress an
+/// Ask Claude (haiku), running in the cloned repo for context, to compress an
 /// existing issue's title + body into a short session label. The spawn preview
 /// opens immediately with the heuristic label and swaps this in when it
 /// arrives; any error here just leaves the heuristic in place.
 async fn suggest_short_label(
-    checkout: &Path,
+    cloned_repo: &Path,
     title: &str,
     body: &str,
     instruction: &str,
@@ -1121,7 +1121,7 @@ async fn suggest_short_label(
     let prompt = format!("{instruction}\n\nIssue title: {title}\n\nIssue body:\n{body}");
     // No activity signal: this is a fire-and-forget label swap with no busy
     // element in the UI to color.
-    let reply = claude_text(checkout, &prompt, model, "summarizing the issue", None).await?;
+    let reply = claude_text(cloned_repo, &prompt, model, "summarizing the issue", None).await?;
     parse_short_label(&reply)
 }
 
@@ -1135,15 +1135,15 @@ pub async fn suggest_short_title(repo: String, issue_number: u64) -> Result<Stri
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let checkout = expand_tilde(settings.checkout_dir.as_deref().unwrap_or_default());
-    if !checkout.join(".git").exists() {
-        return Err(format!("checkout dir is not a git repo: {}", checkout.display()));
+    let cloned_repo = expand_tilde(settings.cloned_repo_dir.as_deref().unwrap_or_default());
+    if !cloned_repo.join(".git").exists() {
+        return Err(format!("cloned repo dir is not a git repo: {}", cloned_repo.display()));
     }
     let gh = GitHub::for_identity(&identity_id)?;
     let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
     let instruction = crate::prompts::short_label(&settings.prompts);
     let model = crate::prompts::model(&settings.prompt_model);
-    suggest_short_label(&checkout, &issue_title, &issue_body, &instruction, &model).await
+    suggest_short_label(&cloned_repo, &issue_title, &issue_body, &instruction, &model).await
 }
 
 /// A drafted issue ready to create, or a signal that Claude couldn't produce a
@@ -1160,7 +1160,7 @@ enum DraftStep {
     NeedsConfirmation { message: String },
 }
 
-/// Resolve the repo's identity + checkout, then turn the idea into an issue
+/// Resolve the repo's identity + cloned repo, then turn the idea into an issue
 /// draft — via Claude, or (when `use_raw_fallback`) straight from the raw text.
 /// Returns the authenticated GitHub client alongside the draft so callers can
 /// create the issue. Shared by `create_issue` and `create_issue_and_spawn`.
@@ -1180,9 +1180,9 @@ async fn resolve_draft(
         .identity_id
         .clone()
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let checkout = expand_tilde(settings.checkout_dir.as_deref().unwrap_or_default());
-    if !checkout.join(".git").exists() {
-        return Err(format!("checkout dir is not a git repo: {}", checkout.display()));
+    let cloned_repo = expand_tilde(settings.cloned_repo_dir.as_deref().unwrap_or_default());
+    if !cloned_repo.join(".git").exists() {
+        return Err(format!("cloned repo dir is not a git repo: {}", cloned_repo.display()));
     }
     let gh = GitHub::for_identity(&identity_id)?;
 
@@ -1198,7 +1198,7 @@ async fn resolve_draft(
     } else {
         let instruction = crate::prompts::draft_issue(&settings.prompts);
         let model = crate::prompts::model(&settings.prompt_model);
-        match draft_issue(&checkout, idea, &instruction, &model, activity).await {
+        match draft_issue(&cloned_repo, idea, &instruction, &model, activity).await {
             Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title, warning: None },
             // Couldn't draft: let the user confirm before creating anything.
             Err(message) => DraftStep::NeedsConfirmation { message },
@@ -1507,7 +1507,7 @@ return "absent""#
 /// worktree? Our spawned `claude` runs in VS Code's integrated terminal with its
 /// cwd in the worktree, so this catches the common "still open" case without
 /// needing Accessibility. Uses `lsof -d cwd` (process CWDs only) to avoid the
-/// slow tree walk that `lsof +D` would do over a full checkout.
+/// slow tree walk that `lsof +D` would do over a full cloned repo.
 fn worktree_in_use(work_dir: &Path) -> bool {
     let dir = work_dir.to_string_lossy();
     match Command::new("lsof").args(["-d", "cwd", "-Fn"]).output() {
@@ -1556,7 +1556,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     let session = crate::sessions::get(&session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
     let work_dir = PathBuf::from(&session.work_dir);
-    let checkout = expand_tilde(&session.checkout_dir);
+    let cloned_repo = expand_tilde(&session.cloned_repo_dir);
     let branch = session.branch.clone();
     let base = session.default_branch.clone();
 
@@ -1670,15 +1670,15 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     //    record whose worktree was never created — tolerate a missing dir so the
     //    broken row can still be torn down, just pruning any dangling admin entry.
     if work_dir.exists() {
-        git(&checkout, &["worktree", "remove", "--force", &work_dir.to_string_lossy()])?;
+        git(&cloned_repo, &["worktree", "remove", "--force", &work_dir.to_string_lossy()])?;
     } else {
-        let _ = git(&checkout, &["worktree", "prune"]);
+        let _ = git(&cloned_repo, &["worktree", "prune"]);
     }
 
     // 3. Delete the local branch (-D: spawn unset the upstream and -d checks the
     //    wrong base, so it would refuse even for merged branches).
-    if local_branch_exists(&checkout, &branch) {
-        if let Err(e) = git(&checkout, &["branch", "-D", &branch]) {
+    if local_branch_exists(&cloned_repo, &branch) {
+        if let Err(e) = git(&cloned_repo, &["branch", "-D", &branch]) {
             tracing::warn!(branch = %branch, error = %e, "could not delete local branch during teardown");
         }
     }

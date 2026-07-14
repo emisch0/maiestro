@@ -15,7 +15,7 @@ export interface PromptOverrides {
 }
 
 export interface RepoSettings {
-  checkout_dir: string | null;
+  cloned_repo_dir: string | null;
   worktree_prefix: string | null;
   env_files: string[];
   post_spawn_commands: string[];
@@ -65,7 +65,7 @@ export interface SpawnPlan {
   short_title: string;
   color: string;
   emoji: string;
-  /** Local checkout dir name, for rendering the worktree path. */
+  /** Local cloned repo dir name, for rendering the worktree path. */
   repo_name: string;
 }
 
@@ -97,7 +97,7 @@ export interface Session {
   issue_url: string;
   branch: string;
   work_dir: string;
-  checkout_dir: string;
+  cloned_repo_dir: string;
   session_title: string;
   color: string;
   emoji: string;
@@ -238,8 +238,8 @@ export const api = {
   setSessionVisibility: (sessionId: string, hidden: HideState | null) =>
     invoke<void>("session_set_visibility", { sessionId, hidden }),
 
-  scanEnvFiles: (checkoutDir: string) =>
-    invoke<string[]>("repo_scan_env_files", { checkoutDir }),
+  scanEnvFiles: (clonedRepoDir: string) =>
+    invoke<string[]>("repo_scan_env_files", { clonedRepoDir }),
 
   identitiesList: () =>
     invoke<string[]>("identities_list"),

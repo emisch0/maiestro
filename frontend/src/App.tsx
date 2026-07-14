@@ -380,12 +380,12 @@ function Settings() {
     () => ({
       showUnfocusedDescription: true as const,
       knownIdentities,
-      checkoutDir: loadedRepo?.settings.checkout_dir ?? null,
+      clonedRepoDir: loadedRepo?.settings.cloned_repo_dir ?? null,
       worktreePrefixDefault: repoFormDefaults?.worktreePrefixDefault ?? "",
       promptModelDefault: repoFormDefaults?.promptModelDefault ?? "",
       promptDefaults: repoFormDefaults?.promptDefaults ?? {},
     }),
-    [knownIdentities, loadedRepo?.settings.checkout_dir, repoFormDefaults],
+    [knownIdentities, loadedRepo?.settings.cloned_repo_dir, repoFormDefaults],
   );
 
   // Config the app-settings custom renderers read (the Tool paths status line).
@@ -790,7 +790,7 @@ function Settings() {
                     <div className="cleanup-confirm">
                       <p className="cleanup-lead">Remove {selection.repo} from mAIestro?</p>
                       <p className="cleanup-confirm-body">
-                        Worktrees, checkouts, and any work in them are kept on disk.
+                        Worktrees, cloned repos, and any work in them are kept on disk.
                       </p>
                       <div className="issue-actions">
                         <button className="btn-danger" onClick={() => handleRemoveRepo(selection.repo)}>Remove</button>
@@ -1952,8 +1952,8 @@ function MainView() {
                         setOpenRepoErr((e) => ({ ...e, [repo]: String(err) }));
                       }
                     }}
-                    title="Open checkout in VS Code"
-                    aria-label="Open checkout in VS Code"
+                    title="Open cloned repo in VS Code"
+                    aria-label="Open cloned repo in VS Code"
                   >
                     <VSCodeIcon />
                   </button>
@@ -1988,7 +1988,7 @@ function MainView() {
                   <div className="cleanup-confirm">
                     <p className="cleanup-lead">Remove {repo} from mAIestro?</p>
                     <p className="cleanup-confirm-body">
-                      Worktrees, checkouts, and any work in them are kept on disk.
+                      Worktrees, cloned repos, and any work in them are kept on disk.
                     </p>
                     <div className="issue-actions">
                       <button className="btn-danger" onClick={() => removeRepo(repo)}>Remove</button>
