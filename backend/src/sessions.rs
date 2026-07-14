@@ -25,8 +25,8 @@ pub struct Session {
     pub default_branch: String,
     /// Absolute path to the spawned worktree.
     pub work_dir: String,
-    /// Absolute path to the source checkout the worktree was created from.
-    pub checkout_dir: String,
+    /// Absolute path to the source cloned repo the worktree was created from.
+    pub cloned_repo_dir: String,
     /// Human-facing session name, including the leading emoji.
     pub session_title: String,
     /// Title-bar background color (hex).
