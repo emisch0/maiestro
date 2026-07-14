@@ -19,11 +19,13 @@ import { vanillaRenderers, vanillaCells } from "@jsonforms/vanilla-renderers";
 import { ResolvedTool, Theme } from "./api";
 import { RevealButton, PathMissingHint, usePathExists } from "./PathField";
 
-/** Field order; `window`/`settings_window` are deliberately omitted (machine-managed). */
+/** Field order; `window`/`settings_window`/`onboarding_completed` are
+ *  deliberately omitted (machine-managed). */
 export const appSettingsUISchema = {
   type: "VerticalLayout",
   elements: [
     { type: "Control", scope: "#/properties/theme", label: "Theme" },
+    { type: "Control", scope: "#/properties/launch_at_login", label: "Launch at login" },
     { type: "Control", scope: "#/properties/tool_paths", label: "Tool paths" },
   ],
 } as unknown as UISchemaElement;
@@ -80,6 +82,39 @@ function ThemeControl(props: ControlProps) {
 
 export const themeTester = rankWith(20, scopeEndsWith("theme"));
 export const ThemeRenderer = withJsonFormsControlProps(ThemeControl);
+
+// ── Launch at login (segmented on/off switch) ────────────────────────────────
+// Stored value is boolean | null; null is treated as false (issue #98).
+
+function LaunchAtLoginControl(props: ControlProps) {
+  const { data, handleChange, path } = props;
+  const on = data === true;
+  // Title stays flush-left like the other sections (Theme, Tool paths); the switch
+  // sits to the left of the help text on the row below it. Help text is
+  // deliberately concise — no "change this in Preferences" note, since we're
+  // already in Preferences.
+  return (
+    <div className="control jsf-control">
+      <label className="jsf-label">Launch at login</label>
+      <div className="toggle-field">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          aria-label="Launch at login"
+          className={`toggle-switch ${on ? "on" : ""}`}
+          onClick={() => handleChange(path, !on)}
+        >
+          <span className="toggle-knob" />
+        </button>
+        <p className="session-hint">Start mAIestro automatically when you log in.</p>
+      </div>
+    </div>
+  );
+}
+
+export const launchAtLoginTester = rankWith(20, scopeEndsWith("launch_at_login"));
+export const LaunchAtLoginRenderer = withJsonFormsControlProps(LaunchAtLoginControl);
 
 // ── Tool paths ───────────────────────────────────────────────────────────────
 // One input per directly-invoked CLI. Empty = auto-resolve; the resolved path (or
@@ -199,6 +234,7 @@ export const ToolPathsRenderer = withJsonFormsControlProps(ToolPathsControl);
 // Custom renderers first so they out-rank the vanilla defaults for their scopes.
 export const appSettingsRenderers = [
   { tester: themeTester, renderer: ThemeRenderer },
+  { tester: launchAtLoginTester, renderer: LaunchAtLoginRenderer },
   { tester: toolPathsTester, renderer: ToolPathsRenderer },
   ...vanillaRenderers,
 ];

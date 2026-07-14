@@ -49,6 +49,16 @@
         "resizable": true,
         "visible": false,
         "center": true
+      },
+      {
+        "label": "onboarding",
+        "title": "Welcome to mAIestro",
+        "width": 440,
+        "height": 340,
+        "resizable": false,
+        "visible": false,
+        "center": true,
+        "alwaysOnTop": true
       }
     ],
     "security": {

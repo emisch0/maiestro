@@ -274,6 +274,11 @@ fn main() {
         .manage(PopoverState::default())
         .manage(registry)
         .plugin(tauri_plugin_positioner::init())
+        // Launch-at-login writes a per-user LaunchAgent (issue #98).
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Relaunch focuses the existing app instead of spawning a second.
             show_popover(app);
@@ -329,6 +334,7 @@ fn main() {
             app_settings::app_settings_schema,
             app_settings::app_settings_get,
             app_settings::app_settings_set,
+            app_settings::onboarding_complete,
             tools::tools_resolved,
         ])
         .setup(|app| {
@@ -360,6 +366,13 @@ fn main() {
             // (a torn-down/rebuilt spawner), so live status survives across
             // teardowns and `tauri dev` rebuilds. See spawn.rs / issue #35.
             hooks::reconcile_all_session_hooks();
+
+            // Bring the launch-at-login LaunchAgent into agreement with the stored
+            // pref (healing a stale baked binary path), then — on the very first
+            // run only — run onboarding (which offers launch-at-login). Issue #98.
+            app_settings::reconcile_launch_at_login(app.handle());
+            app_settings::maybe_show_onboarding(app.handle());
+
             match status::start_watcher(app.handle().clone()) {
                 Ok(watcher) => {
                     app.manage(Mutex::new(watcher));
@@ -468,6 +481,13 @@ fn main() {
                 }
                 _ => {}
             },
+            // Closing the onboarding window without pressing "Get started" accepts
+            // the defaults — record completion so it doesn't reappear.
+            "onboarding" => {
+                if let WindowEvent::CloseRequested { .. } = event {
+                    app_settings::complete_onboarding_if_pending(window.app_handle());
+                }
+            }
             _ => {}
         })
         .run(tauri::generate_context!())
