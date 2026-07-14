@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Component, ErrorInfo, ReactNode } from "react";
 import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
-import { api, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, Theme, WorkState } from "./api";
+import { api, AppSettings, CredentialScope, CredentialTypeDto, DraftPreviewOutcome, GHRepo, HideState, IssueNode, PrChecks, PrLink, RepoSettings, ResolvedTool, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
 import { JsonForms } from "@jsonforms/react";
 import {
   repoSettingsRenderers,
@@ -10,6 +10,11 @@ import {
   extractFormDefaults,
   RepoFormDefaults,
 } from "./RepoSettingsForm";
+import {
+  appSettingsRenderers,
+  appSettingsCells,
+  appSettingsUISchema,
+} from "./AppSettingsForm";
 import { applyTheme, initTheme } from "./theme";
 import LogoIcon from "./icons/logo.svg?react";
 import GearIcon from "./icons/gear.svg?react";
@@ -212,7 +217,15 @@ function Settings() {
     loading: boolean;
     error?: string;
   }>({ identityId: null, identityInput: "", repos: null, filter: "", loading: false });
-  const [theme, setThemeState] = useState<Theme>("system");
+  // Global app settings ("Preferences" panel), rendered via JSON Forms (#85).
+  const [appSchema, setAppSchema] = useState<Record<string, unknown> | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const [appLoadError, setAppLoadError] = useState<string | null>(null);
+  const [appSaveError, setAppSaveError] = useState<string | null>(null);
+  // How each directly-invoked CLI currently resolves, for the Tool paths status line.
+  const [resolvedTools, setResolvedTools] = useState<ResolvedTool[]>([]);
+  const appLastSavedRef = useRef<string>("");
+  const appSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     api.listCredentialTypes().then((types) => {
@@ -224,17 +237,50 @@ function Settings() {
     api.listRepos().then(setRepos);
     api.identitiesList().then(setKnownIdentities);
     api.getDefaultIdentity().then((id) => { if (id) setSelection({ kind: "identity", id }); });
-    api.getTheme().then(setThemeState);
     api.repoSettingsSchema().then((s) => {
       setRepoFormDefaults(extractFormDefaults(s));
       setRepoSchema(sanitizeSchemaForForm(s));
     });
+    api.appSettingsSchema().then((s) => setAppSchema(sanitizeSchemaForForm(s)));
+    loadAppSettings();
   }, []);
 
-  async function chooseTheme(next: Theme) {
-    setThemeState(next);
-    applyTheme(next);
-    await api.setTheme(next);
+  // Load the global settings + current tool resolution for the Preferences form.
+  function loadAppSettings() {
+    api.getAppSettings()
+      .then((s) => {
+        // Seed the baseline so JsonForms' initial onChange (same data) is a no-op.
+        appLastSavedRef.current = JSON.stringify(s);
+        setAppSettings(s);
+        setAppLoadError(null);
+      })
+      .catch((e) => setAppLoadError(String(e)));
+    api.toolsResolved().then(setResolvedTools).catch(() => setResolvedTools([]));
+  }
+
+  // Autosave the Preferences form, debounced, skipped while ajv reports errors.
+  // Mirrors the repo-form autosave. Theme is applied to this window immediately
+  // for responsiveness; the backend also broadcasts `theme-changed` to the rest.
+  function handleAppFormChange(data: AppSettings, errors: unknown[] | undefined) {
+    setAppSettings(data);
+    if ((errors?.length ?? 0) > 0) return;
+    const serialized = JSON.stringify(data);
+    if (serialized === appLastSavedRef.current) return;
+    const prev = appLastSavedRef.current;
+    appLastSavedRef.current = serialized;
+    applyTheme(data.theme ?? "system");
+    if (appSaveTimerRef.current) clearTimeout(appSaveTimerRef.current);
+    appSaveTimerRef.current = setTimeout(async () => {
+      try {
+        await api.setAppSettings(data);
+        setAppSaveError(null);
+        // Refresh resolution so the Tool paths status line reflects the new paths.
+        api.toolsResolved().then(setResolvedTools).catch(() => {});
+      } catch (e) {
+        appLastSavedRef.current = prev; // let a fixed value save again
+        setAppSaveError(String(e));
+      }
+    }, 400);
   }
 
   useEffect(() => {
@@ -339,6 +385,12 @@ function Settings() {
       promptDefaults: repoFormDefaults?.promptDefaults ?? {},
     }),
     [knownIdentities, loadedRepo?.settings.checkout_dir, repoFormDefaults],
+  );
+
+  // Config the app-settings custom renderers read (the Tool paths status line).
+  const appFormConfig = useMemo(
+    () => ({ showUnfocusedDescription: true as const, resolvedTools }),
+    [resolvedTools],
   );
 
   // Autosave on change, debounced, skipped while ajv reports errors. JsonForms
@@ -607,27 +659,41 @@ function Settings() {
             </div>
           ) : selection.kind === "preferences" ? (
             <div className="cred-list">
-              <div className="settings-group">
-                <div className="settings-group-header">
-                  <span className="field-label" style={{ marginBottom: 0 }}>Theme</span>
+              {appLoadError ? (
+                // The backend rejected ~/.maiestro/settings.json (bad JSON or a
+                // schema violation). Show it rather than a form full of defaults
+                // that would clobber the file on the next save.
+                <div className="cleanup-confirm">
+                  <p className="cleanup-confirm-body">Couldn't load settings:</p>
+                  <p className="cleanup-confirm-body" style={{ opacity: 0.85, fontFamily: "var(--font-mono, monospace)", fontSize: 11 }}>
+                    {appLoadError}
+                  </p>
+                  <p className="cleanup-confirm-body" style={{ opacity: 0.7 }}>
+                    Fix ~/.maiestro/settings.json by hand, then reopen Preferences.
+                  </p>
                 </div>
-                <div className="theme-options" role="radiogroup" aria-label="Theme">
-                  {(["light", "dark", "system"] as Theme[]).map((opt) => (
-                    <button
-                      key={opt}
-                      className={`theme-option ${theme === opt ? "active" : ""}`}
-                      role="radio"
-                      aria-checked={theme === opt}
-                      onClick={() => chooseTheme(opt)}
-                    >
-                      {opt === "light" ? "Light" : opt === "dark" ? "Dark" : "System"}
-                    </button>
-                  ))}
+              ) : appSchema && appSettings ? (
+                <div className="jsf-root">
+                  {appSaveError && (
+                    <div className="cleanup-confirm">
+                      <p className="cleanup-confirm-body">Couldn't save: {appSaveError}</p>
+                    </div>
+                  )}
+                  <JsonForms
+                    schema={appSchema}
+                    uischema={appSettingsUISchema}
+                    data={appSettings}
+                    renderers={appSettingsRenderers}
+                    cells={appSettingsCells}
+                    config={appFormConfig}
+                    onChange={({ data, errors }) =>
+                      handleAppFormChange(data as AppSettings, errors)
+                    }
+                  />
                 </div>
-                <p className="session-hint" style={{ paddingTop: 2 }}>
-                  System follows your macOS appearance.
-                </p>
-              </div>
+              ) : (
+                <p className="session-hint" style={{ paddingTop: 2 }}>Loading…</p>
+              )}
             </div>
           ) : selection.kind === "identity" ? (
             <>

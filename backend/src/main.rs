@@ -13,6 +13,7 @@ mod repo_settings;
 mod sessions;
 mod spawn;
 mod status;
+mod tools;
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -218,11 +219,20 @@ fn main() {
             status::clear_session_error,
             app_settings::app_settings_get_theme,
             app_settings::app_settings_set_theme,
+            app_settings::app_settings_schema,
+            app_settings::app_settings_get,
+            app_settings::app_settings_set,
+            tools::tools_resolved,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Recover the user's real login-shell PATH once, so the CLIs we invoke
+            // directly (claude, git, code) resolve even under the minimal PATH the
+            // app gets when launched from /Applications at login. See tools.rs / #85.
+            tools::init();
 
             // Apply the user's persisted popover size before the first show, so
             // the popover opens at their chosen dimensions with no resize flash.

@@ -1,0 +1,263 @@
+//! Resolving the external CLIs mAIestro invokes **directly** — `claude`, `git`,
+//! and the VS Code `code` CLI — robustly, even when the app is launched from the
+//! packaged bundle (`/Applications/mAIestro.app/…`).
+//!
+//! The problem: at login, macOS Launch Services starts the app with a **minimal
+//! `$PATH`** (`/usr/bin:/bin:/usr/sbin:/sbin`) and no shell profile sourced. A
+//! bare `Command::new("claude")` (or `git`, or `code`) then fails to resolve, or
+//! resolves to the wrong binary (e.g. the `/usr/bin/git` Xcode stub instead of a
+//! Homebrew git). This module centralizes resolution so every direct invocation
+//! shares one, correct answer. Tools mAIestro launches *indirectly* — `open`,
+//! `osascript`, `lsof` (system binaries always on the minimal PATH), and the
+//! user-facing session, which inherits the full ambient env — are not affected
+//! and don't go through here.
+//!
+//! Two layers:
+//! 1. **Login-shell PATH, recovered once.** We run `$SHELL -l -c 'echo $PATH'`
+//!    at startup ([`init`]) and cache it. This is the user's *real* PATH —
+//!    Homebrew, asdf/nvm shims, etc. — that Launch Services stripped. Every
+//!    directly-spawned child is then given this enriched PATH, so tools the
+//!    resolved binary itself shells out to (git's helpers, claude's node) resolve
+//!    too. This layer fixes all three tools — and any added later — with no config.
+//! 2. **Per-tool explicit override.** `~/.maiestro/settings.json`'s `tool_paths`
+//!    can pin an absolute path per tool, which wins over auto-resolution.
+//!
+//! [`resolve_tool`] precedence: explicit override (if it exists) → `which` on the
+//! enriched PATH → known install locations → the bare name (let the OS try, as a
+//! last resort preserving prior behavior).
+
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// The user's login-shell PATH, resolved once and cached. `None` when the login
+/// shell couldn't be run or produced nothing usable (we then fall back to the
+/// process's own PATH plus the known-location probes).
+static LOGIN_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+/// Resolve and cache the login-shell PATH eagerly. Called from `setup()` so the
+/// (blocking) shell invocation happens once at startup rather than lazily on the
+/// first spawn. Safe to call more than once — subsequent calls are no-ops.
+pub fn init() {
+    let _ = login_path();
+}
+
+fn login_path() -> &'static Option<String> {
+    LOGIN_PATH.get_or_init(resolve_login_path)
+}
+
+/// Run the user's login shell to capture the PATH it would set up. Mirrors how
+/// `run_post_spawn_commands` invokes the shell (`$SHELL -l -c …`) so the two see
+/// the same environment.
+fn resolve_login_path() -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let out = std::process::Command::new(&shell)
+        .args(["-l", "-c", "echo $PATH"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        tracing::warn!(shell = %shell, "login shell exited non-zero while resolving PATH");
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        tracing::debug!(path = %path, "resolved login-shell PATH");
+        Some(path)
+    }
+}
+
+/// The PATH to hand directly-spawned children: the login-shell PATH followed by
+/// the process's own PATH entries not already present. Pure/order-preserving
+/// merge in [`merge_paths`] so it's unit-testable.
+pub fn enriched_path() -> String {
+    let login = login_path().clone().unwrap_or_default();
+    let current = std::env::var("PATH").unwrap_or_default();
+    merge_paths(&login, &current)
+}
+
+/// Concatenate two `:`-separated PATH strings, `first` then `second`, dropping
+/// empty and duplicate entries while preserving first-seen order.
+fn merge_paths(first: &str, second: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut parts: Vec<&str> = Vec::new();
+    for p in first.split(':').chain(second.split(':')) {
+        if p.is_empty() {
+            continue;
+        }
+        if seen.insert(p) {
+            parts.push(p);
+        }
+    }
+    parts.join(":")
+}
+
+/// First existing `bin` found in the given `:`-separated PATH.
+fn which_on(path: &str, bin: &str) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|d| d.join(bin))
+        .find(|p| p.is_file())
+}
+
+fn home() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+}
+
+/// Expand a leading `~` in a user-configured path to `$HOME`. Other paths pass
+/// through unchanged.
+fn expand_tilde(p: &str) -> PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        home().join(rest)
+    } else if p == "~" {
+        home()
+    } else {
+        PathBuf::from(p)
+    }
+}
+
+/// Known install locations to probe when a tool isn't on the enriched PATH — the
+/// PATH can still be minimal even after enrichment (e.g. the login shell itself
+/// failed to resolve). Kept per-tool; unknown tools have no fallbacks.
+fn fallbacks(name: &str) -> Vec<PathBuf> {
+    match name {
+        "claude" => vec![
+            home().join(".claude/local/claude"),
+            PathBuf::from("/opt/homebrew/bin/claude"),
+            PathBuf::from("/usr/local/bin/claude"),
+        ],
+        "code" => vec![
+            PathBuf::from("/opt/homebrew/bin/code"),
+            PathBuf::from("/usr/local/bin/code"),
+            PathBuf::from("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// Resolve `name` to a concrete, existing binary, or `None` if nothing was found.
+/// Precedence: explicit override → `which` on the enriched PATH → known locations.
+pub fn find_tool(name: &str) -> Option<PathBuf> {
+    // 1. Explicit override from settings, when it points at a real file. A
+    //    configured-but-missing path is a likely mistake worth a log line; we
+    //    then fall through to auto-resolution rather than failing hard.
+    if let Some(over) = crate::app_settings::tool_path_override(name) {
+        let p = expand_tilde(&over);
+        if p.is_file() {
+            return Some(p);
+        }
+        tracing::warn!(tool = name, path = %over, "configured tool path does not exist; falling back to auto-resolution");
+    }
+    // 2. The enriched (login-shell) PATH.
+    if let Some(p) = which_on(&enriched_path(), name) {
+        return Some(p);
+    }
+    // 3. Known install locations.
+    fallbacks(name).into_iter().find(|p| p.is_file())
+}
+
+/// The path to invoke `name` with. Falls back to the bare name (letting the OS
+/// resolve it) when nothing concrete was found, preserving prior behavior as a
+/// last resort.
+pub fn resolve_tool(name: &str) -> PathBuf {
+    find_tool(name).unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// For the Settings UI: the resolved path and whether it points at a real file.
+/// `(name, false)` means "not found" — nothing on the PATH or in known locations.
+pub fn resolved_status(name: &str) -> (String, bool) {
+    match find_tool(name) {
+        Some(p) => (p.display().to_string(), true),
+        None => (name.to_string(), false),
+    }
+}
+
+/// A `std::process::Command` for a directly-invoked tool: the resolved binary
+/// with the enriched PATH so any sub-tools it calls resolve too.
+pub fn command(name: &str) -> std::process::Command {
+    let mut c = std::process::Command::new(resolve_tool(name));
+    c.env("PATH", enriched_path());
+    c
+}
+
+/// The `tokio::process::Command` equivalent of [`command`], for async spawns.
+pub fn tokio_command(name: &str) -> tokio::process::Command {
+    let mut c = tokio::process::Command::new(resolve_tool(name));
+    c.env("PATH", enriched_path());
+    c
+}
+
+/// The directly-invoked tools whose resolution the Settings UI surfaces.
+const TOOLS: &[&str] = &["claude", "git", "code"];
+
+/// One tool's resolution result, for the Settings "Tool paths" status line.
+#[derive(serde::Serialize)]
+pub struct ResolvedTool {
+    pub tool: String,
+    /// The path we'd invoke — an absolute resolved path, or the bare name if not found.
+    pub path: String,
+    /// Whether `path` points at a real, existing file.
+    pub exists: bool,
+}
+
+/// Report, per directly-invoked tool, the path resolution currently picks and
+/// whether it exists. Drives the Settings ▸ Preferences ▸ Tool paths status line.
+#[tauri::command]
+pub fn tools_resolved() -> Vec<ResolvedTool> {
+    crate::log_invoke_debug!("tools_resolved");
+    TOOLS
+        .iter()
+        .map(|t| {
+            let (path, exists) = resolved_status(t);
+            ResolvedTool { tool: (*t).to_string(), path, exists }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_paths_dedups_and_preserves_order() {
+        assert_eq!(merge_paths("/a:/b", "/b:/c"), "/a:/b:/c");
+        assert_eq!(merge_paths("/a:/a", ""), "/a");
+        assert_eq!(merge_paths("", "/x:/y"), "/x:/y");
+        // Empty segments (leading/trailing/doubled colons) are dropped.
+        assert_eq!(merge_paths("/a::/b:", ":/c"), "/a:/b:/c");
+    }
+
+    #[test]
+    fn merge_paths_is_idempotent() {
+        let once = merge_paths("/opt/homebrew/bin:/usr/bin", "/usr/bin:/bin");
+        let twice = merge_paths(&once, &once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn which_on_finds_a_known_system_binary() {
+        // `sh` exists in /bin on every macOS/Linux host the tests run on.
+        let found = which_on("/nonexistent:/bin:/usr/bin", "sh");
+        assert!(found.is_some(), "expected to find sh on PATH");
+        assert!(found.unwrap().is_file());
+    }
+
+    #[test]
+    fn which_on_misses_a_nonexistent_binary() {
+        assert!(which_on("/bin:/usr/bin", "definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn resolve_tool_falls_back_to_bare_name_when_unresolvable() {
+        // A tool with no fallbacks that won't be on any PATH resolves to itself.
+        let p = resolve_tool("definitely-not-a-real-binary-xyz");
+        assert_eq!(p, PathBuf::from("definitely-not-a-real-binary-xyz"));
+    }
+
+    #[test]
+    fn expand_tilde_expands_leading_home() {
+        let h = home();
+        assert_eq!(expand_tilde("~/bin/x"), h.join("bin/x"));
+        assert_eq!(expand_tilde("~"), h);
+        assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
+    }
+}

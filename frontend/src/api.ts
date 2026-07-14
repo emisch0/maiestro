@@ -167,6 +167,31 @@ export interface WorkState {
 /** Chosen UI appearance. "system" follows the macOS dark/light setting. */
 export type Theme = "light" | "dark" | "system";
 
+/** Explicit paths for the CLIs mAIestro invokes directly. Each null/empty =
+ *  auto-resolve (login-shell PATH → which → known locations). */
+export interface ToolPaths {
+  claude: string | null;
+  git: string | null;
+  code: string | null;
+}
+
+/** Global, app-wide settings (`~/.maiestro/settings.json`). `window` /
+ *  `settings_window` are machine-managed and not edited in the form. */
+export interface AppSettings {
+  theme: Theme | null;
+  tool_paths: ToolPaths | null;
+  window?: { width: number; height: number } | null;
+  settings_window?: { width: number; height: number } | null;
+}
+
+/** How a directly-invoked tool currently resolves, for the settings status line. */
+export interface ResolvedTool {
+  tool: string;
+  /** The path we'd invoke — an absolute resolved path, or the bare name if not found. */
+  path: string;
+  exists: boolean;
+}
+
 export type CredentialScope = { kind: "identity"; identity_id: string };
 
 export interface CredentialTypeDto {
@@ -315,4 +340,19 @@ export const api = {
 
   setTheme: (theme: Theme) =>
     invoke<void>("app_settings_set_theme", { theme }),
+
+  /** The hand-written JSON Schema for the global settings, for the Settings
+   *  window's JSON Forms renderer. */
+  appSettingsSchema: () =>
+    invoke<Record<string, unknown>>("app_settings_schema"),
+
+  getAppSettings: () =>
+    invoke<AppSettings>("app_settings_get"),
+
+  setAppSettings: (settings: AppSettings) =>
+    invoke<void>("app_settings_set", { settings }),
+
+  /** Per-tool resolution (path + whether it exists), for the Tool paths status line. */
+  toolsResolved: () =>
+    invoke<ResolvedTool[]>("tools_resolved"),
 };
