@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Serializes the read-modify-write sequences on `identities.json` (register /
+/// remove), so two interleaved edits can't clobber each other's list/default.
+static IDENTITIES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn identities_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".maiestro/identities.json")
+    crate::paths::maiestro_dir("identities.json")
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -27,17 +30,13 @@ fn load_store() -> Store {
 }
 
 fn save_store(store: &Store) -> std::io::Result<()> {
-    let path = identities_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let data = serde_json::to_string_pretty(store).unwrap();
-    std::fs::write(path, data)
+    crate::json_store::write_json_atomic(&identities_path(), store)
 }
 
 /// Register an identity ID in the persistent list. Best-effort: silently ignores IO errors.
 /// The first identity ever registered also becomes the default.
 pub fn register(identity_id: &str) {
+    let _guard = IDENTITIES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut store = load_store();
     let mut changed = false;
     if !store.identities.iter().any(|i| i == identity_id) {
@@ -70,18 +69,6 @@ pub fn identities_get_default() -> Option<String> {
         Some(d) if store.identities.iter().any(|i| i == d) => Some(d.clone()),
         _ => store.identities.first().cloned(),
     }
-}
-
-#[tauri::command]
-pub fn identities_set_default(identity_id: String) -> Result<(), String> {
-    crate::log_invoke!("identities_set_default", identity = %identity_id);
-    let mut store = load_store();
-    if !store.identities.iter().any(|i| i == &identity_id) {
-        store.identities.push(identity_id.clone());
-        store.identities.sort();
-    }
-    store.default = Some(identity_id);
-    save_store(&store).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

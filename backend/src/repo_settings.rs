@@ -75,11 +75,11 @@ pub struct RepoSettings {
 impl RepoSettings {
     fn default_for(repo: &str) -> Self {
         let name = repo.split('/').next_back().unwrap_or(repo);
-        let home = std::env::var("HOME").unwrap_or_default();
+        let cloned = crate::paths::home().join("src").join(name);
         Self {
             repo: repo.to_owned(),
             identity_id: None,
-            cloned_repo_dir: Some(format!("{home}/src/{name}")),
+            cloned_repo_dir: Some(cloned.to_string_lossy().into_owned()),
             worktree_prefix: None,
             env_files: Vec::new(),
             post_spawn_commands: Vec::new(),
@@ -102,7 +102,7 @@ const SCHEMA_JSON: &str = include_str!("../schemas/repo-settings.schema.json");
 /// Parse the embedded schema. Infallible in practice — the `schema_parses` test
 /// guarantees the embedded string is valid JSON, so a panic here is a build bug.
 fn schema_value() -> serde_json::Value {
-    serde_json::from_str(SCHEMA_JSON).expect("embedded repo-settings schema is valid JSON")
+    crate::schema::parse(SCHEMA_JSON, "repo-settings")
 }
 
 /// A string `default` from the embedded schema, addressed by JSON Pointer (e.g.
@@ -120,29 +120,13 @@ pub fn schema_default(pointer: &str) -> String {
 /// Validate a settings JSON value against the embedded schema. Returns a message
 /// naming the failing field(s) on error.
 fn validate_against_schema(value: &serde_json::Value) -> Result<(), String> {
-    let schema = schema_value();
-    let validator = jsonschema::validator_for(&schema)
-        .map_err(|e| format!("internal schema error: {e}"))?;
-    let errors: Vec<String> = validator
-        .iter_errors(value)
-        .map(|e| {
-            let at = e.instance_path().to_string();
-            let at = if at.is_empty() { "/".to_string() } else { at };
-            format!("at `{at}`: {e}")
-        })
-        .collect();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
+    crate::schema::validate(&schema_value(), value)
 }
 
 // ── Storage ───────────────────────────────────────────────────────────────────
 
 fn repos_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".maiestro/repos")
+    crate::paths::maiestro_dir("repos")
 }
 
 fn settings_path(repo: &str) -> PathBuf {
@@ -179,10 +163,7 @@ fn parse_and_validate(data: &str, label: &str) -> Result<RepoSettings, String> {
 }
 
 fn save(repo: &str, settings: &RepoSettings) -> std::io::Result<()> {
-    let dir = repos_dir();
-    std::fs::create_dir_all(&dir)?;
-    let data = serde_json::to_string_pretty(settings).unwrap();
-    std::fs::write(settings_path(repo), data)
+    crate::json_store::write_json_atomic(&settings_path(repo), settings)
 }
 
 /// Clear `identity_id` from every repo settings file that references the given
@@ -207,8 +188,7 @@ pub fn clear_identity_references(identity_id: &str) {
             continue;
         }
         value["identity_id"] = serde_json::Value::Null;
-        let out = serde_json::to_string_pretty(&value).expect("Value is always serializable");
-        if let Err(e) = std::fs::write(&path, out) {
+        if let Err(e) = crate::json_store::write_json_atomic(&path, &value) {
             tracing::warn!(error = %e, path = %path.display(), "failed to clear identity reference");
         }
     }

@@ -94,35 +94,26 @@ pub fn tool_path_override(name: &str) -> Option<String> {
 const SCHEMA_JSON: &str = include_str!("../schemas/app-settings.schema.json");
 
 fn schema_value() -> serde_json::Value {
-    serde_json::from_str(SCHEMA_JSON).expect("embedded app-settings schema is valid JSON")
+    crate::schema::parse(SCHEMA_JSON, "app-settings")
 }
 
 /// Validate a settings JSON value against the embedded schema, naming the failing
 /// field(s) on error.
 fn validate_against_schema(value: &serde_json::Value) -> Result<(), String> {
-    let schema = schema_value();
-    let validator =
-        jsonschema::validator_for(&schema).map_err(|e| format!("internal schema error: {e}"))?;
-    let errors: Vec<String> = validator
-        .iter_errors(value)
-        .map(|e| {
-            let at = e.instance_path().to_string();
-            let at = if at.is_empty() { "/".to_string() } else { at };
-            format!("at `{at}`: {e}")
-        })
-        .collect();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
+    crate::schema::validate(&schema_value(), value)
 }
 
 // ── Storage ─────────────────────────────────────────────────────────────────
 
+/// Serializes the read-merge-write sequences that update `settings.json`. The
+/// popover/Settings window-size persisters and `app_settings_set` each load the
+/// file, change one field, and save; without this lock two interleaved saves
+/// could clobber each other's field (e.g. a size save dropping a just-changed
+/// theme). Held across the whole load→save of each persister.
+static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn settings_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".maiestro/settings.json")
+    crate::paths::maiestro_dir("settings.json")
 }
 
 /// Read the global settings, returning defaults if the file is absent or unreadable.
@@ -152,14 +143,28 @@ pub fn load_validated() -> Result<AppSettings, String> {
     serde_json::from_value(value).map_err(|e| format!("{label} does not match AppSettings: {e}"))
 }
 
-/// Write the global settings, creating `~/.maiestro/` if needed.
+/// Write the global settings atomically, creating `~/.maiestro/` if needed.
 pub fn save(settings: &AppSettings) -> std::io::Result<()> {
-    let path = settings_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let data = serde_json::to_string_pretty(settings).unwrap();
-    std::fs::write(path, data)
+    crate::json_store::write_json_atomic(&settings_path(), settings)
+}
+
+/// Persist the popover's size, merging it into the current file under the
+/// settings lock so a concurrent theme/tool-path or Settings-window-size save
+/// isn't clobbered. Best-effort: callers log the returned error.
+pub fn persist_popover_size(size: WindowSize) -> std::io::Result<()> {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut settings = load();
+    settings.window = Some(size);
+    save(&settings)
+}
+
+/// Persist the Settings window's size, merged under the settings lock (see
+/// [`persist_popover_size`]).
+pub fn persist_settings_size(size: WindowSize) -> std::io::Result<()> {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut settings = load();
+    settings.settings_window = Some(size);
+    save(&settings)
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────
@@ -199,6 +204,9 @@ pub fn app_settings_set(app: tauri::AppHandle, settings: AppSettings) -> Result<
     let value = serde_json::to_value(&settings).map_err(|e| e.to_string())?;
     validate_against_schema(&value).map_err(|msg| format!("Invalid settings — {msg}"))?;
 
+    // Held across load→save so a concurrent window-size persist can't clobber the
+    // theme/tool-path fields this writes (and vice versa).
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut current = load();
     let theme_changed = current.theme != settings.theme;
     current.theme = settings.theme;

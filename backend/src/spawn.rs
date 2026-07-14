@@ -1,4 +1,4 @@
-//! spawn_work — create a git worktree + VS Code workspace for a GitHub issue.
+//! Spawn — create a git worktree + VS Code workspace for a GitHub issue.
 //!
 //! GitHub is reached via the REST API under the repo's identity (no `gh`), env
 //! files come from the repo's settings, and the editor is launched via `open -a`
@@ -519,19 +519,9 @@ pub struct SpawnResult {
     pub warnings: Vec<String>,
 }
 
-/// Result of `create_issue_and_spawn`: either the spawn went through, or Claude
-/// couldn't turn the idea into a clear issue and we're asking the user whether
-/// to create one from their raw text anyway.
-#[derive(serde::Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum CreateAndSpawnOutcome {
-    Spawned(SpawnResult),
-    NeedsConfirmation { message: String },
-}
-
-/// Result of `create_issue`: either the issue was opened (no workspace spawned),
-/// or Claude couldn't turn the idea into a clear issue and we're asking the user
-/// whether to create one from their raw text anyway.
+/// Result of `create_issue_direct`: the issue was opened from the reviewed
+/// title/body. Tagged (`status: "created"`) for a stable wire shape the frontend
+/// switches on.
 #[derive(serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CreateIssueOutcome {
@@ -540,7 +530,6 @@ pub enum CreateIssueOutcome {
         issue_url: String,
         warnings: Vec<String>,
     },
-    NeedsConfirmation { message: String },
 }
 
 /// The decisions a spawn needs once the issue is known: the (possibly edited)
@@ -576,6 +565,36 @@ struct SpawnBg {
     post_spawn_commands: Vec<String>,
 }
 
+/// Shown when a command needs the repo's GitHub identity but none is assigned.
+const NO_IDENTITY: &str = "No identity assigned to this repo. Set one in Settings → Repo.";
+
+/// Resolve a repo's settings and an authenticated GitHub client for its assigned
+/// identity — the pair almost every spawn/issue command needs, and the single
+/// source of the "No identity assigned…" error (it was copy-pasted at ~9 sites).
+/// Callers that also need the local clone use [`repo_context_with_clone`].
+fn repo_context(repo: &str) -> Result<(crate::repo_settings::RepoSettings, GitHub), String> {
+    let settings = crate::repo_settings::repo_settings_get(repo.to_string())?;
+    let identity_id = settings.identity_id.as_deref().ok_or(NO_IDENTITY)?;
+    let gh = GitHub::for_identity(identity_id)?;
+    Ok((settings, gh))
+}
+
+/// Like [`repo_context`], but also resolves and validates the repo's local clone
+/// (tilde-expanded `cloned_repo_dir`, which must be a git repo). Returns
+/// `(settings, cloned_repo, gh)`.
+fn repo_context_with_clone(
+    repo: &str,
+) -> Result<(crate::repo_settings::RepoSettings, PathBuf, GitHub), String> {
+    let settings = crate::repo_settings::repo_settings_get(repo.to_string())?;
+    let identity_id = settings.identity_id.as_deref().ok_or(NO_IDENTITY)?;
+    let cloned_repo = expand_tilde(settings.cloned_repo_dir.as_deref().unwrap_or_default());
+    if !cloned_repo.join(".git").exists() {
+        return Err(format!("cloned repo dir is not a git repo: {}", cloned_repo.display()));
+    }
+    let gh = GitHub::for_identity(identity_id)?;
+    Ok((settings, cloned_repo, gh))
+}
+
 /// Core worktree + session creation, shared by every spawn path. Resolves the
 /// repo's settings/identity/cloned repo itself; the caller supplies the issue facts
 /// and the (reviewed) label/theming. The slug is `<n>-<slug(short_label)>`.
@@ -590,17 +609,8 @@ struct SpawnBg {
 async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     let SpawnDecision { repo, issue_number, issue_url, default_branch, short_label, color, emoji, force_new } = d;
 
-    let settings = crate::repo_settings::repo_settings_get(repo.to_string())?;
-    let identity_id = settings
-        .identity_id
-        .clone()
-        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let cloned_repo = expand_tilde(settings.cloned_repo_dir.as_deref().unwrap_or_default());
-    if !cloned_repo.join(".git").exists() {
-        return Err(format!("cloned repo dir is not a git repo: {}", cloned_repo.display()));
-    }
+    let (settings, cloned_repo, gh) = repo_context_with_clone(repo)?;
     let repo_name = repo.split('/').next_back().unwrap_or(repo).to_string();
-    let gh = GitHub::for_identity(&identity_id)?;
 
     let short_label = {
         let t = short_label.trim();
@@ -736,20 +746,6 @@ async fn finish_spawn(bg: SpawnBg) {
     .await;
 }
 
-/// True if `rel` is a safe *relative* path to copy inside the cloned repo/worktree:
-/// non-empty, not absolute, and with no `..` component — so `cloned_repo.join(rel)`
-/// and `work_dir.join(rel)` cannot escape their base dirs. An `env_files` entry is
-/// user-authored (repo settings) and normally a bare name like `.env.local`, but an
-/// absolute (`/Users/me/.ssh/id_rsa`) or `..`-laden entry would otherwise copy an
-/// arbitrary file *into* the worktree, or write the copy *outside* it.
-fn is_contained_relpath(rel: &str) -> bool {
-    use std::path::{Component, Path};
-    !rel.is_empty()
-        && Path::new(rel)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
-}
-
 /// The actual worktree build, factored out so `finish_spawn` can map its result
 /// to the status record. Returns non-fatal warnings on success; an `Err` is a
 /// fatal failure (e.g. `git worktree add`) that leaves no usable worktree.
@@ -770,7 +766,7 @@ async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
     for rel in &bg.env_files {
         // Reject absolute or `..`-escaping entries so the copy can't read outside
         // the cloned repo or write outside the worktree.
-        if !is_contained_relpath(rel) {
+        if !crate::paths::is_contained_relpath(rel) {
             warnings.push(format!("env file path not contained in the cloned repo, skipped: {rel}"));
             continue;
         }
@@ -840,36 +836,7 @@ async fn issue_facts(gh: &GitHub, repo: &str, issue_number: u64) -> Result<(Stri
     Ok((issue_title, issue_url, issue_body))
 }
 
-/// Spawn directly from an existing issue using default theming and a heuristic
-/// short label (no preview). Kept for completeness/back-compat; the UI now goes
-/// through `prepare_spawn` + `confirm_spawn`.
-#[tauri::command]
-pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
-    crate::log_invoke!("spawn_work", repo = %repo, issue = issue_number, force_new);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
-    let identity_id = settings
-        .identity_id
-        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
-    let (issue_title, issue_url, _) = issue_facts(&gh, &repo, issue_number).await?;
-    let default_branch = gh.repo(&repo).await?["default_branch"].as_str().unwrap_or("main").to_string();
-    let short_label = default_short_title(&issue_title);
-    let seed = format!("{issue_number}-{}", slugify(&short_label, 25));
-    let (color, emoji) = pick_theme(&seed);
-    do_spawn(SpawnDecision {
-        repo: &repo,
-        issue_number,
-        issue_url: &issue_url,
-        default_branch: &default_branch,
-        short_label: &short_label,
-        color,
-        emoji,
-        force_new,
-    })
-    .await
-}
-
-// ── Create-issue-and-spawn ──────────────────────────────────────────────────────
+// ── Worktree-path prefix + post-spawn ───────────────────────────────────────────
 
 /// The effective worktree-path prefix: the configured value, or the schema
 /// default (`/properties/worktree_prefix/default`) when unset or empty. The
@@ -1124,15 +1091,7 @@ async fn suggest_short_label(
 #[tauri::command]
 pub async fn suggest_short_title(repo: String, issue_number: u64) -> Result<String, String> {
     crate::log_invoke!("suggest_short_title", repo = %repo, issue = issue_number);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
-    let identity_id = settings
-        .identity_id
-        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let cloned_repo = expand_tilde(settings.cloned_repo_dir.as_deref().unwrap_or_default());
-    if !cloned_repo.join(".git").exists() {
-        return Err(format!("cloned repo dir is not a git repo: {}", cloned_repo.display()));
-    }
-    let gh = GitHub::for_identity(&identity_id)?;
+    let (settings, cloned_repo, gh) = repo_context_with_clone(&repo)?;
     let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
     let instruction = crate::prompts::short_label(&settings.prompts);
     let model = crate::prompts::model(&settings.prompt_model);
@@ -1147,8 +1106,6 @@ enum DraftStep {
         body: String,
         /// Punchy branch/session label produced in the same draft call.
         short_title: String,
-        /// Non-fatal note to surface alongside the created issue.
-        warning: Option<String>,
     },
     NeedsConfirmation { message: String },
 }
@@ -1156,7 +1113,7 @@ enum DraftStep {
 /// Resolve the repo's identity + cloned repo, then turn the idea into an issue
 /// draft — via Claude, or (when `use_raw_fallback`) straight from the raw text.
 /// Returns the authenticated GitHub client alongside the draft so callers can
-/// create the issue. Shared by `create_issue` and `create_issue_and_spawn`.
+/// create the issue. Used by `draft_spawn_preview`.
 async fn resolve_draft(
     repo: &str,
     idea: &str,
@@ -1168,72 +1125,22 @@ async fn resolve_draft(
         return Err("Describe what you want to work on first.".into());
     }
 
-    let settings = crate::repo_settings::repo_settings_get(repo.to_string())?;
-    let identity_id = settings
-        .identity_id
-        .clone()
-        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let cloned_repo = expand_tilde(settings.cloned_repo_dir.as_deref().unwrap_or_default());
-    if !cloned_repo.join(".git").exists() {
-        return Err(format!("cloned repo dir is not a git repo: {}", cloned_repo.display()));
-    }
-    let gh = GitHub::for_identity(&identity_id)?;
+    let (settings, cloned_repo, gh) = repo_context_with_clone(repo)?;
 
     let step = if use_raw_fallback {
         let title = trim_to_word(idea, 70);
         let short_title = default_short_title(&title);
-        DraftStep::Ready {
-            title,
-            body: idea.to_string(),
-            short_title,
-            warning: Some("created from your text without an AI draft".to_string()),
-        }
+        DraftStep::Ready { title, body: idea.to_string(), short_title }
     } else {
         let instruction = crate::prompts::draft_issue(&settings.prompts);
         let model = crate::prompts::model(&settings.prompt_model);
         match draft_issue(&cloned_repo, idea, &instruction, &model, activity).await {
-            Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title, warning: None },
+            Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title },
             // Couldn't draft: let the user confirm before creating anything.
             Err(message) => DraftStep::NeedsConfirmation { message },
         }
     };
     Ok((gh, step))
-}
-
-/// Draft an issue from the user's idea (via Claude) and open it on GitHub,
-/// **without** spawning a workspace.
-///
-/// When `use_raw_fallback` is false and Claude can't produce a clear draft
-/// (e.g. the idea is too vague and it asks for clarification), this creates
-/// nothing and returns `NeedsConfirmation` carrying Claude's reply, so the UI
-/// can ask the user whether to proceed. Calling again with `use_raw_fallback`
-/// true skips drafting and creates the issue straight from the user's text.
-#[tauri::command]
-pub async fn create_issue(
-    app: tauri::AppHandle,
-    repo: String,
-    idea: String,
-    use_raw_fallback: bool,
-    request_id: String,
-) -> Result<CreateIssueOutcome, String> {
-    crate::log_invoke!("create_issue", repo = %repo, use_raw_fallback);
-    let activity = ClaudeActivity::new(app, request_id);
-    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback, &activity).await?;
-    let (title, body, warning) = match step {
-        DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
-        DraftStep::NeedsConfirmation { message } => {
-            return Ok(CreateIssueOutcome::NeedsConfirmation { message });
-        }
-    };
-
-    let number = gh.create_issue(&repo, &title, &body).await?;
-    Ok(CreateIssueOutcome::Created {
-        number,
-        // The create endpoint only returns the number; the html_url is derivable
-        // (the whole app assumes github.com — see plugins/github.rs).
-        issue_url: format!("https://github.com/{repo}/issues/{number}"),
-        warnings: warning.into_iter().collect(),
-    })
 }
 
 /// Open an issue from an explicit, already-reviewed title and body (no drafting).
@@ -1245,47 +1152,13 @@ pub async fn create_issue_direct(repo: String, title: String, body: String) -> R
     if title.is_empty() {
         return Err("Issue title can't be empty.".into());
     }
-    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
-    let identity_id = settings
-        .identity_id
-        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
+    let (_settings, gh) = repo_context(&repo)?;
     let number = gh.create_issue(&repo, title, &body).await?;
     Ok(CreateIssueOutcome::Created {
         number,
         issue_url: format!("https://github.com/{repo}/issues/{number}"),
         warnings: Vec::new(),
     })
-}
-
-/// Draft an issue from the user's idea (via Claude), open it on GitHub, then
-/// spawn a workspace for the freshly created issue. See `create_issue` for the
-/// drafting / needs-confirmation semantics.
-#[tauri::command]
-pub async fn create_issue_and_spawn(
-    app: tauri::AppHandle,
-    repo: String,
-    idea: String,
-    use_raw_fallback: bool,
-    force_new: bool,
-    request_id: String,
-) -> Result<CreateAndSpawnOutcome, String> {
-    crate::log_invoke!("create_issue_and_spawn", repo = %repo, use_raw_fallback, force_new);
-    let activity = ClaudeActivity::new(app, request_id);
-    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback, &activity).await?;
-    let (title, body, draft_warning) = match step {
-        DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
-        DraftStep::NeedsConfirmation { message } => {
-            return Ok(CreateAndSpawnOutcome::NeedsConfirmation { message });
-        }
-    };
-
-    let number = gh.create_issue(&repo, &title, &body).await?;
-    let mut result = spawn_work(repo, number, force_new).await?;
-    if let Some(w) = draft_warning {
-        result.warnings.insert(0, w);
-    }
-    Ok(CreateAndSpawnOutcome::Spawned(result))
 }
 
 // ── Preview-then-spawn ────────────────────────────────────────────────────────
@@ -1314,12 +1187,8 @@ pub struct SpawnPlan {
 #[tauri::command]
 pub async fn prepare_spawn(repo: String, issue_number: u64) -> Result<SpawnPlan, String> {
     crate::log_invoke!("prepare_spawn", repo = %repo, issue = issue_number);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
+    let (settings, gh) = repo_context(&repo)?;
     let worktree_prefix = effective_worktree_prefix(settings.worktree_prefix.as_deref());
-    let identity_id = settings
-        .identity_id
-        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
     let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
     let short_title = default_short_title(&issue_title);
     let seed = format!("{issue_number}-{}", slugify(&short_title, 25));
@@ -1404,11 +1273,7 @@ pub struct SpawnEdits {
 #[tauri::command]
 pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> Result<SpawnResult, String> {
     crate::log_invoke!("confirm_spawn", repo = %repo, force_new);
-    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
-    let identity_id = settings
-        .identity_id
-        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
+    let (_settings, gh) = repo_context(&repo)?;
 
     let number = match edits.issue_number {
         Some(n) => {
@@ -1514,9 +1379,19 @@ fn worktree_in_use(work_dir: &Path) -> bool {
     match Command::new("lsof").args(["-d", "cwd", "-Fn"]).output() {
         Ok(out) => String::from_utf8_lossy(&out.stdout)
             .lines()
-            .any(|l| l.strip_prefix('n').is_some_and(|p| p.starts_with(&*dir))),
+            .any(|l| l.strip_prefix('n').is_some_and(|p| path_at_or_under(p, &dir))),
         Err(_) => false,
     }
+}
+
+/// Whether `path` is `base` itself or a descendant of it. A plain prefix test
+/// would count a sibling like `<base>-2` as inside `<base>`, so require the match
+/// to end at a path boundary.
+fn path_at_or_under(path: &str, base: &str) -> bool {
+    path == base
+        || path
+            .strip_prefix(base)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Open System Settings → Privacy & Security → Accessibility so the user can
@@ -1779,12 +1654,7 @@ pub async fn session_pr(session_id: String) -> Result<Option<PrLink>, String> {
         .max_by_key(created_at)
         .or_else(|| prs.iter().max_by_key(created_at));
 
-    Ok(best.map(|pr| PrLink {
-        number: pr["number"].as_u64().unwrap_or(0),
-        html_url: pr["html_url"].as_str().unwrap_or("").to_string(),
-        title: pr["title"].as_str().unwrap_or("").to_string(),
-        state: pr_state(pr),
-    }))
+    Ok(best.map(pr_link_from))
 }
 
 // ── Create PR ───────────────────────────────────────────────────────────────────
@@ -1843,11 +1713,7 @@ pub async fn session_create_pr(
         return Err("This worktree has uncommitted changes. Commit them first, then create the PR.".to_string());
     }
 
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
-    let identity_id = settings
-        .identity_id
-        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
+    let (settings, gh) = repo_context(&session.repo)?;
 
     // Refresh the base ref so the ahead-count and diff compare against current origin.
     git(&work_dir, &["fetch", "origin", &base, "--quiet"]).ok();
@@ -2058,11 +1924,7 @@ pub async fn session_merge_pr(
         .ok_or_else(|| format!("session not found: {session_id}"))?;
     let work_dir = PathBuf::from(&session.work_dir);
     let branch = session.branch.clone();
-    let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
-    let identity_id = settings
-        .identity_id
-        .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
+    let (_settings, gh) = repo_context(&session.repo)?;
 
     // Guard: uncommitted work would be silently excluded — the merge lands the
     // pushed branch, not the worktree. Block and ask the user to commit first.
@@ -2200,5 +2062,102 @@ mod tests {
         assert!(parse_short_label("\"\"").is_err());
         assert!(parse_short_label("Here are some options:\n- Auth refresh\n- Token renewal").is_err());
         assert!(parse_short_label(&"long ".repeat(20)).is_err());
+    }
+
+    #[test]
+    fn slugify_lowercases_and_dashes_runs() {
+        assert_eq!(slugify("Add Foo Bar!", 25), "add-foo-bar");
+        assert_eq!(slugify("  Trim/Edges  ", 25), "trim-edges");
+        assert_eq!(slugify("CRLF\n\ttabs", 25), "crlf-tabs");
+        assert_eq!(slugify("", 25), "");
+    }
+
+    #[test]
+    fn slugify_truncates_at_dash_boundary() {
+        // Cut lands mid-word → back off to the last dash within the limit.
+        assert_eq!(slugify("one two three four five", 12), "one-two");
+        // No dash within the window → hard cut, trailing dashes trimmed.
+        assert_eq!(slugify("supercalifragilistic", 8), "supercal");
+    }
+
+    #[test]
+    fn default_short_title_trims_and_never_empty() {
+        assert_eq!(default_short_title("Fix the thing."), "Fix the thing");
+        assert_eq!(default_short_title("   "), "work");
+        assert_eq!(default_short_title("!!!"), "work");
+        let long = "word ".repeat(40);
+        assert!(default_short_title(&long).chars().count() <= 50);
+    }
+
+    #[test]
+    fn trim_to_word_respects_boundary() {
+        assert_eq!(trim_to_word("short", 20), "short");
+        assert_eq!(trim_to_word("the quick brown fox", 10), "the quick");
+        // No space within the window → hard cut.
+        assert_eq!(trim_to_word("abcdefghij klm", 5), "abcde");
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn parse_issue_draft_extracts_fields() {
+        let text = "Here you go:\n```json\n{\"title\": \"Add foo\", \"body\": \"Do the thing\", \"short_title\": \"Add foo\"}\n```";
+        let (title, body, short) = parse_issue_draft(text).unwrap();
+        assert_eq!(title, "Add foo");
+        assert_eq!(body, "Do the thing");
+        assert_eq!(short, "Add foo");
+    }
+
+    #[test]
+    fn parse_issue_draft_defaults_short_title_from_title() {
+        let (_t, _b, short) = parse_issue_draft(r#"{"title": "Fix the parser.", "body": "x"}"#).unwrap();
+        assert_eq!(short, "Fix the parser");
+    }
+
+    #[test]
+    fn parse_issue_draft_errors_surface_conversational_reply() {
+        // No JSON object at all → the model's prose is returned verbatim as the Err.
+        let err = parse_issue_draft("Could you clarify what you mean?").unwrap_err();
+        assert!(err.contains("clarify"), "got: {err}");
+        // JSON present but empty title → a distinct error.
+        assert!(parse_issue_draft(r#"{"title": "", "body": "x"}"#).is_err());
+    }
+
+    #[test]
+    fn merge_pill_state_maps_github_states() {
+        assert_eq!(merge_pill_state("clean"), ("passed".into(), false));
+        assert_eq!(merge_pill_state("unstable"), ("passed".into(), false));
+        assert_eq!(merge_pill_state("dirty"), ("failed".into(), false));
+        assert_eq!(merge_pill_state("behind"), ("pending".into(), false));
+        assert_eq!(merge_pill_state("draft"), ("none".into(), false));
+        // Unknown / still-computing → spin.
+        assert_eq!(merge_pill_state("unknown"), ("pending".into(), true));
+        assert_eq!(merge_pill_state(""), ("pending".into(), true));
+    }
+
+    #[test]
+    fn pr_state_collapses_github_fields() {
+        assert_eq!(pr_state(&serde_json::json!({ "merged_at": "2026-01-01T00:00:00Z", "state": "closed" })), "merged");
+        assert_eq!(pr_state(&serde_json::json!({ "state": "open", "draft": true })), "draft");
+        assert_eq!(pr_state(&serde_json::json!({ "state": "open", "draft": false })), "open");
+        assert_eq!(pr_state(&serde_json::json!({ "state": "closed" })), "closed");
+        // merged_at present but null (unmerged) is not "merged".
+        assert_eq!(pr_state(&serde_json::json!({ "merged_at": null, "state": "open" })), "open");
+    }
+
+    #[test]
+    fn path_at_or_under_requires_boundary() {
+        let base = "/src/work-8/repo";
+        assert!(path_at_or_under(base, base));
+        assert!(path_at_or_under("/src/work-8/repo/frontend", base));
+        // A sibling whose name merely extends the base is NOT inside it.
+        assert!(!path_at_or_under("/src/work-8/repo-2", base));
+        assert!(!path_at_or_under("/src/work-80/repo", base));
+        assert!(!path_at_or_under("/elsewhere", base));
     }
 }

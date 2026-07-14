@@ -554,3 +554,59 @@ async fn error_message(resp: reqwest::Response) -> String {
     tracing::error!(target: "github", status = status.as_u16(), %url, message = %message, "github api error");
     message
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issue_meta_extracts_and_defaults() {
+        let m = issue_meta(&serde_json::json!({
+            "title": "Add foo",
+            "html_url": "https://github.com/o/r/issues/1",
+            "updated_at": "2026-01-02T00:00:00Z"
+        }));
+        assert_eq!(m.title, "Add foo");
+        assert_eq!(m.html_url, "https://github.com/o/r/issues/1");
+        assert_eq!(m.updated_at, "2026-01-02T00:00:00Z");
+        // Missing fields default to empty rather than panicking.
+        let empty = issue_meta(&serde_json::json!({}));
+        assert_eq!(empty.title, "");
+        assert_eq!(empty.html_url, "");
+    }
+
+    fn mk_meta(n: u64) -> IssueMeta {
+        IssueMeta { title: format!("issue {n}"), html_url: format!("u{n}"), updated_at: String::new() }
+    }
+
+    #[test]
+    fn build_issue_node_nests_children() {
+        let meta = HashMap::from([(1, mk_meta(1)), (2, mk_meta(2)), (3, mk_meta(3))]);
+        let children_of = HashMap::from([(1u64, vec![2u64, 3u64])]);
+        let mut visited = HashSet::new();
+        let node = build_issue_node(1, &meta, &children_of, &mut visited).unwrap();
+        assert_eq!(node.number, 1);
+        assert_eq!(node.title, "issue 1");
+        let kids: Vec<u64> = node.children.iter().map(|c| c.number).collect();
+        assert_eq!(kids, vec![2, 3]);
+    }
+
+    #[test]
+    fn build_issue_node_guards_cycles_and_missing() {
+        // A → B → A cycle: each node is emitted once, no infinite recursion.
+        let meta = HashMap::from([(1, mk_meta(1)), (2, mk_meta(2))]);
+        let children_of = HashMap::from([(1u64, vec![2u64]), (2u64, vec![1u64])]);
+        let mut visited = HashSet::new();
+        let node = build_issue_node(1, &meta, &children_of, &mut visited).unwrap();
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.children[0].number, 2);
+        assert!(node.children[0].children.is_empty()); // 1 already visited
+
+        // A child with no meta entry is dropped, not rendered as a stub.
+        let meta = HashMap::from([(1, mk_meta(1))]);
+        let children_of = HashMap::from([(1u64, vec![99u64])]);
+        let mut visited = HashSet::new();
+        let node = build_issue_node(1, &meta, &children_of, &mut visited).unwrap();
+        assert!(node.children.is_empty());
+    }
+}

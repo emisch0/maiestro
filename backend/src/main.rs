@@ -5,6 +5,7 @@ mod app_settings;
 mod credentials;
 mod health;
 mod identities;
+mod json_store;
 mod links;
 mod logging;
 mod paths;
@@ -12,6 +13,7 @@ mod plugin;
 mod plugins;
 mod prompts;
 mod repo_settings;
+mod schema;
 mod sessions;
 mod spawn;
 mod status;
@@ -80,13 +82,10 @@ fn persist_popover_size(window: &tauri::Window) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical = physical.to_logical::<f64>(scale);
-    // Load-merge so we don't clobber other fields (e.g. the chosen theme).
-    let mut settings = app_settings::load();
-    settings.window = Some(app_settings::WindowSize {
-        width: logical.width,
-        height: logical.height,
-    });
-    if let Err(e) = app_settings::save(&settings) {
+    // Load-merge under the settings lock so we don't clobber other fields (e.g.
+    // the chosen theme) written concurrently by app_settings_set.
+    let size = app_settings::WindowSize { width: logical.width, height: logical.height };
+    if let Err(e) = app_settings::persist_popover_size(size) {
         tracing::warn!(error = %e, "failed to persist popover size");
     } else {
         tracing::debug!(
@@ -123,13 +122,10 @@ fn persist_settings_size(window: &tauri::Window) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical = physical.to_logical::<f64>(scale);
-    // Load-merge so we don't clobber other fields (popover size, theme).
-    let mut settings = app_settings::load();
-    settings.settings_window = Some(app_settings::WindowSize {
-        width: logical.width,
-        height: logical.height,
-    });
-    if let Err(e) = app_settings::save(&settings) {
+    // Load-merge under the settings lock so we don't clobber other fields
+    // (popover size, theme) written concurrently.
+    let size = app_settings::WindowSize { width: logical.width, height: logical.height };
+    if let Err(e) = app_settings::persist_settings_size(size) {
         tracing::warn!(error = %e, "failed to persist settings size");
     } else {
         tracing::debug!(
@@ -283,21 +279,17 @@ fn main() {
             github_list_issues,
             identities::identities_list,
             identities::identities_get_default,
-            identities::identities_set_default,
             identities::identities_add,
             identities::identities_remove,
             links::open_url,
             links::open_path,
             links::path_exists,
             links::reveal_path,
-            spawn::spawn_work,
             spawn::prepare_spawn,
             spawn::suggest_short_title,
             spawn::draft_spawn_preview,
             spawn::confirm_spawn,
-            spawn::create_issue,
             spawn::create_issue_direct,
-            spawn::create_issue_and_spawn,
             spawn::open_in_editor,
             spawn::open_repo_in_editor,
             spawn::teardown,
@@ -456,4 +448,37 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running mAIestro");
+}
+
+#[cfg(test)]
+mod tests {
+    //! Drift guard: the min-window sizes are mirrored between these Rust constants
+    //! (used to clamp a restored size before first show) and `tauri.conf.json`
+    //! (the actual window `minWidth`/`minHeight`). They must agree, or a restored
+    //! size could be clamped to a value the window itself refuses.
+
+    const CONF: &str = include_str!("../tauri.conf.json");
+
+    fn min_size(label: &str) -> (f64, f64) {
+        let conf: serde_json::Value = serde_json::from_str(CONF).expect("tauri.conf.json is valid JSON");
+        let windows = conf["app"]["windows"].as_array().expect("app.windows array");
+        let w = windows
+            .iter()
+            .find(|w| w["label"] == label)
+            .unwrap_or_else(|| panic!("no window labelled {label}"));
+        (
+            w["minWidth"].as_f64().expect("minWidth"),
+            w["minHeight"].as_f64().expect("minHeight"),
+        )
+    }
+
+    #[test]
+    fn popover_min_matches_conf() {
+        assert_eq!(min_size("main"), (super::MIN_POPOVER_WIDTH, super::MIN_POPOVER_HEIGHT));
+    }
+
+    #[test]
+    fn settings_min_matches_conf() {
+        assert_eq!(min_size("settings"), (super::MIN_SETTINGS_WIDTH, super::MIN_SETTINGS_HEIGHT));
+    }
 }

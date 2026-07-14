@@ -49,9 +49,9 @@ export interface SpawnResult {
   warnings: string[];
 }
 
-export type CreateIssueOutcome =
-  | { status: "created"; number: number; issue_url: string; warnings: string[] }
-  | { status: "needs_confirmation"; message: string };
+// `create_issue_direct` opens the issue from a reviewed title/body, so the only
+// outcome is `created` (tagged for a stable wire shape the caller switches on).
+export type CreateIssueOutcome = { status: "created"; number: number; issue_url: string; warnings: string[] };
 
 /** Editable fields shown in the spawn preview before a worktree is created. */
 export interface SpawnPlan {
@@ -105,18 +105,23 @@ export interface Session {
   hidden: HideState | null;
 }
 
+/** Lifecycle of a pull request, as GitHub reports it. */
+export type PrState = "draft" | "open" | "merged" | "closed";
+
 export interface PrLink {
   number: number;
   html_url: string;
   title: string;
-  /** One of "draft", "open", "merged", "closed". */
-  state: string;
+  state: PrState;
 }
+
+/** The PR pill's merge indicator, derived from GitHub's mergeable_state. */
+export type PrCheckState = "passed" | "failed" | "pending" | "none";
 
 export interface PrChecks {
   /** Pill indicator derived from mergeable_state: "passed" (mergeable),
    *  "failed" (conflicts), "pending" (behind/blocked/computing), "none" (draft). */
-  state: string;
+  state: PrCheckState;
   /** Mergeability still being computed by GitHub — animate the indicator. */
   running: boolean;
   /** GitHub reports the PR mergeable (`mergeable_state == "clean"`). */
@@ -126,14 +131,17 @@ export interface PrChecks {
   mergeable_state: string;
 }
 
+/** The live Claude session state, from the `maiestro hook` helper. `creating` is
+ *  mAIestro's own pre-Claude state; the rest map from Claude Code hook events. */
+export type SessionState = "creating" | "running" | "busy" | "needs_you" | "idle" | "ended";
+
 /** Live per-session status, written by the `maiestro hook` helper and watched
  *  by the backend. Pushed to the UI via the `session-status` event and read in
  *  bulk via `sessions_status_list`. */
 export interface StatusRecord {
   /** Workspace id (= Session.id). */
   workspace: string;
-  /** One of "creating", "running", "busy", "needs_you", "idle", "ended". */
-  state: string;
+  state: SessionState;
   session_id?: string;
   cwd?: string;
   /** Short human detail, e.g. "permission: Bash" or a tool name. */

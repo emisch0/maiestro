@@ -23,8 +23,7 @@ use tracing_subscriber::EnvFilter;
 
 /// Root directory for log files: `~/Library/Logs/com.maiestro.app`.
 fn log_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join("Library/Logs/com.maiestro.app")
+    crate::paths::home().join("Library/Logs/com.maiestro.app")
 }
 
 /// A `MakeWriter` that appends to a per-day file and reopens the next day's file
@@ -194,20 +193,43 @@ fn today_log_path() -> PathBuf {
 /// Read the tail of today's log file (last `MAX_LINES` lines) for the in-app log
 /// viewer. Returns an empty string when no log file exists yet today.
 ///
+/// Only the final `MAX_TAIL_BYTES` of the file are read, not the whole thing: the
+/// viewer polls this every couple of seconds, and a day-long log grows without
+/// bound, so reading it whole each tick would get progressively more wasteful.
+/// The tail comfortably holds `MAX_LINES` lines; a partial first line from the
+/// mid-file seek is dropped.
+///
 /// Deliberately does NOT emit an invocation log line: the viewer polls this every
 /// couple of seconds, which would otherwise flood the log with `logs_read` entries.
 #[tauri::command]
 pub fn logs_read() -> Result<String, String> {
+    use std::io::{Read, Seek, SeekFrom};
     const MAX_LINES: usize = 500;
+    const MAX_TAIL_BYTES: u64 = 256 * 1024;
+
     let path = today_log_path();
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
         Err(e) => return Err(e.to_string()),
     };
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(MAX_LINES);
-    Ok(lines[start..].join("\n"))
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    let start = len.saturating_sub(MAX_TAIL_BYTES);
+    if start > 0 {
+        file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text.lines().collect();
+    // When we seek into the middle of the file the first line is usually a partial
+    // fragment of a real log line — drop it so the viewer never shows a stub.
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    let from = lines.len().saturating_sub(MAX_LINES);
+    Ok(lines[from..].join("\n"))
 }
 
 /// Reveal today's log file in Finder (falling back to its directory, then the log

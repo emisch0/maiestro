@@ -462,6 +462,9 @@ export function MainView() {
   // re-arming it on every keystroke of state.
   const pollRef = useRef({ sessions, prs, prMerge });
   pollRef.current = { sessions, prs, prMerge };
+  // Monotonic per-session poll counter, so a slow earlier check can't land after
+  // a newer one and overwrite it (a flickering dot on out-of-order responses).
+  const pollSeqRef = useRef<Record<string, number>>({});
 
   // Poll check status for every session that has a PR or an armed merge, and let
   // a poll that finds the PR mergeable drive the next auto-merge attempt (so
@@ -470,8 +473,12 @@ export function MainView() {
     const { sessions, prs, prMerge } = pollRef.current;
     for (const s of sessions) {
       if (!prs[s.id] && !prMerge[s.id]?.intent) continue;
+      const seq = (pollSeqRef.current[s.id] ?? 0) + 1;
+      pollSeqRef.current[s.id] = seq;
       api.sessionPrChecks(s.id)
         .then((c) => {
+          // Drop a stale response a newer poll has already superseded.
+          if (pollSeqRef.current[s.id] !== seq) return;
           setPrChecks((prev) => ({ ...prev, [s.id]: c }));
           const m = pollRef.current.prMerge[s.id];
           if (!c || !m?.intent || m.merging) return;

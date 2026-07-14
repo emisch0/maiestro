@@ -51,12 +51,34 @@ fn login_path() -> &'static Option<String> {
 /// Run the user's login shell to capture the PATH it would set up. Mirrors how
 /// `run_post_spawn_commands` invokes the shell (`$SHELL -l -c …`) so the two see
 /// the same environment.
+///
+/// Bounded by a timeout so a misconfigured shell profile that blocks (e.g. one
+/// that prompts for input) can't wedge startup — `init()` runs this before the
+/// tray icon appears. On timeout we give up and fall back to the process PATH;
+/// the detached probe thread ends with the process.
 fn resolve_login_path() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let out = std::process::Command::new(&shell)
-        .args(["-l", "-c", "echo $PATH"])
-        .output()
-        .ok()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let shell = shell.clone();
+        std::thread::spawn(move || {
+            let out = std::process::Command::new(&shell)
+                .args(["-l", "-c", "echo $PATH"])
+                .output();
+            let _ = tx.send(out);
+        });
+    }
+    let out = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            tracing::warn!(shell = %shell, error = %e, "could not run login shell to resolve PATH");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(shell = %shell, "login shell timed out resolving PATH (10s); using process PATH");
+            return None;
+        }
+    };
     if !out.status.success() {
         tracing::warn!(shell = %shell, "login shell exited non-zero while resolving PATH");
         return None;
@@ -102,11 +124,7 @@ fn which_on(path: &str, bin: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
-}
-
-use crate::paths::expand_tilde;
+use crate::paths::{expand_tilde, home};
 
 /// Known install locations to probe when a tool isn't on the enriched PATH — the
 /// PATH can still be minimal even after enrichment (e.g. the login shell itself
