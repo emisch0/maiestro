@@ -87,17 +87,16 @@ export const ThemeRenderer = withJsonFormsControlProps(ThemeControl);
 // Stored value is boolean | null; null is treated as false (issue #98).
 
 function LaunchAtLoginControl(props: ControlProps) {
-  const { data, handleChange, path, description } = props;
+  const { data, handleChange, path } = props;
   const on = data === true;
+  // Title stays flush-left like the other sections (Theme, Tool paths); the switch
+  // sits to the left of the help text on the row below it. Help text is
+  // deliberately concise — no "change this in Preferences" note, since we're
+  // already in Preferences.
   return (
     <div className="control jsf-control">
-      <div className="toggle-row">
-        <div className="toggle-text">
-          <label className="jsf-label">Launch at login</label>
-          <p className="session-hint" style={{ paddingTop: 2 }}>
-            {description ?? "Start mAIestro automatically when you log in to your Mac."}
-          </p>
-        </div>
+      <label className="jsf-label">Launch at login</label>
+      <div className="toggle-field">
         <button
           type="button"
           role="switch"
@@ -108,6 +107,7 @@ function LaunchAtLoginControl(props: ControlProps) {
         >
           <span className="toggle-knob" />
         </button>
+        <p className="session-hint">Start mAIestro automatically when you log in.</p>
       </div>
     </div>
   );

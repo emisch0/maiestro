@@ -1810,12 +1810,18 @@ body {
   color: var(--accent);
 }
 
-/* Launch-at-login on/off switch. */
-.toggle-row {
+/* Launch-at-login on/off switch: the section title stays flush-left (like the
+   other Preferences sections); the switch sits to the left of the help text on
+   the row below, rather than stretched to the far edge of a wide window. */
+.toggle-field {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.toggle-field .session-hint {
+  margin: 0;
 }
 
 .toggle-text {
