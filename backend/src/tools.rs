@@ -201,6 +201,25 @@ pub fn tokio_command(name: &str) -> tokio::process::Command {
     c
 }
 
+/// A short, trimmed preview of some (possibly large) subprocess output for a
+/// diagnostic error/log line: whitespace-trimmed, capped at 240 chars, with a
+/// stand-in for empty output. Shared by every caller that surfaces `claude`/`git`
+/// stdout/stderr (drafting, spawn, health) so the cap and placeholder are uniform.
+pub fn snippet(s: &str) -> String {
+    let s = s.trim();
+    if s.is_empty() {
+        return "<empty>".into();
+    }
+    s.chars().take(240).collect()
+}
+
+/// Single-quote a string for safe inclusion in a POSIX shell command (VS Code
+/// task `command`s and the Claude Code hook commands both run through a shell).
+/// Wraps in single quotes and escapes any embedded single quote as `'\''`.
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// The directly-invoked tools whose resolution the Settings UI surfaces.
 const TOOLS: &[&str] = &["claude", "git", "code"];
 
@@ -259,6 +278,22 @@ mod tests {
     #[test]
     fn which_on_misses_a_nonexistent_binary() {
         assert!(which_on("/bin:/usr/bin", "definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn snippet_trims_caps_and_marks_empty() {
+        assert_eq!(snippet("  hello  "), "hello");
+        assert_eq!(snippet("   "), "<empty>");
+        assert_eq!(snippet(""), "<empty>");
+        assert_eq!(snippet(&"x".repeat(300)).chars().count(), 240);
+    }
+
+    #[test]
+    fn shell_quote_wraps_and_escapes_single_quotes() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        // An embedded single quote is closed, escaped, and reopened.
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
     #[test]
