@@ -275,7 +275,7 @@ function EnvFilesControl(props: ControlProps) {
             <EnvFileRow
               key={f}
               file={f}
-              checkoutDir={checkoutDir}
+              clonedRepoDir={clonedRepoDir}
               onRemove={() => removeFile(f)}
             />
           ))}
@@ -285,27 +285,28 @@ function EnvFilesControl(props: ControlProps) {
   );
 }
 
-/** Resolve a checkout-relative env-file entry (e.g. `.env` or `sub/.env`) against
- *  the repo's checkout dir — that's where the backend reads and copies them from.
- *  Returns "" when there's no checkout dir to resolve against (can't validate). */
-function resolveEnvFile(checkoutDir: string | null, rel: string): string {
-  if (!checkoutDir) return "";
-  return `${checkoutDir.replace(/\/+$/, "")}/${rel}`;
+/** Resolve a cloned-repo-relative env-file entry (e.g. `.env` or `sub/.env`)
+ *  against the repo's cloned repo dir — that's where the backend reads and copies
+ *  them from. Returns "" when there's no cloned repo dir to resolve against
+ *  (can't validate). */
+function resolveEnvFile(clonedRepoDir: string | null, rel: string): string {
+  if (!clonedRepoDir) return "";
+  return `${clonedRepoDir.replace(/\/+$/, "")}/${rel}`;
 }
 
 /** One env-file entry: the path, a reveal-in-Finder button, a remove button,
  *  and a "not found" hint when the file is missing. The entry is relative to the
- *  checkout dir, so validation/reveal resolves it there. */
+ *  cloned repo dir, so validation/reveal resolves it there. */
 function EnvFileRow({
   file,
-  checkoutDir,
+  clonedRepoDir,
   onRemove,
 }: {
   file: string;
-  checkoutDir: string | null;
+  clonedRepoDir: string | null;
   onRemove: () => void;
 }) {
-  const full = resolveEnvFile(checkoutDir, file);
+  const full = resolveEnvFile(clonedRepoDir, file);
   const exists = usePathExists(full);
   return (
     <div className="env-file-row">

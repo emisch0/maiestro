@@ -1,7 +1,7 @@
 // Shared path-field affordances for the Settings forms (issue #88): a soft
 // existence check (an inline "not found" hint, never a hard/save-blocking error)
 // and a "reveal in Finder" button, for every field that references a filesystem
-// path — repo checkout dir / worktree prefix / env files, and app tool paths.
+// path — repo cloned repo dir / worktree prefix / env files, and app tool paths.
 //
 // Validation is deliberately advisory: it polls the backend `path_exists`
 // (tilde-aware) and shows a hint, but does not participate in ajv/schema
@@ -90,7 +90,7 @@ export function PathMissingHint({
 }
 
 /** A text input paired with a reveal button and a missing-path hint, for the
- *  single-path fields (checkout dir, worktree prefix). `checkPath` lets a field
+ *  single-path fields (cloned repo dir, worktree prefix). `checkPath` lets a field
  *  validate something other than its own value — the worktree prefix checks its
  *  parent directory, since the prefix itself is never a real path. */
 export function PathField({
