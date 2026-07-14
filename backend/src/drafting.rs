@@ -213,8 +213,6 @@ pub enum DraftStep {
         body: String,
         /// Punchy branch/session label produced in the same draft call.
         short_title: String,
-        /// Non-fatal note to surface alongside the created issue.
-        warning: Option<String>,
     },
     NeedsConfirmation { message: String },
 }
@@ -222,8 +220,7 @@ pub enum DraftStep {
 /// Resolve the repo's identity + cloned repo, then turn the idea into an issue
 /// draft — via Claude, or (when `use_raw_fallback`) straight from the raw text.
 /// Returns the authenticated GitHub client alongside the draft so callers can
-/// create the issue. Shared by `create_issue`, `create_issue_and_spawn`, and
-/// `draft_spawn_preview`.
+/// create the issue. Used by `draft_spawn_preview`.
 pub async fn resolve_draft(
     repo: &str,
     idea: &str,
@@ -241,17 +238,12 @@ pub async fn resolve_draft(
     let step = if use_raw_fallback {
         let title = trim_to_word(idea, 70);
         let short_title = default_short_title(&title);
-        DraftStep::Ready {
-            title,
-            body: idea.to_string(),
-            short_title,
-            warning: Some("created from your text without an AI draft".to_string()),
-        }
+        DraftStep::Ready { title, body: idea.to_string(), short_title }
     } else {
         let instruction = crate::prompts::draft_issue(&settings.prompts);
         let model = crate::prompts::model(&settings.prompt_model);
         match draft_issue(&cloned_repo, idea, &instruction, &model, activity).await {
-            Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title, warning: None },
+            Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title },
             // Couldn't draft: let the user confirm before creating anything.
             Err(message) => DraftStep::NeedsConfirmation { message },
         }

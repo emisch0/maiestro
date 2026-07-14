@@ -248,6 +248,7 @@ function EnvFilesControl(props: ControlProps) {
           <input
             className="text-input"
             type="text"
+            aria-label="Environment file path"
             placeholder=".env or subdir/.env"
             value={input}
             autoFocus
@@ -357,6 +358,7 @@ function PostSpawnCommandsControl(props: ControlProps) {
               <input
                 className="text-input jsf-cmd-input"
                 type="text"
+                aria-label={`Post-spawn command ${i + 1}`}
                 placeholder="e.g. pnpm install"
                 value={c}
                 onChange={(e) => updateAt(i, e.target.value)}

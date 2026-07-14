@@ -460,21 +460,37 @@ fn check_env_files(cloned_repo_dir: Option<&str>, env_files: &[String]) -> Healt
         return HealthCheck::new(id, label, HealthStatus::Pass, "None configured");
     }
     let base_dir = cloned_repo_dir.map(expand_tilde);
-    let missing: Vec<&String> = env_files
-        .iter()
-        .filter(|rel| {
-            let path = match &base_dir {
-                Some(base) => base.join(rel.as_str()),
-                None => expand_tilde(rel),
-            };
-            !path.exists()
-        })
-        .collect();
-    if missing.is_empty() {
-        HealthCheck::new(id, label, HealthStatus::Pass, format!("{} present", env_files.len()))
+    // An entry that isn't a contained relative path (absolute, or `..`-escaping)
+    // is silently skipped by the spawn copy (`is_contained_relpath`), so flag it
+    // here with the same predicate rather than resolving it and reporting it as
+    // "present" — `base.join(<absolute>)` would otherwise mask the problem.
+    let mut invalid: Vec<&String> = Vec::new();
+    let mut missing: Vec<&String> = Vec::new();
+    for rel in env_files {
+        if !crate::paths::is_contained_relpath(rel) {
+            invalid.push(rel);
+            continue;
+        }
+        let path = match &base_dir {
+            Some(base) => base.join(rel.as_str()),
+            None => expand_tilde(rel),
+        };
+        if !path.exists() {
+            missing.push(rel);
+        }
+    }
+    let join = |v: &[&String]| v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+    if !invalid.is_empty() {
+        HealthCheck::new(
+            id,
+            label,
+            HealthStatus::Warn,
+            format!("Not a contained relative path (skipped at spawn): {}", join(&invalid)),
+        )
+    } else if !missing.is_empty() {
+        HealthCheck::new(id, label, HealthStatus::Warn, format!("Missing: {}", join(&missing)))
     } else {
-        let list = missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
-        HealthCheck::new(id, label, HealthStatus::Warn, format!("Missing: {list}"))
+        HealthCheck::new(id, label, HealthStatus::Pass, format!("{} present", env_files.len()))
     }
 }
 

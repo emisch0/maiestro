@@ -255,9 +255,19 @@ pub async fn worktree_in_use(work_dir: &Path) -> bool {
     match tokio::process::Command::new("lsof").args(["-d", "cwd", "-Fn"]).output().await {
         Ok(out) => String::from_utf8_lossy(&out.stdout)
             .lines()
-            .any(|l| l.strip_prefix('n').is_some_and(|p| p.starts_with(&*dir))),
+            .any(|l| l.strip_prefix('n').is_some_and(|p| path_at_or_under(p, &dir))),
         Err(_) => false,
     }
+}
+
+/// Whether `path` is `base` itself or a descendant of it. A plain prefix test
+/// would count a sibling like `<base>-2` as inside `<base>`, so require the match
+/// to end at a path boundary.
+fn path_at_or_under(path: &str, base: &str) -> bool {
+    path == base
+        || path
+            .strip_prefix(base)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Open System Settings → Privacy & Security → Accessibility so the user can
@@ -270,4 +280,20 @@ pub fn open_accessibility_settings() {
         Command::new("open")
             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_at_or_under;
+
+    #[test]
+    fn path_at_or_under_requires_boundary() {
+        let base = "/src/work-8/repo";
+        assert!(path_at_or_under(base, base));
+        assert!(path_at_or_under("/src/work-8/repo/frontend", base));
+        // A sibling whose name merely extends the base is NOT inside it.
+        assert!(!path_at_or_under("/src/work-8/repo-2", base));
+        assert!(!path_at_or_under("/src/work-80/repo", base));
+        assert!(!path_at_or_under("/elsewhere", base));
+    }
 }

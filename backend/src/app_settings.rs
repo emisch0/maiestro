@@ -108,35 +108,19 @@ pub fn tool_path_override(name: &str) -> Option<String> {
 const SCHEMA_JSON: &str = include_str!("../schemas/app-settings.schema.json");
 
 fn schema_value() -> serde_json::Value {
-    serde_json::from_str(SCHEMA_JSON).expect("embedded app-settings schema is valid JSON")
+    crate::schema::parse(SCHEMA_JSON, "app-settings")
 }
 
 /// Validate a settings JSON value against the embedded schema, naming the failing
 /// field(s) on error.
 fn validate_against_schema(value: &serde_json::Value) -> Result<(), String> {
-    let schema = schema_value();
-    let validator =
-        jsonschema::validator_for(&schema).map_err(|e| format!("internal schema error: {e}"))?;
-    let errors: Vec<String> = validator
-        .iter_errors(value)
-        .map(|e| {
-            let at = e.instance_path().to_string();
-            let at = if at.is_empty() { "/".to_string() } else { at };
-            format!("at `{at}`: {e}")
-        })
-        .collect();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
+    crate::schema::validate(&schema_value(), value)
 }
 
 // ── Storage ─────────────────────────────────────────────────────────────────
 
 fn settings_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".maiestro/settings.json")
+    crate::paths::maiestro_dir("settings.json")
 }
 
 /// Read the global settings, returning defaults if the file is absent or unreadable.

@@ -71,12 +71,8 @@ pub struct ToolError {
 /// promoted to prominent display (the second strike). Not user-configurable.
 const RETRY_SURFACE_THRESHOLD: u32 = 2;
 
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
-}
-
 fn status_dir() -> PathBuf {
-    home().join(".maiestro/status")
+    crate::paths::maiestro_dir("status")
 }
 
 fn status_path(ws: &str) -> PathBuf {
@@ -643,5 +639,42 @@ mod tests {
         assert!(next_last_error("prompt", prior.clone(), None, "t").is_none());
         assert!(next_last_error("running", prior.clone(), None, "t").is_none());
         assert!(next_last_error("busy", prior, None, "t").is_some());
+    }
+
+    // The hook verb → (state, detail) mapping. Working verbs all collapse to
+    // `busy`; only `notification` reads the payload for its detail.
+    #[test]
+    fn resolve_state_maps_verbs() {
+        let empty = serde_json::json!({});
+        assert_eq!(resolve_state("running", &empty), ("running".into(), None));
+        assert_eq!(resolve_state("prompt", &empty), ("busy".into(), None));
+        assert_eq!(resolve_state("idle", &empty), ("idle".into(), None));
+        assert_eq!(resolve_state("ended", &empty), ("ended".into(), None));
+        // Unknown verb is recorded verbatim rather than guessed.
+        assert_eq!(resolve_state("mystery", &empty), ("mystery".into(), None));
+    }
+
+    // Working verbs that carry a tool name surface it as detail.
+    #[test]
+    fn resolve_state_carries_tool_name() {
+        let payload = serde_json::json!({ "tool_name": "Bash" });
+        for verb in ["busy", "tool_failed", "tool_ok"] {
+            let (state, detail) = resolve_state(verb, &payload);
+            assert_eq!(state, "busy");
+            assert_eq!(detail.as_deref(), Some("Bash"));
+        }
+    }
+
+    // A notification with a message is needs_you + that message; an empty message
+    // still flips to needs_you but with no detail.
+    #[test]
+    fn resolve_state_notification() {
+        let with_msg = serde_json::json!({ "message": "Waiting on approval" });
+        assert_eq!(
+            resolve_state("notification", &with_msg),
+            ("needs_you".into(), Some("Waiting on approval".into()))
+        );
+        let empty_msg = serde_json::json!({ "message": "   " });
+        assert_eq!(resolve_state("notification", &empty_msg), ("needs_you".into(), None));
     }
 }

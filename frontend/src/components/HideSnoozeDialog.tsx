@@ -38,6 +38,7 @@ export function HideSnoozeDialog({ title, onConfirm, onClose }: {
               aria-label="Snooze until"
               onChange={(e) => setUntil(e.target.value)}
             />
+            {!customValid && <p className="cred-error">Enter a valid date &amp; time.</p>}
             <div className="issue-actions">
               <button className="btn-save" disabled={!customValid} onClick={() => customValid && onConfirm({ snooze_until: customMs })}>Confirm</button>
               <button className="btn-ghost" onClick={() => setCustom(false)}>Back</button>

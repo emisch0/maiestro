@@ -43,8 +43,7 @@ fn default_branch() -> String {
 }
 
 fn sessions_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".maiestro/sessions")
+    crate::paths::maiestro_dir("sessions")
 }
 
 fn session_path(id: &str) -> PathBuf {

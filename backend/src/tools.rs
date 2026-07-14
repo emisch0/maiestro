@@ -141,11 +141,7 @@ fn which_on(path: &str, bin: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
-}
-
-use crate::paths::expand_tilde;
+use crate::paths::{expand_tilde, home};
 
 /// Known install locations to probe when a tool isn't on the enriched PATH — the
 /// PATH can still be minimal even after enrichment (e.g. the login shell itself

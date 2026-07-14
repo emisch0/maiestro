@@ -41,19 +41,9 @@ pub struct SpawnResult {
     pub warnings: Vec<String>,
 }
 
-/// Result of `create_issue_and_spawn`: either the spawn went through, or Claude
-/// couldn't turn the idea into a clear issue and we're asking the user whether
-/// to create one from their raw text anyway.
-#[derive(serde::Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum CreateAndSpawnOutcome {
-    Spawned(SpawnResult),
-    NeedsConfirmation { message: String },
-}
-
-/// Result of `create_issue`: either the issue was opened (no workspace spawned),
-/// or Claude couldn't turn the idea into a clear issue and we're asking the user
-/// whether to create one from their raw text anyway.
+/// Result of `create_issue_direct`: the issue was opened from the reviewed
+/// title/body. Tagged (`status: "created"`) for a stable wire shape the frontend
+/// switches on.
 #[derive(serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CreateIssueOutcome {
@@ -62,7 +52,6 @@ pub enum CreateIssueOutcome {
         issue_url: String,
         warnings: Vec<String>,
     },
-    NeedsConfirmation { message: String },
 }
 
 /// The decisions a spawn needs once the issue is known: the (possibly edited)
@@ -250,20 +239,6 @@ async fn finish_spawn(bg: SpawnBg) {
     .await;
 }
 
-/// True if `rel` is a safe *relative* path to copy inside the cloned repo/worktree:
-/// non-empty, not absolute, and with no `..` component — so `cloned_repo.join(rel)`
-/// and `work_dir.join(rel)` cannot escape their base dirs. An `env_files` entry is
-/// user-authored (repo settings) and normally a bare name like `.env.local`, but an
-/// absolute (`/Users/me/.ssh/id_rsa`) or `..`-laden entry would otherwise copy an
-/// arbitrary file *into* the worktree, or write the copy *outside* it.
-fn is_contained_relpath(rel: &str) -> bool {
-    use std::path::{Component, Path};
-    !rel.is_empty()
-        && Path::new(rel)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
-}
-
 /// The actual worktree build, factored out so `finish_spawn` can map its result
 /// to the status record. Returns non-fatal warnings on success; an `Err` is a
 /// fatal failure (e.g. `git worktree add`) that leaves no usable worktree.
@@ -284,7 +259,7 @@ async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
     for rel in &bg.env_files {
         // Reject absolute or `..`-escaping entries so the copy can't read outside
         // the cloned repo or write outside the worktree.
-        if !is_contained_relpath(rel) {
+        if !crate::paths::is_contained_relpath(rel) {
             warnings.push(format!("env file path not contained in the cloned repo, skipped: {rel}"));
             continue;
         }
@@ -355,31 +330,6 @@ pub(crate) async fn issue_facts(gh: &GitHub, repo: &str, issue_number: u64) -> R
     Ok((issue_title, issue_url, issue_body))
 }
 
-/// Spawn directly from an existing issue using default theming and a heuristic
-/// short label (no preview). Kept for completeness/back-compat; the UI now goes
-/// through `prepare_spawn` + `confirm_spawn`.
-#[tauri::command]
-pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
-    crate::log_invoke!("spawn_work", repo = %repo, issue = issue_number, force_new);
-    let (_settings, gh) = repo_context(&repo).await?;
-    let (issue_title, issue_url, _) = issue_facts(&gh, &repo, issue_number).await?;
-    let default_branch = gh.repo(&repo).await?["default_branch"].as_str().unwrap_or("main").to_string();
-    let short_label = default_short_title(&issue_title);
-    let seed = format!("{issue_number}-{}", slugify(&short_label, 25));
-    let (color, emoji) = pick_theme(&seed);
-    do_spawn(SpawnDecision {
-        repo: &repo,
-        issue_number,
-        issue_url: &issue_url,
-        default_branch: &default_branch,
-        short_label: &short_label,
-        color,
-        emoji,
-        force_new,
-    })
-    .await
-}
-
 /// The effective worktree-path prefix: the configured value, or the schema
 /// default (`/properties/worktree_prefix/default`) when unset or empty. The
 /// default lives in the JSON schema only — no hardcoded fallback here. Takes the
@@ -443,43 +393,7 @@ async fn run_post_spawn_commands(work_dir: &Path, commands: &[String]) -> Vec<St
     warnings
 }
 
-// ── Create-issue-and-spawn ──────────────────────────────────────────────────────
-
-/// Draft an issue from the user's idea (via Claude) and open it on GitHub,
-/// **without** spawning a workspace.
-///
-/// When `use_raw_fallback` is false and Claude can't produce a clear draft
-/// (e.g. the idea is too vague and it asks for clarification), this creates
-/// nothing and returns `NeedsConfirmation` carrying Claude's reply, so the UI
-/// can ask the user whether to proceed. Calling again with `use_raw_fallback`
-/// true skips drafting and creates the issue straight from the user's text.
-#[tauri::command]
-pub async fn create_issue(
-    app: tauri::AppHandle,
-    repo: String,
-    idea: String,
-    use_raw_fallback: bool,
-    request_id: String,
-) -> Result<CreateIssueOutcome, String> {
-    crate::log_invoke!("create_issue", repo = %repo, use_raw_fallback);
-    let activity = ClaudeActivity::new(app, request_id);
-    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback, &activity).await?;
-    let (title, body, warning) = match step {
-        DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
-        DraftStep::NeedsConfirmation { message } => {
-            return Ok(CreateIssueOutcome::NeedsConfirmation { message });
-        }
-    };
-
-    let number = gh.create_issue(&repo, &title, &body).await?;
-    Ok(CreateIssueOutcome::Created {
-        number,
-        // The create endpoint only returns the number; the html_url is derivable
-        // (the whole app assumes github.com — see plugins/github.rs).
-        issue_url: format!("https://github.com/{repo}/issues/{number}"),
-        warnings: warning.into_iter().collect(),
-    })
-}
+// ── Create issue ────────────────────────────────────────────────────────────────
 
 /// Open an issue from an explicit, already-reviewed title and body (no drafting).
 /// Used by the create-issue preview's confirm button.
@@ -499,35 +413,6 @@ pub async fn create_issue_direct(repo: String, title: String, body: String) -> R
     })
 }
 
-/// Draft an issue from the user's idea (via Claude), open it on GitHub, then
-/// spawn a workspace for the freshly created issue. See `create_issue` for the
-/// drafting / needs-confirmation semantics.
-#[tauri::command]
-pub async fn create_issue_and_spawn(
-    app: tauri::AppHandle,
-    repo: String,
-    idea: String,
-    use_raw_fallback: bool,
-    force_new: bool,
-    request_id: String,
-) -> Result<CreateAndSpawnOutcome, String> {
-    crate::log_invoke!("create_issue_and_spawn", repo = %repo, use_raw_fallback, force_new);
-    let activity = ClaudeActivity::new(app, request_id);
-    let (gh, step) = resolve_draft(&repo, &idea, use_raw_fallback, &activity).await?;
-    let (title, body, draft_warning) = match step {
-        DraftStep::Ready { title, body, warning, .. } => (title, body, warning),
-        DraftStep::NeedsConfirmation { message } => {
-            return Ok(CreateAndSpawnOutcome::NeedsConfirmation { message });
-        }
-    };
-
-    let number = gh.create_issue(&repo, &title, &body).await?;
-    let mut result = spawn_work(repo, number, force_new).await?;
-    if let Some(w) = draft_warning {
-        result.warnings.insert(0, w);
-    }
-    Ok(CreateAndSpawnOutcome::Spawned(result))
-}
 
 // ── Preview-then-spawn ────────────────────────────────────────────────────────
 
@@ -862,23 +747,4 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
 
     tracing::info!(branch = %branch, "tore down workspace");
     Ok(TeardownOutcome::Done)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A bare name and a nested relative path are contained; empty, absolute,
-    /// and `..`-escaping entries are rejected so the env-file copy can't read
-    /// outside the cloned repo or write outside the worktree.
-    #[test]
-    fn is_contained_relpath_accepts_relative_rejects_escapes() {
-        assert!(is_contained_relpath(".env"));
-        assert!(is_contained_relpath("frontend/.env.local"));
-        assert!(is_contained_relpath("./config/.env"));
-        assert!(!is_contained_relpath(""));
-        assert!(!is_contained_relpath("/etc/passwd"));
-        assert!(!is_contained_relpath("../secrets/.env"));
-        assert!(!is_contained_relpath("a/../../b"));
-    }
 }
