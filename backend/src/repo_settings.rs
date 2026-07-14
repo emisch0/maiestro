@@ -53,6 +53,13 @@ pub struct RepoSettings {
     /// login shell so PATH and tool managers are available.
     #[serde(default)]
     pub post_spawn_commands: Vec<String>,
+    /// Which Claude model runs mAIestro's own programmatic prompts (draft_issue,
+    /// short_label, draft_pr) via the headless `claude -p` calls. `None`/empty
+    /// uses the schema default (`haiku`). A `claude --model` tier alias, not a
+    /// pinned id, so it tracks the latest model in that tier. Applies only to
+    /// these drafting calls, never to the launched worktree session.
+    #[serde(default)]
+    pub prompt_model: Option<String>,
     /// Repo-level hide/snooze state. `None` = visible. A hidden repo hides its
     /// work items too. Per-work-item state lives on the session record, not here.
     #[serde(default)]
@@ -74,6 +81,7 @@ impl RepoSettings {
             worktree_prefix: None,
             env_files: Vec::new(),
             post_spawn_commands: Vec::new(),
+            prompt_model: None,
             hidden: None,
             prompts: PromptOverrides::default(),
         }
@@ -351,6 +359,7 @@ mod tests {
             worktree_prefix: Some("/home/u/src/work-".into()),
             env_files: vec![".env".into(), ".env.local".into()],
             post_spawn_commands: vec!["pnpm install".into()],
+            prompt_model: Some("sonnet".into()),
             hidden: Some(HideState { snooze_until: Some(1_717_372_800_000) }),
             prompts: PromptOverrides {
                 draft_issue: Some("Custom issue instruction".into()),

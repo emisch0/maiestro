@@ -382,6 +382,7 @@ function Settings() {
       knownIdentities,
       checkoutDir: loadedRepo?.settings.checkout_dir ?? null,
       worktreePrefixDefault: repoFormDefaults?.worktreePrefixDefault ?? "",
+      promptModelDefault: repoFormDefaults?.promptModelDefault ?? "",
       promptDefaults: repoFormDefaults?.promptDefaults ?? {},
     }),
     [knownIdentities, loadedRepo?.settings.checkout_dir, repoFormDefaults],

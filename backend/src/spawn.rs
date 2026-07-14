@@ -1031,13 +1031,14 @@ impl Drop for ClaudeActivityGuard<'_> {
 async fn claude_text(
     dir: &Path,
     prompt: &str,
+    model: &str,
     what: &str,
     activity: Option<&ClaudeActivity>,
 ) -> Result<String, String> {
     let _active = activity.map(|a| a.begin());
     let run = crate::tools::tokio_command("claude")
         .current_dir(dir)
-        .args(["-p", prompt, "--model", "haiku", "--output-format", "json", "--tools", ""])
+        .args(["-p", prompt, "--model", model, "--output-format", "json", "--tools", ""])
         .output();
     let output = tokio::time::timeout(std::time::Duration::from_secs(90), run)
         .await
@@ -1068,12 +1069,13 @@ async fn draft_issue(
     checkout: &Path,
     idea: &str,
     instruction: &str,
+    model: &str,
     activity: &ClaudeActivity,
 ) -> Result<(String, String, String), String> {
     // Instruction (default or per-repo override) first; the idea is appended
     // here so an override can't drop it. See prompts.rs.
     let prompt = format!("{instruction}\n\nIdea: {idea}");
-    let reply = claude_text(checkout, &prompt, "drafting the issue", Some(activity)).await?;
+    let reply = claude_text(checkout, &prompt, model, "drafting the issue", Some(activity)).await?;
     parse_issue_draft(&reply)
 }
 
@@ -1110,6 +1112,7 @@ async fn suggest_short_label(
     title: &str,
     body: &str,
     instruction: &str,
+    model: &str,
 ) -> Result<String, String> {
     // Issue bodies can be arbitrarily long; the label only needs the gist.
     let body: String = body.chars().take(4000).collect();
@@ -1118,7 +1121,7 @@ async fn suggest_short_label(
     let prompt = format!("{instruction}\n\nIssue title: {title}\n\nIssue body:\n{body}");
     // No activity signal: this is a fire-and-forget label swap with no busy
     // element in the UI to color.
-    let reply = claude_text(checkout, &prompt, "summarizing the issue", None).await?;
+    let reply = claude_text(checkout, &prompt, model, "summarizing the issue", None).await?;
     parse_short_label(&reply)
 }
 
@@ -1139,7 +1142,8 @@ pub async fn suggest_short_title(repo: String, issue_number: u64) -> Result<Stri
     let gh = GitHub::for_identity(&identity_id)?;
     let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
     let instruction = crate::prompts::short_label(&settings.prompts);
-    suggest_short_label(&checkout, &issue_title, &issue_body, &instruction).await
+    let model = crate::prompts::model(&settings.prompt_model);
+    suggest_short_label(&checkout, &issue_title, &issue_body, &instruction, &model).await
 }
 
 /// A drafted issue ready to create, or a signal that Claude couldn't produce a
@@ -1193,7 +1197,8 @@ async fn resolve_draft(
         }
     } else {
         let instruction = crate::prompts::draft_issue(&settings.prompts);
-        match draft_issue(&checkout, idea, &instruction, activity).await {
+        let model = crate::prompts::model(&settings.prompt_model);
+        match draft_issue(&checkout, idea, &instruction, &model, activity).await {
             Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title, warning: None },
             // Couldn't draft: let the user confirm before creating anything.
             Err(message) => DraftStep::NeedsConfirmation { message },
@@ -1876,7 +1881,8 @@ pub async fn session_create_pr(
     // garbage PR. The PR draft reuses the issue-draft parser but only needs
     // title + body.
     let activity = ClaudeActivity::new(app, request_id);
-    let reply = claude_text(&work_dir, &prompt, "drafting the PR", Some(&activity))
+    let model = crate::prompts::model(&settings.prompt_model);
+    let reply = claude_text(&work_dir, &prompt, &model, "drafting the PR", Some(&activity))
         .await
         .map_err(|e| { tracing::warn!(error = %e, "Claude PR draft failed"); e })?;
     let (title, body, _) = parse_issue_draft(&reply)
