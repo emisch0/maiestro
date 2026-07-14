@@ -17,6 +17,7 @@ import {
 import { withJsonFormsControlProps } from "@jsonforms/react";
 import { vanillaRenderers, vanillaCells } from "@jsonforms/vanilla-renderers";
 import { ResolvedTool, Theme } from "./api";
+import { RevealButton, PathMissingHint, usePathExists } from "./PathField";
 
 /** Field order; `window`/`settings_window` are deliberately omitted (machine-managed). */
 export const appSettingsUISchema = {
@@ -97,49 +98,84 @@ function ToolPathsControl(props: ControlProps) {
         {description ??
           "Explicit paths for the CLIs mAIestro runs itself. Leave empty to auto-detect; set one if the app can't find a tool."}
       </div>
-      {TOOL_FIELDS.map(({ key, label: name, help }) => {
-        const override = paths[key];
-        const isOverridden = override != null && override !== "";
-        const r = resolved.find((t) => t.tool === key);
-        const placeholder = r?.exists ? r.path : "auto-detect";
-        return (
-          <div key={key} className="jsf-prompt-field">
-            <div className="jsf-prompt-head">
-              <span className="jsf-prompt-name">{name}</span>
-              {isOverridden && (
-                <button
-                  type="button"
-                  className="jsf-prompt-reset"
-                  onClick={() => handleChange(path, { ...paths, [key]: null })}
-                >
-                  Reset to auto
-                </button>
-              )}
-            </div>
-            <div className="jsf-help">{help}</div>
-            <input
-              className="text-input"
-              type="text"
-              value={override ?? ""}
-              placeholder={placeholder}
-              onChange={(e) => setPath(key, e.target.value)}
-              spellCheck={false}
-              autoCapitalize="off"
-              autoCorrect="off"
-            />
-            {!isOverridden &&
-              (r?.exists ? (
-                <div className="jsf-help">
-                  Using <code>{r.path}</code>
-                </div>
-              ) : (
-                <div className="jsf-help jsf-tool-missing">
-                  Not found — set a path above, or install it on your PATH.
-                </div>
-              ))}
-          </div>
-        );
-      })}
+      {TOOL_FIELDS.map((field) => (
+        <ToolPathRow
+          key={field.key}
+          field={field}
+          override={paths[field.key]}
+          resolved={resolved.find((t) => t.tool === field.key)}
+          onChange={(v) => setPath(field.key, v)}
+          onReset={() => handleChange(path, { ...paths, [field.key]: null })}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** One CLI path override: the input, a reveal button, a reset-to-auto action,
+ *  and the resolved-path status. When overridden, the missing-path hint validates
+ *  the override; when empty, the existing auto-resolution status line shows. */
+function ToolPathRow({
+  field,
+  override,
+  resolved,
+  onChange,
+  onReset,
+}: {
+  field: { key: ToolKey; label: string; help: string };
+  override: string | null | undefined;
+  resolved: ResolvedTool | undefined;
+  onChange: (v: string) => void;
+  onReset: () => void;
+}) {
+  const { label: name, help } = field;
+  const isOverridden = override != null && override !== "";
+  const placeholder = resolved?.exists ? resolved.path : "auto-detect";
+  // Validate the override the user typed. When empty, the auto-resolution status
+  // line below covers "found / not found", so no separate hint is needed.
+  const overrideExists = usePathExists(isOverridden ? (override as string) : "");
+  return (
+    <div className="jsf-prompt-field">
+      <div className="jsf-prompt-head">
+        <span className="jsf-prompt-name">{name}</span>
+        {isOverridden && (
+          <button type="button" className="jsf-prompt-reset" onClick={onReset}>
+            Reset to auto
+          </button>
+        )}
+      </div>
+      <div className="jsf-help">{help}</div>
+      <div className="path-field-row">
+        <input
+          className="text-input"
+          type="text"
+          value={override ?? ""}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+        />
+        <RevealButton
+          path={isOverridden ? (override as string) : resolved?.exists ? resolved.path : ""}
+          exists={isOverridden ? overrideExists : resolved?.exists ?? false}
+        />
+      </div>
+      {isOverridden ? (
+        <PathMissingHint
+          path={override}
+          exists={overrideExists}
+          label="Not found at this path."
+        />
+      ) : resolved?.exists ? (
+        <div className="jsf-help">
+          Using <code>{resolved.path}</code>
+        </div>
+      ) : (
+        <div className="jsf-help jsf-tool-missing">
+          Not found — set a path above, or install it on your PATH.
+        </div>
+      )}
     </div>
   );
 }

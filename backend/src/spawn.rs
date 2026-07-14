@@ -48,20 +48,7 @@ fn pick_theme(seed: &str) -> (&'static str, &'static str) {
 
 // ── Small helpers ─────────────────────────────────────────────────────────────
 
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
-}
-
-/// Expand a leading `~` to $HOME. Other paths pass through unchanged.
-fn expand_tilde(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        home().join(rest)
-    } else if p == "~" {
-        home()
-    } else {
-        PathBuf::from(p)
-    }
-}
+use crate::paths::expand_tilde;
 
 /// Deterministic index into a list of `len`, derived from `s` and a `salt`.
 /// DefaultHasher::new() is fixed-seeded, so the same name always themes the same.

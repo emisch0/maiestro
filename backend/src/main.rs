@@ -6,6 +6,7 @@ mod credentials;
 mod identities;
 mod links;
 mod logging;
+mod paths;
 mod plugin;
 mod plugins;
 mod prompts;
@@ -285,6 +286,8 @@ fn main() {
             identities::identities_remove,
             links::open_url,
             links::open_path,
+            links::path_exists,
+            links::reveal_path,
             spawn::spawn_work,
             spawn::prepare_spawn,
             spawn::suggest_short_title,
