@@ -197,7 +197,7 @@ async fn suggest_short_label(
 #[tauri::command]
 pub async fn suggest_short_title(repo: String, issue_number: u64) -> Result<String, String> {
     crate::log_invoke!("suggest_short_title", repo = %repo, issue = issue_number);
-    let (settings, gh) = repo_context(&repo)?;
+    let (settings, gh) = repo_context(&repo).await?;
     let cloned_repo = validated_cloned_repo(&settings)?;
     let (issue_title, _issue_url, issue_body) = crate::spawn::issue_facts(&gh, &repo, issue_number).await?;
     let instruction = crate::prompts::short_label(&settings.prompts);
@@ -235,7 +235,7 @@ pub async fn resolve_draft(
         return Err("Describe what you want to work on first.".into());
     }
 
-    let (settings, gh) = repo_context(repo)?;
+    let (settings, gh) = repo_context(repo).await?;
     let cloned_repo = validated_cloned_repo(&settings)?;
 
     let step = if use_raw_fallback {

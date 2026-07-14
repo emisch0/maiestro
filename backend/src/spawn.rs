@@ -14,7 +14,7 @@ use crate::editor::{
     close_editor_window, open_vscode, probe_editor_window, window_marker, worktree_in_use,
     write_vscode_files, WinProbe,
 };
-use crate::gitops::{git, local_branch_exists};
+use crate::gitops::{git, git_net, local_branch_exists};
 use crate::hooks::{reconcile_session_hooks, write_claude_hooks};
 use crate::naming::{default_short_title, slugify};
 use crate::paths::expand_tilde;
@@ -112,7 +112,7 @@ struct SpawnBg {
 async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     let SpawnDecision { repo, issue_number, issue_url, default_branch, short_label, color, emoji, force_new } = d;
 
-    let (settings, gh) = repo_context(repo)?;
+    let (settings, gh) = repo_context(repo).await?;
     let cloned_repo = validated_cloned_repo(&settings)?;
     let repo_name = repo.split('/').next_back().unwrap_or(repo).to_string();
 
@@ -158,7 +158,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     let mut work_dir = base_dir.clone();
     let mut session_label = format!("{prefix}{short_label}");
     let mut n = 2;
-    while work_dir.is_dir() || local_branch_exists(&cloned_repo, &branch) {
+    while work_dir.is_dir() || local_branch_exists(&cloned_repo, &branch).await {
         workspace = format!("{base_workspace}-{n}");
         branch = format!("{base_branch}-{n}");
         work_dir = worktree_dir(&workspace);
@@ -272,11 +272,11 @@ async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
 
     // Create the worktree from the repo's default branch.
     std::fs::create_dir_all(bg.work_dir.parent().unwrap()).map_err(|e| e.to_string())?;
-    if let Err(e) = git(&bg.cloned_repo, &["fetch", "origin", "--quiet"]) {
+    if let Err(e) = git_net(&bg.cloned_repo, &["fetch", "origin", "--quiet"]).await {
         tracing::warn!(error = %e, "git fetch before spawn failed (continuing)");
     }
-    git(&bg.cloned_repo, &["worktree", "add", &bg.work_dir.to_string_lossy(), "-b", &bg.branch, &format!("origin/{}", bg.default_branch)])?;
-    if let Err(e) = git(&bg.work_dir, &["branch", "--unset-upstream"]) {
+    git(&bg.cloned_repo, &["worktree", "add", &bg.work_dir.to_string_lossy(), "-b", &bg.branch, &format!("origin/{}", bg.default_branch)]).await?;
+    if let Err(e) = git(&bg.work_dir, &["branch", "--unset-upstream"]).await {
         tracing::warn!(error = %e, "git branch --unset-upstream failed (continuing)");
     }
 
@@ -326,7 +326,7 @@ async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
     }
 
     write_vscode_files(&bg.work_dir, &bg.work_parent, &bg.color, &bg.session_title)?;
-    write_claude_hooks(&bg.work_dir, &bg.workspace)?;
+    write_claude_hooks(&bg.work_dir, &bg.workspace).await?;
 
     // Run the repo's post-spawn commands (e.g. `pnpm install`) in the new
     // worktree before opening the editor, so the session starts ready.
@@ -361,7 +361,7 @@ pub(crate) async fn issue_facts(gh: &GitHub, repo: &str, issue_number: u64) -> R
 #[tauri::command]
 pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Result<SpawnResult, String> {
     crate::log_invoke!("spawn_work", repo = %repo, issue = issue_number, force_new);
-    let (_settings, gh) = repo_context(&repo)?;
+    let (_settings, gh) = repo_context(&repo).await?;
     let (issue_title, issue_url, _) = issue_facts(&gh, &repo, issue_number).await?;
     let default_branch = gh.repo(&repo).await?["default_branch"].as_str().unwrap_or("main").to_string();
     let short_label = default_short_title(&issue_title);
@@ -490,7 +490,7 @@ pub async fn create_issue_direct(repo: String, title: String, body: String) -> R
     if title.is_empty() {
         return Err("Issue title can't be empty.".into());
     }
-    let (_settings, gh) = repo_context(&repo)?;
+    let (_settings, gh) = repo_context(&repo).await?;
     let number = gh.create_issue(&repo, title, &body).await?;
     Ok(CreateIssueOutcome::Created {
         number,
@@ -555,7 +555,7 @@ pub struct SpawnPlan {
 #[tauri::command]
 pub async fn prepare_spawn(repo: String, issue_number: u64) -> Result<SpawnPlan, String> {
     crate::log_invoke!("prepare_spawn", repo = %repo, issue = issue_number);
-    let (settings, gh) = repo_context(&repo)?;
+    let (settings, gh) = repo_context(&repo).await?;
     let worktree_prefix = effective_worktree_prefix(settings.worktree_prefix.as_deref());
     let (issue_title, _issue_url, issue_body) = issue_facts(&gh, &repo, issue_number).await?;
     let short_title = default_short_title(&issue_title);
@@ -641,7 +641,7 @@ pub struct SpawnEdits {
 #[tauri::command]
 pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> Result<SpawnResult, String> {
     crate::log_invoke!("confirm_spawn", repo = %repo, force_new);
-    let (_settings, gh) = repo_context(&repo)?;
+    let (_settings, gh) = repo_context(&repo).await?;
 
     let number = match edits.issue_number {
         Some(n) => {
@@ -706,6 +706,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     let mut warnings = Vec::new();
 
     let dirty = git(&work_dir, &["status", "--porcelain"])
+        .await
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     if dirty {
@@ -716,7 +717,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     let mut pr_merged = false;
     let settings = crate::repo_settings::repo_settings_get(session.repo.clone())?;
     if let Some(identity_id) = settings.identity_id {
-        if let Ok(gh) = GitHub::for_identity(&identity_id) {
+        if let Ok(gh) = GitHub::for_identity(&identity_id).await {
             if let Ok(prs) = gh.pulls_for_branch(&session.repo, &branch).await {
                 pr_merged = prs.iter().any(|p| p["merged_at"].is_string());
                 if let Some(open) = prs.iter().find(|p| p["state"].as_str() == Some("open")) {
@@ -728,7 +729,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
             // we'd wrongly conclude "no work on this branch". Resolve by the
             // branch's tip commit instead, which still points at the merged PR.
             if !pr_merged {
-                if let Ok(sha) = git(&work_dir, &["rev-parse", "HEAD"]) {
+                if let Ok(sha) = git(&work_dir, &["rev-parse", "HEAD"]).await {
                     if let Ok(prs) = gh.pulls_for_commit(&session.repo, &sha).await {
                         pr_merged = prs.iter().any(|p| p["merged_at"].is_string());
                     }
@@ -739,6 +740,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
 
     // Commits on the branch not yet on the base, when no merged PR accounts for them.
     let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{base}..{branch}")])
+        .await
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
@@ -774,7 +776,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
                     // is using the worktree, proceed; otherwise stop and let the
                     // user close the window, grant Accessibility, or force it.
                     WinProbe::Denied => {
-                        if worktree_in_use(&work_dir) {
+                        if worktree_in_use(&work_dir).await {
                             return Ok(TeardownOutcome::BlockedByEditor {
                                 message:
                                     "I couldn't tear down because the Visual Studio Code window \
@@ -812,15 +814,15 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     //    record whose worktree was never created — tolerate a missing dir so the
     //    broken row can still be torn down, just pruning any dangling admin entry.
     if work_dir.exists() {
-        git(&cloned_repo, &["worktree", "remove", "--force", &work_dir.to_string_lossy()])?;
+        git(&cloned_repo, &["worktree", "remove", "--force", &work_dir.to_string_lossy()]).await?;
     } else {
-        let _ = git(&cloned_repo, &["worktree", "prune"]);
+        let _ = git(&cloned_repo, &["worktree", "prune"]).await;
     }
 
     // 3. Delete the local branch (-D: spawn unset the upstream and -d checks the
     //    wrong base, so it would refuse even for merged branches).
-    if local_branch_exists(&cloned_repo, &branch) {
-        if let Err(e) = git(&cloned_repo, &["branch", "-D", &branch]) {
+    if local_branch_exists(&cloned_repo, &branch).await {
+        if let Err(e) = git(&cloned_repo, &["branch", "-D", &branch]).await {
             tracing::warn!(branch = %branch, error = %e, "could not delete local branch during teardown");
         }
     }

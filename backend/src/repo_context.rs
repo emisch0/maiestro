@@ -23,13 +23,13 @@ use crate::repo_settings::{self, RepoSettings};
 /// client for it. The returned settings are the same value the identity came
 /// from, so callers can go on to read `env_files`, `prompts`, `worktree_prefix`,
 /// etc. without reloading.
-pub fn repo_context(repo: &str) -> Result<(RepoSettings, GitHub), String> {
+pub async fn repo_context(repo: &str) -> Result<(RepoSettings, GitHub), String> {
     let settings = repo_settings::repo_settings_get(repo.to_string())?;
     let identity_id = settings
         .identity_id
         .clone()
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
     Ok((settings, gh))
 }
 

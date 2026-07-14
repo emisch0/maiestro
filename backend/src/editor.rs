@@ -85,20 +85,22 @@ pub fn open_vscode(dir: &Path) -> Result<(), String> {
     // freshly spawned worktree. The CLI forwards the flag even to an already
     // running VS Code, which `open -a --args` cannot.
     if crate::tools::find_tool("code").is_some() {
-        crate::tools::command("code")
-            .arg("--disable-workspace-trust")
-            .arg(dir)
-            .spawn()
-            .map_err(|e| format!("failed to open VS Code: {e}"))?;
+        crate::tools::spawn_reaped(
+            crate::tools::command("code")
+                .arg("--disable-workspace-trust")
+                .arg(dir),
+        )
+        .map_err(|e| format!("failed to open VS Code: {e}"))?;
         return Ok(());
     }
     // Fallback: Launch Services. --args forwards the flag, but only honored when
     // VS Code isn't already running.
-    Command::new("open")
-        .args(["-a", "Visual Studio Code", "--args", "--disable-workspace-trust"])
-        .arg(dir)
-        .spawn()
-        .map_err(|e| format!("failed to open VS Code: {e}"))?;
+    crate::tools::spawn_reaped(
+        Command::new("open")
+            .args(["-a", "Visual Studio Code", "--args", "--disable-workspace-trust"])
+            .arg(dir),
+    )
+    .map_err(|e| format!("failed to open VS Code: {e}"))?;
     Ok(())
 }
 
@@ -245,9 +247,12 @@ return "absent""#
 /// cwd in the worktree, so this catches the common "still open" case without
 /// needing Accessibility. Uses `lsof -d cwd` (process CWDs only) to avoid the
 /// slow tree walk that `lsof +D` would do over a full cloned repo.
-pub fn worktree_in_use(work_dir: &Path) -> bool {
+pub async fn worktree_in_use(work_dir: &Path) -> bool {
     let dir = work_dir.to_string_lossy();
-    match Command::new("lsof").args(["-d", "cwd", "-Fn"]).output() {
+    // Async so the reachable-from-`teardown` `lsof` scan doesn't block a tokio
+    // worker (#101). `lsof` is a system binary always on the minimal PATH, so it
+    // doesn't go through `tools`.
+    match tokio::process::Command::new("lsof").args(["-d", "cwd", "-Fn"]).output().await {
         Ok(out) => String::from_utf8_lossy(&out.stdout)
             .lines()
             .any(|l| l.strip_prefix('n').is_some_and(|p| p.starts_with(&*dir))),
@@ -261,7 +266,8 @@ pub fn worktree_in_use(work_dir: &Path) -> bool {
 #[tauri::command]
 pub fn open_accessibility_settings() {
     crate::log_invoke!("open_accessibility_settings");
-    let _ = Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .spawn();
+    let _ = crate::tools::spawn_reaped(
+        Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+    );
 }

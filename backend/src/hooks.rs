@@ -22,7 +22,7 @@ use crate::tools::shell_quote;
 /// Write Claude Code hooks into the worktree's `.claude/settings.local.json`,
 /// merging into any existing file rather than overwriting, so user/repo settings
 /// and unrelated hooks survive. Also excludes the generated files from git.
-pub fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
+pub async fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
     let bin = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
 
     let dir = work_dir.join(".claude");
@@ -41,7 +41,7 @@ pub fn write_claude_hooks(work_dir: &Path, ws_id: &str) -> Result<(), String> {
     std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap() + "\n")
         .map_err(|e| e.to_string())?;
 
-    exclude_generated_files(work_dir);
+    exclude_generated_files(work_dir).await;
     Ok(())
 }
 
@@ -183,11 +183,11 @@ pub fn reconcile_all_session_hooks() {
 /// they don't show up as untracked changes (which would trip teardown's
 /// `git status --porcelain` dirty check before Claude has run / in repos that
 /// don't already ignore them). Idempotent and best-effort.
-fn exclude_generated_files(work_dir: &Path) {
+async fn exclude_generated_files(work_dir: &Path) {
     // Worktrees share the main repo's exclude via the common git dir; resolve it
     // rather than assuming `<work_dir>/.git` is a directory (in a worktree it's a
     // file pointing elsewhere).
-    let Ok(common) = git(work_dir, &["rev-parse", "--git-common-dir"]) else {
+    let Ok(common) = git(work_dir, &["rev-parse", "--git-common-dir"]).await else {
         return;
     };
     let common = expand_tilde(&common);

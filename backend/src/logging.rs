@@ -226,7 +226,7 @@ pub fn logs_reveal() -> Result<(), String> {
         std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         cmd.arg(&root);
     }
-    cmd.spawn().map_err(|e| e.to_string())?;
+    crate::tools::spawn_reaped(&mut cmd).map_err(|e| e.to_string())?;
     Ok(())
 }
 

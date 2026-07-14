@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::drafting::{claude_text, parse_issue_draft, ClaudeActivity};
-use crate::gitops::git;
+use crate::gitops::{git, git_net};
 use crate::plugins::GitHub;
 use crate::repo_context::repo_context;
 
@@ -70,7 +70,7 @@ pub async fn session_pr(session_id: String) -> Result<Option<PrLink>, String> {
     let Some(identity_id) = settings.identity_id else {
         return Ok(None);
     };
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
     let prs = gh.pulls_for_branch(&session.repo, &session.branch).await?;
 
     // `created_at` is ISO-8601, so lexicographic order is chronological.
@@ -89,13 +89,13 @@ pub async fn session_pr(session_id: String) -> Result<Option<PrLink>, String> {
 /// Build a context blob describing the branch's changes for the PR drafter: the
 /// commit log plus the diff against the base, capped so a huge diff falls back
 /// to a file-level `--stat` rather than blowing past the prompt budget.
-fn change_summary(work_dir: &Path, base: &str) -> String {
+async fn change_summary(work_dir: &Path, base: &str) -> String {
     let range = format!("origin/{base}..HEAD");
-    let log = git(work_dir, &["log", "--oneline", &range]).unwrap_or_default();
-    let diff = git(work_dir, &["diff", &format!("origin/{base}...HEAD")]).unwrap_or_default();
+    let log = git(work_dir, &["log", "--oneline", &range]).await.unwrap_or_default();
+    let diff = git(work_dir, &["diff", &format!("origin/{base}...HEAD")]).await.unwrap_or_default();
     const MAX_DIFF: usize = 12_000;
     let diff_section = if diff.chars().count() > MAX_DIFF {
-        let stat = git(work_dir, &["diff", "--stat", &format!("origin/{base}...HEAD")]).unwrap_or_default();
+        let stat = git(work_dir, &["diff", "--stat", &format!("origin/{base}...HEAD")]).await.unwrap_or_default();
         format!("Diff too large to include in full; file-level summary:\n{stat}")
     } else {
         diff
@@ -125,19 +125,21 @@ pub async fn session_create_pr(
     // Guard: uncommitted changes wouldn't make it into the PR (it's built from the
     // pushed branch), so block and ask the user to commit them first.
     let dirty = git(&work_dir, &["status", "--porcelain"])
+        .await
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     if dirty {
         return Err("This worktree has uncommitted changes. Commit them first, then create the PR.".to_string());
     }
 
-    let (settings, gh) = repo_context(&session.repo)?;
+    let (settings, gh) = repo_context(&session.repo).await?;
 
     // Refresh the base ref so the ahead-count and diff compare against current origin.
-    git(&work_dir, &["fetch", "origin", &base, "--quiet"]).ok();
+    git_net(&work_dir, &["fetch", "origin", &base, "--quiet"]).await.ok();
 
     // Guard: nothing to open a PR for.
     let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{base}..HEAD")])
+        .await
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
@@ -157,7 +159,7 @@ pub async fn session_create_pr(
     let issue_title = issue["title"].as_str().unwrap_or("");
     let issue_body = issue["body"].as_str().unwrap_or("");
 
-    let summary = change_summary(&work_dir, &base);
+    let summary = change_summary(&work_dir, &base).await;
     // Instruction (default or per-repo override) first; the issue context and
     // diff are appended here so an override can't drop them. See prompts.rs.
     let instruction = crate::prompts::draft_pr(&settings.prompts);
@@ -184,7 +186,8 @@ pub async fn session_create_pr(
 
     // Draft succeeded — now push the branch so GitHub can see the head ref. -u
     // sets upstream for the user's later pushes from the session.
-    git(&work_dir, &["push", "-u", "origin", &branch])
+    git_net(&work_dir, &["push", "-u", "origin", &branch])
+        .await
         .map_err(|e| format!("could not push branch {branch}: {e}"))?;
 
     let pr = gh
@@ -250,7 +253,7 @@ pub async fn session_pr_checks(session_id: String) -> Result<Option<PrChecks>, S
     let Some(identity_id) = settings.identity_id else {
         return Ok(None);
     };
-    let gh = GitHub::for_identity(&identity_id)?;
+    let gh = GitHub::for_identity(&identity_id).await?;
     let prs = gh.pulls_for_branch(&session.repo, &session.branch).await?;
 
     let created_at = |p: &&serde_json::Value| p["created_at"].as_str().unwrap_or("").to_string();
@@ -309,9 +312,11 @@ pub async fn session_work_state(session_id: String) -> Result<Option<WorkState>,
     let base = session.default_branch;
 
     let dirty = git(&work_dir, &["status", "--porcelain"])
+        .await
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{base}..HEAD")])
+        .await
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
@@ -342,11 +347,12 @@ pub async fn session_merge_pr(
         .ok_or_else(|| format!("session not found: {session_id}"))?;
     let work_dir = PathBuf::from(&session.work_dir);
     let branch = session.branch.clone();
-    let (_settings, gh) = repo_context(&session.repo)?;
+    let (_settings, gh) = repo_context(&session.repo).await?;
 
     // Guard: uncommitted work would be silently excluded — the merge lands the
     // pushed branch, not the worktree. Block and ask the user to commit first.
     let dirty = git(&work_dir, &["status", "--porcelain"])
+        .await
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     if dirty {
@@ -355,13 +361,15 @@ pub async fn session_merge_pr(
 
     // Reconcile committed-but-unpushed local commits before merging: refresh the
     // remote ref, and if local HEAD is ahead, push so the PR head includes them.
-    git(&work_dir, &["fetch", "origin", &branch, "--quiet"]).ok();
+    git_net(&work_dir, &["fetch", "origin", &branch, "--quiet"]).await.ok();
     let ahead = git(&work_dir, &["rev-list", "--count", &format!("origin/{branch}..HEAD")])
+        .await
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
     if ahead > 0 {
-        git(&work_dir, &["push", "origin", &branch])
+        git_net(&work_dir, &["push", "origin", &branch])
+            .await
             .map_err(|e| format!("could not push local commits before merging: {e}"))?;
     }
 

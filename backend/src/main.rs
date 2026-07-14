@@ -88,13 +88,15 @@ fn persist_popover_size(window: &tauri::Window) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical = physical.to_logical::<f64>(scale);
-    // Load-merge so we don't clobber other fields (e.g. the chosen theme).
-    let mut settings = app_settings::load();
-    settings.window = Some(app_settings::WindowSize {
-        width: logical.width,
-        height: logical.height,
+    // Load-merge under the shared lock so we don't clobber other fields (e.g. the
+    // chosen theme) nor race a concurrent settings write.
+    let result = app_settings::update(|settings| {
+        settings.window = Some(app_settings::WindowSize {
+            width: logical.width,
+            height: logical.height,
+        });
     });
-    if let Err(e) = app_settings::save(&settings) {
+    if let Err(e) = result {
         tracing::warn!(error = %e, "failed to persist popover size");
     } else {
         tracing::debug!(
@@ -131,13 +133,15 @@ fn persist_settings_size(window: &tauri::Window) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical = physical.to_logical::<f64>(scale);
-    // Load-merge so we don't clobber other fields (popover size, theme).
-    let mut settings = app_settings::load();
-    settings.settings_window = Some(app_settings::WindowSize {
-        width: logical.width,
-        height: logical.height,
+    // Load-merge under the shared lock so we don't clobber other fields (popover
+    // size, theme) nor race a concurrent settings write.
+    let result = app_settings::update(|settings| {
+        settings.settings_window = Some(app_settings::WindowSize {
+            width: logical.width,
+            height: logical.height,
+        });
     });
-    if let Err(e) = app_settings::save(&settings) {
+    if let Err(e) = result {
         tracing::warn!(error = %e, "failed to persist settings size");
     } else {
         tracing::debug!(
@@ -348,6 +352,10 @@ fn main() {
             // `session-status` events. The watcher must outlive setup(), so park
             // it in managed state (dropping it would stop the watch).
             status::sweep_stale();
+            // Rescue any session left stuck in `creating` by a spawn the app
+            // quit/crashed out of mid-flight: surface it as a spawn error the row
+            // can be torn down from, rather than a permanent "Creating…" pill (#101).
+            status::reconcile_stale_creating();
             // Heal any worktree hooks still pointing at a now-stale binary path
             // (a torn-down/rebuilt spawner), so live status survives across
             // teardowns and `tauri dev` rebuilds. See spawn.rs / issue #35.
