@@ -171,20 +171,6 @@ pub fn app_settings_get_theme() -> Theme {
     load().theme.unwrap_or_default()
 }
 
-/// Persist the chosen UI theme and broadcast `theme-changed` so every open
-/// window (popover, settings, logs) re-applies it live. Load-merges so the
-/// popover size and any other fields are preserved.
-#[tauri::command]
-pub fn app_settings_set_theme(app: tauri::AppHandle, theme: Theme) -> Result<(), String> {
-    crate::log_invoke!("app_settings_set_theme", theme = ?theme);
-    let mut settings = load();
-    settings.theme = Some(theme);
-    save(&settings).map_err(|e| e.to_string())?;
-    use tauri::Emitter;
-    let _ = app.emit("theme-changed", theme);
-    Ok(())
-}
-
 /// The hand-written JSON Schema for the global settings file, for the Settings
 /// window's JSON Forms renderer.
 #[tauri::command]

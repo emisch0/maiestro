@@ -378,7 +378,8 @@ export const PostSpawnCommandsRenderer = withJsonFormsControlProps(PostSpawnComm
 
 // ── AI prompt overrides ─────────────────────────────────────────────────────
 // One paragraph (textarea) per AI prompt. Each shows the built-in default text
-// (from the `repo_prompt_defaults` command, via config); editing it stores a
+// (the schema's `default` keywords, extracted by `extractFormDefaults` and
+// passed via config); editing it stores a
 // per-repo override. Clearing the field or matching the default again removes
 // the override. The runtime context (idea / issue / diff) is appended by the
 // backend, so an override only needs the instruction.
