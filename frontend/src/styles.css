@@ -1996,6 +1996,48 @@ body {
   color: var(--danger, #d66);
 }
 
+/* Path fields (issue #88): the text input and its reveal-in-Finder button sit on
+   one row; the input flexes, the button is a fixed square. */
+.path-field-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.path-field-row .text-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Folder-icon button that reveals a path in Finder. Disabled when the path is
+   empty or missing — greyed and non-interactive. */
+.path-reveal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.path-reveal-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+.path-reveal-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* An env-file path tinted as missing reuses the warning color. */
+.env-file-path.jsf-tool-missing {
+  color: var(--danger, #d66);
+}
+
 /* The worktree-prefix field surfaces its schema default as a placeholder,
    styled to read as a disabled default rather than ordinary ghost text. */
 .jsf-root input.jsf-default-hint::placeholder {

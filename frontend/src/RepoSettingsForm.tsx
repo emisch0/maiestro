@@ -19,6 +19,7 @@ import {
 import { withJsonFormsControlProps } from "@jsonforms/react";
 import { vanillaRenderers, vanillaCells } from "@jsonforms/vanilla-renderers";
 import { api } from "./api";
+import { PathField, RevealButton, usePathExists } from "./PathField";
 
 /** Field order, with `repo` and `hidden` deliberately omitted (the latter is
  *  managed from the popover, not this form). */
@@ -99,15 +100,11 @@ function ClonedRepoDirControl(props: ControlProps) {
   return (
     <div className="control jsf-control">
       <FieldHeading label={label} description={description} />
-      <input
-        className="text-input"
-        type="text"
+      <PathField
         value={data ?? ""}
         placeholder="~/src/repo-name"
-        onChange={(e) => handleChange(path, e.target.value || null)}
-        spellCheck={false}
-        autoCapitalize="off"
-        autoCorrect="off"
+        onChange={(v) => handleChange(path, v || null)}
+        missingLabel="Directory not found"
       />
     </div>
   );
@@ -116,20 +113,27 @@ function ClonedRepoDirControl(props: ControlProps) {
 export const clonedRepoDirTester = rankWith(20, scopeEndsWith("cloned_repo_dir"));
 export const ClonedRepoDirRenderer = withJsonFormsControlProps(ClonedRepoDirControl);
 
+/** The directory a worktree prefix lives in. The prefix itself is a string
+ *  base (`~/src/work-`) that's never a real path — the parent (`~/src`) is what
+ *  must exist, so that's what we validate and reveal. */
+function prefixParentDir(prefix: string): string {
+  const slash = prefix.lastIndexOf("/");
+  return slash >= 0 ? prefix.slice(0, slash) : "";
+}
+
 function WorktreePrefixControl(props: ControlProps) {
   const { data, handleChange, path, label, description, config } = props;
+  const value: string = data ?? "";
   return (
     <div className="control jsf-control">
       <FieldHeading label={label} description={description} />
-      <input
-        className="text-input jsf-default-hint"
-        type="text"
-        value={data ?? ""}
+      <PathField
+        value={value}
         placeholder={config?.worktreePrefixDefault ?? ""}
-        onChange={(e) => handleChange(path, e.target.value || null)}
-        spellCheck={false}
-        autoCapitalize="off"
-        autoCorrect="off"
+        onChange={(v) => handleChange(path, v || null)}
+        checkPath={prefixParentDir(value)}
+        missingLabel="Parent directory not found"
+        className="jsf-default-hint"
       />
     </div>
   );
@@ -268,13 +272,48 @@ function EnvFilesControl(props: ControlProps) {
       ) : (
         <div className="env-file-list">
           {files.map((f) => (
-            <div key={f} className="env-file-row">
-              <span className="env-file-path">{f}</span>
-              <button className="btn-clear" onClick={() => removeFile(f)} title="Remove">✕</button>
-            </div>
+            <EnvFileRow
+              key={f}
+              file={f}
+              checkoutDir={checkoutDir}
+              onRemove={() => removeFile(f)}
+            />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Resolve a checkout-relative env-file entry (e.g. `.env` or `sub/.env`) against
+ *  the repo's checkout dir — that's where the backend reads and copies them from.
+ *  Returns "" when there's no checkout dir to resolve against (can't validate). */
+function resolveEnvFile(checkoutDir: string | null, rel: string): string {
+  if (!checkoutDir) return "";
+  return `${checkoutDir.replace(/\/+$/, "")}/${rel}`;
+}
+
+/** One env-file entry: the path, a reveal-in-Finder button, a remove button,
+ *  and a "not found" hint when the file is missing. The entry is relative to the
+ *  checkout dir, so validation/reveal resolves it there. */
+function EnvFileRow({
+  file,
+  checkoutDir,
+  onRemove,
+}: {
+  file: string;
+  checkoutDir: string | null;
+  onRemove: () => void;
+}) {
+  const full = resolveEnvFile(checkoutDir, file);
+  const exists = usePathExists(full);
+  return (
+    <div className="env-file-row">
+      <span className={`env-file-path ${exists === false ? "jsf-tool-missing" : ""}`}>
+        {file}
+      </span>
+      <RevealButton path={full} exists={exists} />
+      <button className="btn-clear" onClick={onRemove} title="Remove">✕</button>
     </div>
   );
 }

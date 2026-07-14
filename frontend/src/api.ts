@@ -269,6 +269,15 @@ export const api = {
   openPath: (path: string) =>
     invoke<void>("open_path", { path }),
 
+  /** Whether a user-configured path exists on disk (tilde-expanded). Backs the
+   *  soft path validation in the Settings window. */
+  pathExists: (path: string) =>
+    invoke<boolean>("path_exists", { path }),
+
+  /** Reveal a path in Finder, selecting it in its parent folder (`open -R`). */
+  revealPath: (path: string) =>
+    invoke<void>("reveal_path", { path }),
+
   openInEditor: (workDir: string) =>
     invoke<void>("open_in_editor", { workDir }),
 
