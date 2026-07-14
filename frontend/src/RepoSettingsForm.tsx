@@ -30,6 +30,7 @@ export const repoSettingsUISchema = {
     { type: "Control", scope: "#/properties/identity_id", label: "Identity" },
     { type: "Control", scope: "#/properties/env_files", label: "Environment files" },
     { type: "Control", scope: "#/properties/post_spawn_commands", label: "Post-spawn commands" },
+    { type: "Control", scope: "#/properties/prompt_model", label: "Prompt model" },
     { type: "Control", scope: "#/properties/prompts" },
   ],
 } as unknown as UISchemaElement;
@@ -136,6 +137,47 @@ function WorktreePrefixControl(props: ControlProps) {
 
 export const worktreePrefixTester = rankWith(20, scopeEndsWith("worktree_prefix"));
 export const WorktreePrefixRenderer = withJsonFormsControlProps(WorktreePrefixControl);
+
+// ── Prompt model combobox ────────────────────────────────────────────────────
+// Which Claude model runs the headless drafting prompts. Deliberately NOT a
+// closed select: the value is passed verbatim to `claude --model`, which accepts
+// any tier alias or full model id. A datalist offers the common aliases as
+// suggestions while still accepting a typed-in value (e.g. a newly released
+// tier), so a new model needs no mAIestro update. Empty falls back to the schema
+// default (`haiku`), surfaced as the placeholder.
+
+/** Suggested `claude --model` aliases. Hints only — any value is accepted, so
+ *  adding a newly released tier here is optional and non-breaking. */
+const PROMPT_MODEL_SUGGESTIONS = ["haiku", "sonnet", "opus", "fable"];
+
+function PromptModelControl(props: ControlProps) {
+  const { data, handleChange, path, label, description, config } = props;
+  const listId = "prompt-model-suggestions";
+  return (
+    <div className="control jsf-control">
+      <FieldHeading label={label} description={description} />
+      <input
+        className="text-input jsf-default-hint"
+        type="text"
+        list={listId}
+        value={data ?? ""}
+        placeholder={config?.promptModelDefault ?? ""}
+        onChange={(e) => handleChange(path, e.target.value.trim() || null)}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+      />
+      <datalist id={listId}>
+        {PROMPT_MODEL_SUGGESTIONS.map((m) => (
+          <option key={m} value={m} />
+        ))}
+      </datalist>
+    </div>
+  );
+}
+
+export const promptModelTester = rankWith(20, scopeEndsWith("prompt_model"));
+export const PromptModelRenderer = withJsonFormsControlProps(PromptModelControl);
 
 // ── Env files list ──────────────────────────────────────────────────────────
 // A list with Scan / Add / Remove, preserving the existing scan flow. The array
@@ -383,6 +425,7 @@ export const repoSettingsRenderers = [
   { tester: worktreePrefixTester, renderer: WorktreePrefixRenderer },
   { tester: envFilesTester, renderer: EnvFilesRenderer },
   { tester: postSpawnCommandsTester, renderer: PostSpawnCommandsRenderer },
+  { tester: promptModelTester, renderer: PromptModelRenderer },
   { tester: promptsTester, renderer: PromptsRenderer },
   ...vanillaRenderers,
 ];
@@ -418,6 +461,7 @@ export function sanitizeSchemaForForm(
  *  the same schema). Passed to the custom renderers via JsonForms `config`. */
 export interface RepoFormDefaults {
   worktreePrefixDefault: string;
+  promptModelDefault: string;
   promptDefaults: Record<PromptKey, string>;
 }
 
@@ -430,6 +474,7 @@ export function extractFormDefaults(
   const str = (v: unknown) => (typeof v === "string" ? v : "");
   return {
     worktreePrefixDefault: str(props.worktree_prefix?.default),
+    promptModelDefault: str(props.prompt_model?.default),
     promptDefaults: {
       draft_issue: str(promptProps.draft_issue?.default),
       short_label: str(promptProps.short_label?.default),
