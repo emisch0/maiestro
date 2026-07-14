@@ -103,17 +103,7 @@ fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
 }
 
-/// Expand a leading `~` in a user-configured path to `$HOME`. Other paths pass
-/// through unchanged.
-fn expand_tilde(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        home().join(rest)
-    } else if p == "~" {
-        home()
-    } else {
-        PathBuf::from(p)
-    }
-}
+use crate::paths::expand_tilde;
 
 /// Known install locations to probe when a tool isn't on the enriched PATH — the
 /// PATH can still be minimal even after enrichment (e.g. the login shell itself
@@ -251,13 +241,5 @@ mod tests {
         // A tool with no fallbacks that won't be on any PATH resolves to itself.
         let p = resolve_tool("definitely-not-a-real-binary-xyz");
         assert_eq!(p, PathBuf::from("definitely-not-a-real-binary-xyz"));
-    }
-
-    #[test]
-    fn expand_tilde_expands_leading_home() {
-        let h = home();
-        assert_eq!(expand_tilde("~/bin/x"), h.join("bin/x"));
-        assert_eq!(expand_tilde("~"), h);
-        assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
     }
 }
