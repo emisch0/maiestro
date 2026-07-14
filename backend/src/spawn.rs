@@ -76,7 +76,7 @@ fn hash_index(s: &str, salt: u64, len: usize) -> usize {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+    let out = crate::tools::command("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -93,7 +93,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn local_branch_exists(checkout: &Path, name: &str) -> bool {
-    Command::new("git")
+    crate::tools::command("git")
         .arg("-C")
         .arg(checkout)
         .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")])
@@ -418,28 +418,13 @@ fn exclude_generated_files(work_dir: &Path) {
     let _ = std::fs::write(&exclude, body);
 }
 
-/// Locate the VS Code `code` CLI: $PATH first, then common install locations
-/// (the bundled CLI inside the .app is the most reliable when $PATH is minimal).
-fn code_cli() -> Option<PathBuf> {
-    which("code").or_else(|| {
-        [
-            "/opt/homebrew/bin/code",
-            "/usr/local/bin/code",
-            "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
-        ]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|p| p.is_file())
-    })
-}
-
 fn open_vscode(dir: &Path) -> Result<(), String> {
     // Prefer the `code` CLI so we can pass --disable-workspace-trust and skip the
     // "Do you trust the authors of the files in this folder?" prompt on every
     // freshly spawned worktree. The CLI forwards the flag even to an already
     // running VS Code, which `open -a --args` cannot.
-    if let Some(code) = code_cli() {
-        Command::new(code)
+    if crate::tools::find_tool("code").is_some() {
+        crate::tools::command("code")
             .arg("--disable-workspace-trust")
             .arg(dir)
             .spawn()
@@ -899,12 +884,6 @@ pub async fn spawn_work(repo: String, issue_number: u64, force_new: bool) -> Res
 
 // ── Create-issue-and-spawn ──────────────────────────────────────────────────────
 
-/// First existing `bin` found on $PATH.
-fn which(bin: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(bin)).find(|p| p.is_file())
-}
-
 /// The effective worktree-path prefix: the configured value, or the schema
 /// default (`/properties/worktree_prefix/default`) when unset or empty. The
 /// default lives in the JSON schema only — no hardcoded fallback here. Takes the
@@ -963,22 +942,6 @@ async fn run_post_spawn_commands(work_dir: &Path, commands: &[String]) -> Vec<St
         }
     }
     warnings
-}
-
-/// Resolve the `claude` binary: prefer $PATH, then common install locations
-/// (the app's $PATH is minimal when launched at login, so fall back to disk).
-fn claude_binary() -> PathBuf {
-    which("claude")
-        .or_else(|| {
-            [
-                home().join(".claude/local/claude"),
-                PathBuf::from("/opt/homebrew/bin/claude"),
-                PathBuf::from("/usr/local/bin/claude"),
-            ]
-            .into_iter()
-            .find(|p| p.is_file())
-        })
-        .unwrap_or_else(|| PathBuf::from("claude"))
 }
 
 /// A short, trimmed preview of some output for diagnostic error messages.
@@ -1072,7 +1035,7 @@ async fn claude_text(
     activity: Option<&ClaudeActivity>,
 ) -> Result<String, String> {
     let _active = activity.map(|a| a.begin());
-    let run = tokio::process::Command::new(claude_binary())
+    let run = crate::tools::tokio_command("claude")
         .current_dir(dir)
         .args(["-p", prompt, "--model", "haiku", "--output-format", "json", "--tools", ""])
         .output();

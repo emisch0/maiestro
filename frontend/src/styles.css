@@ -1996,6 +1996,12 @@ body {
   cursor: text;
 }
 
+/* Tool-paths: the "Not found" status line beneath an auto-resolving tool input,
+   tinted to read as a warning rather than ordinary help text. */
+.jsf-root .jsf-help.jsf-tool-missing {
+  color: var(--danger, #d66);
+}
+
 /* The worktree-prefix field surfaces its schema default as a placeholder,
    styled to read as a disabled default rather than ordinary ghost text. */
 .jsf-root input.jsf-default-hint::placeholder {
