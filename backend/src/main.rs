@@ -163,13 +163,14 @@ fn monitor_at(window: &tauri::WebviewWindow, x: i32, y: i32) -> Option<Monitor> 
         .or_else(|| window.current_monitor().ok().flatten())
 }
 
-/// Position the popover under the tray icon and clamp it fully on-screen, then
-/// apply it in a single `set_position` before `show()` — so a tray icon near the
-/// far-right edge (few other menu-bar extras) or a user-resized-wider popover
-/// isn't cropped, and the window never flashes at the wrong spot. The target is
-/// computed analytically from the cached tray rect, window size, and monitor
-/// bounds (all physical px) rather than by reading the window's live position,
-/// which lags a cycle on macOS and made the placement toggle between opens.
+/// Size the popover to fit its display, position it under the tray icon, and
+/// clamp it fully on-screen — all before `show()`, so a popover larger than the
+/// monitor (a stale/huge saved size, or a small display) is shrunk to fit rather
+/// than cropped, a tray icon near the far-right edge doesn't push it off, and the
+/// window never flashes at the wrong spot. The target is computed analytically
+/// from the cached tray rect, window size, and monitor bounds (all physical px)
+/// rather than by reading the window's live geometry back, which lags a cycle on
+/// macOS and made the placement toggle between opens.
 ///
 /// Falls back to the positioner's `move_window(TrayCenter)` when we have no
 /// cached tray rect yet (e.g. a single-instance relaunch before any tray click)
@@ -179,8 +180,25 @@ fn position_popover(window: &tauri::WebviewWindow, tray: Option<(PhysicalPositio
         let _ = window.move_window(Position::TrayCenter);
         return;
     };
-    let (win_w, win_h) = (win.width as i32, win.height as i32);
+    let (mut win_w, mut win_h) = (win.width as i32, win.height as i32);
     let (tray_x, tray_y, tray_w) = (tray_pos.x as i32, tray_pos.y as i32, tray_size.width as i32);
+
+    let monitor = monitor_at(window, tray_x, tray_y);
+
+    // Shrink to fit the display if the saved size is larger than the monitor, so
+    // the popover can never be cropped regardless of its persisted dimensions.
+    // Use the resulting size in the placement math directly — set_size, like
+    // set_position, isn't reliably readable back on the same cycle on macOS.
+    if let Some(m) = &monitor {
+        let ms = m.size();
+        let fit_w = win_w.min(ms.width as i32);
+        let fit_h = win_h.min(ms.height as i32);
+        if fit_w != win_w || fit_h != win_h {
+            let _ = window.set_size(PhysicalSize::new(fit_w as u32, fit_h as u32));
+            win_w = fit_w;
+            win_h = fit_h;
+        }
+    }
 
     // TrayCenter (macOS): center horizontally under the icon, drop down from the
     // menu bar. Mirrors the positioner's own math so the anchor is unchanged.
@@ -190,7 +208,7 @@ fn position_popover(window: &tauri::WebviewWindow, tray: Option<(PhysicalPositio
         y = tray_y;
     }
 
-    if let Some(monitor) = monitor_at(window, tray_x, tray_y) {
+    if let Some(monitor) = monitor {
         let mp = monitor.position();
         let ms = monitor.size();
         // Right/bottom limits, floored at the top-left so a window larger than
