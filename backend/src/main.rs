@@ -3,18 +3,26 @@
 
 mod app_settings;
 mod credentials;
+mod drafting;
+mod editor;
+mod gitops;
 mod health;
+mod hooks;
 mod identities;
 mod links;
 mod logging;
+mod naming;
 mod paths;
 mod plugin;
 mod plugins;
+mod pr;
 mod prompts;
+mod repo_context;
 mod repo_settings;
 mod sessions;
 mod spawn;
 mod status;
+mod theming;
 mod tools;
 
 use std::sync::Mutex;
@@ -296,21 +304,21 @@ fn main() {
             links::reveal_path,
             spawn::spawn_work,
             spawn::prepare_spawn,
-            spawn::suggest_short_title,
+            drafting::suggest_short_title,
             spawn::draft_spawn_preview,
             spawn::confirm_spawn,
             spawn::create_issue,
             spawn::create_issue_direct,
             spawn::create_issue_and_spawn,
-            spawn::open_in_editor,
-            spawn::open_repo_in_editor,
+            editor::open_in_editor,
+            editor::open_repo_in_editor,
             spawn::teardown,
-            spawn::open_accessibility_settings,
-            spawn::session_pr,
-            spawn::session_create_pr,
-            spawn::session_pr_checks,
-            spawn::session_work_state,
-            spawn::session_merge_pr,
+            editor::open_accessibility_settings,
+            pr::session_pr,
+            pr::session_create_pr,
+            pr::session_pr_checks,
+            pr::session_work_state,
+            pr::session_merge_pr,
             sessions::sessions_list,
             sessions::session_set_visibility,
             status::sessions_status_list,
@@ -351,7 +359,7 @@ fn main() {
             // Heal any worktree hooks still pointing at a now-stale binary path
             // (a torn-down/rebuilt spawner), so live status survives across
             // teardowns and `tauri dev` rebuilds. See spawn.rs / issue #35.
-            spawn::reconcile_all_session_hooks();
+            hooks::reconcile_all_session_hooks();
             match status::start_watcher(app.handle().clone()) {
                 Ok(watcher) => {
                     app.manage(Mutex::new(watcher));
