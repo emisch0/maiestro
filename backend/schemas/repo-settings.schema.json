@@ -25,7 +25,7 @@
     "env_files": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Env files relative to cloned_repo_dir to source when launching user-facing tools (VSCode, Terminal) for this repo."
+      "description": "Env files relative to cloned_repo_dir, copied into a freshly-created worktree at spawn."
     },
     "post_spawn_commands": {
       "type": "array",

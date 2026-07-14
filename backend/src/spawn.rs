@@ -901,6 +901,9 @@ async fn run_post_spawn_commands(work_dir: &Path, commands: &[String]) -> Vec<St
         let run = tokio::process::Command::new(&shell)
             .args(["-l", "-c", cmd])
             .current_dir(work_dir)
+            // Without this, a command that hits the timeout below is orphaned
+            // and keeps mutating the worktree under the live session.
+            .kill_on_drop(true)
             .output();
         // 10 minutes is generous for installs but still bounds a hung command so
         // it can't freeze the spawn forever.
@@ -1026,6 +1029,9 @@ async fn claude_text(
     let run = crate::tools::tokio_command("claude")
         .current_dir(dir)
         .args(["-p", prompt, "--model", model, "--output-format", "json", "--tools", ""])
+        // Kill the probe if the timeout below fires — a dropped future must not
+        // leave a headless claude burning quota in the background.
+        .kill_on_drop(true)
         .output();
     let output = tokio::time::timeout(std::time::Duration::from_secs(90), run)
         .await
@@ -1298,6 +1304,9 @@ pub struct SpawnPlan {
     pub color: String,
     pub emoji: String,
     pub repo_name: String,
+    /// Effective (un-expanded) worktree prefix, so the preview can show where
+    /// the worktree will actually land instead of hardcoding the default.
+    pub worktree_prefix: String,
 }
 
 /// Prepare a preview for spawning an existing issue: fetch its title/body and
@@ -1306,6 +1315,7 @@ pub struct SpawnPlan {
 pub async fn prepare_spawn(repo: String, issue_number: u64) -> Result<SpawnPlan, String> {
     crate::log_invoke!("prepare_spawn", repo = %repo, issue = issue_number);
     let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
+    let worktree_prefix = effective_worktree_prefix(settings.worktree_prefix.as_deref());
     let identity_id = settings
         .identity_id
         .ok_or_else(|| "No identity assigned to this repo. Set one in Settings → Repo.".to_string())?;
@@ -1324,6 +1334,7 @@ pub async fn prepare_spawn(repo: String, issue_number: u64) -> Result<SpawnPlan,
         color: color.to_string(),
         emoji: emoji.to_string(),
         repo_name,
+        worktree_prefix,
     })
 }
 
@@ -1355,6 +1366,8 @@ pub async fn draft_spawn_preview(
             let seed = format!("new-{}", slugify(&short_title, 25));
             let (color, emoji) = pick_theme(&seed);
             let repo_name = repo.split('/').next_back().unwrap_or(&repo).to_string();
+            let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
+            let worktree_prefix = effective_worktree_prefix(settings.worktree_prefix.as_deref());
             Ok(DraftPreviewOutcome::Drafted(SpawnPlan {
                 repo,
                 issue_number: None,
@@ -1364,6 +1377,7 @@ pub async fn draft_spawn_preview(
                 color: color.to_string(),
                 emoji: emoji.to_string(),
                 repo_name,
+                worktree_prefix,
             }))
         }
         DraftStep::NeedsConfirmation { message } => Ok(DraftPreviewOutcome::NeedsConfirmation { message }),
@@ -1683,8 +1697,15 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir));
         let under_prefix = parent.to_string_lossy().starts_with(&*expanded.to_string_lossy());
+        // Only remove the wrapper once it's empty: the wrapper is keyed by
+        // `<issue>-<slug>` alone, so two repos with an identically-slugged issue
+        // share it — removing it while the sibling's worktree is inside would
+        // destroy that repo's work.
+        let empty = std::fs::read_dir(parent).map(|mut d| d.next().is_none()).unwrap_or(false);
         if !has_dotdot && under_prefix && parent.exists() {
-            if let Err(e) = std::fs::remove_dir_all(parent) {
+            if !empty {
+                tracing::info!(dir = %parent.display(), "wrapper dir not empty after teardown; leaving it in place");
+            } else if let Err(e) = std::fs::remove_dir_all(parent) {
                 tracing::warn!(dir = %parent.display(), error = %e, "could not remove worktree wrapper dir during teardown");
             }
         }
@@ -1937,6 +1958,7 @@ fn merge_pill_state(mergeable_state: &str) -> (String, bool) {
 /// the frontend also degrades silently (no indicator).
 #[tauri::command]
 pub async fn session_pr_checks(session_id: String) -> Result<Option<PrChecks>, String> {
+    crate::log_invoke_debug!("session_pr_checks", session_id = %session_id);
     let Some(session) = crate::sessions::get(&session_id) else {
         return Ok(None);
     };
@@ -2025,11 +2047,13 @@ pub async fn session_work_state(session_id: String) -> Result<Option<WorkState>,
 /// (checks still running, GitHub recomputing) return the PR unmerged so the
 /// frontend poll retries.
 #[tauri::command]
+#[tracing::instrument(name = "session_merge_pr", skip_all, fields(session = %session_id))]
 pub async fn session_merge_pr(
     app: tauri::AppHandle,
     session_id: String,
     request_id: String,
 ) -> Result<PrLink, String> {
+    crate::log_invoke!("session_merge_pr", session_id = %session_id, request_id = %request_id);
     let session = crate::sessions::get(&session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
     let work_dir = PathBuf::from(&session.work_dir);

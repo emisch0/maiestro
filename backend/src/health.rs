@@ -327,6 +327,8 @@ async fn check_claude(repo: &str, model: &str, cwd: Option<&std::path::Path>) ->
         "",
     ]);
     log_command(repo, &format!("claude -p 'Reply with exactly: ok' --model {model} --output-format json --tools ''"));
+    // Kill the probe if the timeout fires so it doesn't linger in the background.
+    cmd.kill_on_drop(true);
     let run = tokio::time::timeout(std::time::Duration::from_secs(60), cmd.output()).await;
 
     let output = match run {

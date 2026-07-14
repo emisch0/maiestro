@@ -15,10 +15,12 @@ export interface PromptOverrides {
 }
 
 export interface RepoSettings {
+  repo: string;
   cloned_repo_dir: string | null;
   worktree_prefix: string | null;
   env_files: string[];
   post_spawn_commands: string[];
+  prompt_model: string | null;
   identity_id: string | null;
   hidden: HideState | null;
   prompts: PromptOverrides;
@@ -47,10 +49,6 @@ export interface SpawnResult {
   warnings: string[];
 }
 
-export type CreateAndSpawnOutcome =
-  | ({ status: "spawned" } & SpawnResult)
-  | { status: "needs_confirmation"; message: string };
-
 export type CreateIssueOutcome =
   | { status: "created"; number: number; issue_url: string; warnings: string[] }
   | { status: "needs_confirmation"; message: string };
@@ -67,6 +65,8 @@ export interface SpawnPlan {
   emoji: string;
   /** Local cloned repo dir name, for rendering the worktree path. */
   repo_name: string;
+  /** Effective (un-expanded) worktree prefix, for rendering the worktree path. */
+  worktree_prefix: string;
 }
 
 export type DraftPreviewOutcome =
@@ -96,6 +96,7 @@ export interface Session {
   issue_number: number;
   issue_url: string;
   branch: string;
+  default_branch: string;
   work_dir: string;
   cloned_repo_dir: string;
   session_title: string;
@@ -131,7 +132,7 @@ export interface PrChecks {
 export interface StatusRecord {
   /** Workspace id (= Session.id). */
   workspace: string;
-  /** One of "running", "busy", "needs_you", "idle", "ended". */
+  /** One of "creating", "running", "busy", "needs_you", "idle", "ended". */
   state: string;
   session_id?: string;
   cwd?: string;
@@ -170,16 +171,18 @@ export type Theme = "light" | "dark" | "system";
 /** Explicit paths for the CLIs mAIestro invokes directly. Each null/empty =
  *  auto-resolve (login-shell PATH → which → known locations). */
 export interface ToolPaths {
-  claude: string | null;
-  git: string | null;
-  code: string | null;
+  claude?: string | null;
+  git?: string | null;
+  code?: string | null;
 }
 
 /** Global, app-wide settings (`~/.maiestro/settings.json`). `window` /
  *  `settings_window` are machine-managed and not edited in the form. */
 export interface AppSettings {
-  theme: Theme | null;
-  tool_paths: ToolPaths | null;
+  /** Fields are omitted from the wire entirely when unset (serde skips `None`),
+   *  so they are optional here, not just nullable. */
+  theme?: Theme | null;
+  tool_paths?: ToolPaths | null;
   /** Launch mAIestro automatically at login (per-user LaunchAgent). null = false. */
   launch_at_login?: boolean | null;
   window?: { width: number; height: number } | null;
@@ -220,7 +223,6 @@ export type CredentialScope = { kind: "identity"; identity_id: string };
 export interface CredentialTypeDto {
   type_id: string;
   display_name: string;
-  env_var: string;
   description: string;
 }
 
@@ -275,9 +277,6 @@ export const api = {
   getDefaultIdentity: () =>
     invoke<string | null>("identities_get_default"),
 
-  setDefaultIdentity: (identityId: string) =>
-    invoke<void>("identities_set_default", { identityId }),
-
   identitiesAdd: (identityId: string) =>
     invoke<void>("identities_add", { identityId }),
 
@@ -312,9 +311,6 @@ export const api = {
   openRepoInEditor: (repo: string) =>
     invoke<void>("open_repo_in_editor", { repo }),
 
-  spawnWork: (repo: string, issueNumber: number, forceNew = false) =>
-    invoke<SpawnResult>("spawn_work", { repo, issueNumber, forceNew }),
-
   prepareSpawn: (repo: string, issueNumber: number) =>
     invoke<SpawnPlan>("prepare_spawn", { repo, issueNumber }),
 
@@ -327,14 +323,8 @@ export const api = {
   confirmSpawn: (repo: string, edits: SpawnEdits, forceNew = false) =>
     invoke<SpawnResult>("confirm_spawn", { repo, edits, forceNew }),
 
-  createIssue: (repo: string, idea: string, requestId: string, useRawFallback = false) =>
-    invoke<CreateIssueOutcome>("create_issue", { repo, idea, useRawFallback, requestId }),
-
   createIssueDirect: (repo: string, title: string, body: string) =>
     invoke<CreateIssueOutcome>("create_issue_direct", { repo, title, body }),
-
-  createIssueAndSpawn: (repo: string, idea: string, requestId: string, useRawFallback = false, forceNew = false) =>
-    invoke<CreateAndSpawnOutcome>("create_issue_and_spawn", { repo, idea, useRawFallback, forceNew, requestId }),
 
   sessionsList: () =>
     invoke<Session[]>("sessions_list"),
@@ -374,9 +364,6 @@ export const api = {
 
   getTheme: () =>
     invoke<Theme>("app_settings_get_theme"),
-
-  setTheme: (theme: Theme) =>
-    invoke<void>("app_settings_set_theme", { theme }),
 
   /** The hand-written JSON Schema for the global settings, for the Settings
    *  window's JSON Forms renderer. */
