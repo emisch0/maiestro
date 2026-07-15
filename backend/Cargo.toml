@@ -27,3 +27,12 @@ jsonschema = { version = "0.46", default-features = false }
 
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
+# Test-only: enable the runtime + `#[tokio::test]` macro for async tests that
+# exercise the real `git` subprocess helpers. Feature-unified into the test build
+# only (resolver v2), so the app binary's tokio surface is unchanged.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+# Test-only HTTP mock server for the GitHub REST client (base-URL injected via
+# GitHub::for_test), covering ETag caching, PAT scope derivation, and the PR
+# lifecycle with canned responses — no network, no Keychain.
+wiremock = "0.6"

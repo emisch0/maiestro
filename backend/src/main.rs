@@ -23,6 +23,8 @@ mod schema;
 mod sessions;
 mod spawn;
 mod status;
+#[cfg(test)]
+mod testutil;
 mod theming;
 mod tools;
 

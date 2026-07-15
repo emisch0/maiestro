@@ -116,7 +116,7 @@ export const ClonedRepoDirRenderer = withJsonFormsControlProps(ClonedRepoDirCont
 /** The directory a worktree prefix lives in. The prefix itself is a string
  *  base (`~/src/work-`) that's never a real path — the parent (`~/src`) is what
  *  must exist, so that's what we validate and reveal. */
-function prefixParentDir(prefix: string): string {
+export function prefixParentDir(prefix: string): string {
   const slash = prefix.lastIndexOf("/");
   return slash >= 0 ? prefix.slice(0, slash) : "";
 }
@@ -290,7 +290,7 @@ function EnvFilesControl(props: ControlProps) {
  *  against the repo's cloned repo dir — that's where the backend reads and copies
  *  them from. Returns "" when there's no cloned repo dir to resolve against
  *  (can't validate). */
-function resolveEnvFile(clonedRepoDir: string | null, rel: string): string {
+export function resolveEnvFile(clonedRepoDir: string | null, rel: string): string {
   if (!clonedRepoDir) return "";
   return `${clonedRepoDir.replace(/\/+$/, "")}/${rel}`;
 }

@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import svgr from "vite-plugin-svgr";
@@ -18,5 +19,17 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+  },
+  // Vitest config. Tests live beside the code under frontend/src (*.test.ts[x]).
+  // jsdom gives component tests a DOM; globals lets tests use describe/it/expect
+  // without importing them; the setup file wires @testing-library/jest-dom
+  // matchers and clears mocked Tauri IPC between tests.
+  // Paths here resolve against `root` ("frontend"), so they start at `src/`.
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: ["./src/test/setup.ts"],
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    css: false,
   },
 });

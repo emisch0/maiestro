@@ -34,7 +34,15 @@ pub struct GitHub {
     /// The identity this client authenticates as — used only to scope the ETag
     /// cache so two identities never share a cached body for the same URL.
     identity_id: String,
+    /// API root, e.g. `https://api.github.com`. A field (not a hardcoded literal
+    /// at each call site) so tests can point the client at a local `wiremock`
+    /// server. Every request URL is built through [`GitHub::api`].
+    base_url: String,
 }
+
+/// The real GitHub REST API root. Every production client uses this; only tests
+/// override it (via [`GitHub::for_test`]).
+const DEFAULT_BASE_URL: &str = "https://api.github.com";
 
 /// Process-wide ETag cache for conditional GETs: key → (etag, raw JSON body).
 /// Keyed by identity + URL so tokens don't share cached bodies. Serving a `304
@@ -65,7 +73,33 @@ impl GitHub {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| e.to_string())?;
-        Ok(Self { client, token, identity_id: identity_id.to_string() })
+        Ok(Self {
+            client,
+            token,
+            identity_id: identity_id.to_string(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+        })
+    }
+
+    /// A test client pointed at `base_url` (a local `wiremock` server) with a
+    /// dummy token and identity. Lets `wiremock` integration tests exercise the
+    /// real request/response/ETag/error logic with canned responses — no network,
+    /// no Keychain. The `identity_id` is randomized per call so the process-wide
+    /// ETag cache never bleeds between tests.
+    #[cfg(test)]
+    pub fn for_test(base_url: &str) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            token: "test-token".to_string(),
+            identity_id: format!("test-{}", uuid::Uuid::new_v4()),
+            base_url: base_url.trim_end_matches('/').to_string(),
+        }
+    }
+
+    /// Build a full request URL from an API `path` (which must start with `/`),
+    /// rooted at this client's [`base_url`](Self::base_url).
+    fn api(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
     }
 
     /// A request builder pre-loaded with auth and the standard GitHub headers.
@@ -159,7 +193,7 @@ impl GitHub {
 
     /// Login of the token's owner (`GET /user`).
     pub async fn authenticated_login(&self) -> Result<String, String> {
-        let v = self.get_json("https://api.github.com/user").await?;
+        let v = self.get_json(&self.api("/user")).await?;
         v["login"].as_str().map(str::to_string).ok_or_else(|| "could not resolve token user".to_string())
     }
 
@@ -171,7 +205,7 @@ impl GitHub {
     /// `permissions` object instead). See #93.
     pub async fn check_token(&self) -> Result<TokenInfo, String> {
         let resp = self
-            .send(self.req(reqwest::Method::GET, "https://api.github.com/user"))
+            .send(self.req(reqwest::Method::GET, &self.api("/user")))
             .await
             .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
@@ -200,16 +234,16 @@ impl GitHub {
 
     /// Repository metadata, including `default_branch`. `repo` is "owner/name".
     pub async fn repo(&self, repo: &str) -> Result<serde_json::Value, String> {
-        self.get_json(&format!("https://api.github.com/repos/{repo}")).await
+        self.get_json(&self.api(&format!("/repos/{repo}"))).await
     }
 
     /// A single issue. `repo` is "owner/name".
     pub async fn issue(&self, repo: &str, number: u64) -> Result<serde_json::Value, String> {
-        self.get_json(&format!("https://api.github.com/repos/{repo}/issues/{number}")).await
+        self.get_json(&self.api(&format!("/repos/{repo}/issues/{number}"))).await
     }
 
     pub async fn add_assignees(&self, repo: &str, number: u64, assignees: &[String]) -> Result<(), String> {
-        let url = format!("https://api.github.com/repos/{repo}/issues/{number}/assignees");
+        let url = self.api(&format!("/repos/{repo}/issues/{number}/assignees"));
         let resp = self.send(self.req(reqwest::Method::POST, &url)
             .json(&serde_json::json!({ "assignees": assignees })))
             .await.map_err(|e| e.to_string())?;
@@ -219,9 +253,9 @@ impl GitHub {
     /// All pull requests (any state) whose head is `branch` on `repo` ("owner/name").
     pub async fn pulls_for_branch(&self, repo: &str, branch: &str) -> Result<Vec<serde_json::Value>, String> {
         let owner = repo.split('/').next().unwrap_or("");
-        let url = format!(
-            "https://api.github.com/repos/{repo}/pulls?head={owner}:{branch}&state=all&per_page=100"
-        );
+        let url = self.api(&format!(
+            "/repos/{repo}/pulls?head={owner}:{branch}&state=all&per_page=100"
+        ));
         let v = self.get_json(&url).await?;
         Ok(v.as_array().cloned().unwrap_or_default())
     }
@@ -232,16 +266,16 @@ impl GitHub {
     /// been deleted (GitHub's default on merge) — making it the reliable signal
     /// for "this work already landed via a PR".
     pub async fn pulls_for_commit(&self, repo: &str, sha: &str) -> Result<Vec<serde_json::Value>, String> {
-        let url = format!(
-            "https://api.github.com/repos/{repo}/commits/{sha}/pulls?per_page=100"
-        );
+        let url = self.api(&format!(
+            "/repos/{repo}/commits/{sha}/pulls?per_page=100"
+        ));
         let v = self.get_json(&url).await?;
         Ok(v.as_array().cloned().unwrap_or_default())
     }
 
     /// Open a new issue and return its number. `repo` is "owner/name".
     pub async fn create_issue(&self, repo: &str, title: &str, body: &str) -> Result<u64, String> {
-        let url = format!("https://api.github.com/repos/{repo}/issues");
+        let url = self.api(&format!("/repos/{repo}/issues"));
         let resp = self.send(self.req(reqwest::Method::POST, &url)
             .json(&serde_json::json!({ "title": title, "body": body })))
             .await.map_err(|e| e.to_string())?;
@@ -256,7 +290,7 @@ impl GitHub {
 
     /// Update an existing issue's title and body. `repo` is "owner/name".
     pub async fn update_issue(&self, repo: &str, number: u64, title: &str, body: &str) -> Result<(), String> {
-        let url = format!("https://api.github.com/repos/{repo}/issues/{number}");
+        let url = self.api(&format!("/repos/{repo}/issues/{number}"));
         let resp = self.send(self.req(reqwest::Method::PATCH, &url)
             .json(&serde_json::json!({ "title": title, "body": body })))
             .await.map_err(|e| e.to_string())?;
@@ -264,7 +298,7 @@ impl GitHub {
     }
 
     pub async fn create_comment(&self, repo: &str, number: u64, body: &str) -> Result<(), String> {
-        let url = format!("https://api.github.com/repos/{repo}/issues/{number}/comments");
+        let url = self.api(&format!("/repos/{repo}/issues/{number}/comments"));
         let resp = self.send(self.req(reqwest::Method::POST, &url)
             .json(&serde_json::json!({ "body": body })))
             .await.map_err(|e| e.to_string())?;
@@ -282,7 +316,7 @@ impl GitHub {
         body: &str,
         draft: bool,
     ) -> Result<serde_json::Value, String> {
-        let url = format!("https://api.github.com/repos/{repo}/pulls");
+        let url = self.api(&format!("/repos/{repo}/pulls"));
         let resp = self.send(self.req(reqwest::Method::POST, &url)
             .json(&serde_json::json!({
                 "title": title,
@@ -302,7 +336,7 @@ impl GitHub {
     /// fields the merge flow needs: `mergeable_state`, the head `sha`, `draft`,
     /// and the GraphQL `node_id` used to mark a draft ready for review.
     pub async fn pull(&self, repo: &str, number: u64) -> Result<serde_json::Value, String> {
-        self.get_json(&format!("https://api.github.com/repos/{repo}/pulls/{number}")).await
+        self.get_json(&self.api(&format!("/repos/{repo}/pulls/{number}"))).await
     }
 
     /// Mark a draft pull request ready for review. REST has no endpoint for this,
@@ -312,7 +346,7 @@ impl GitHub {
         let query = "mutation($id: ID!) { \
             markPullRequestReadyForReview(input: { pullRequestId: $id }) { \
                 pullRequest { isDraft } } }";
-        let rb = self.req(reqwest::Method::POST, "https://api.github.com/graphql")
+        let rb = self.req(reqwest::Method::POST, &self.api("/graphql"))
             .json(&serde_json::json!({ "query": query, "variables": { "id": node_id } }));
         let resp = self.send(rb).await.map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
@@ -329,7 +363,7 @@ impl GitHub {
     /// Merge a pull request. `repo` is "owner/name"; `method` is one of
     /// "merge" / "squash" / "rebase".
     pub async fn merge_pull(&self, repo: &str, number: u64, method: &str) -> Result<(), String> {
-        let url = format!("https://api.github.com/repos/{repo}/pulls/{number}/merge");
+        let url = self.api(&format!("/repos/{repo}/pulls/{number}/merge"));
         let rb = self.req(reqwest::Method::PUT, &url)
             .json(&serde_json::json!({ "merge_method": method }));
         let resp = self.send(rb).await.map_err(|e| e.to_string())?;
@@ -356,7 +390,7 @@ pub async fn github_list_repos(identity_id: String) -> Result<Vec<RepoItem>, Str
 
     loop {
         let resp = gh
-            .send(gh.req(reqwest::Method::GET, "https://api.github.com/user/repos")
+            .send(gh.req(reqwest::Method::GET, &gh.api("/user/repos"))
                 .query(&[
                     ("per_page", "100"),
                     ("page", &page.to_string()),
@@ -426,7 +460,7 @@ pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec
 
     loop {
         let resp = gh
-            .send(gh.req(reqwest::Method::GET, &format!("https://api.github.com/repos/{owner}/{name}/issues"))
+            .send(gh.req(reqwest::Method::GET, &gh.api(&format!("/repos/{owner}/{name}/issues")))
                 .query(&[
                     ("state", "open"),
                     ("sort", "updated"),
@@ -467,7 +501,7 @@ pub async fn github_list_issues(identity_id: String, repo: String) -> Result<Vec
 
     for parent in parents {
         let resp = gh
-            .send(gh.req(reqwest::Method::GET, &format!("https://api.github.com/repos/{owner}/{name}/issues/{parent}/sub_issues"))
+            .send(gh.req(reqwest::Method::GET, &gh.api(&format!("/repos/{owner}/{name}/issues/{parent}/sub_issues")))
                 .query(&[("per_page", "100")]))
             .await
             .map_err(|e| e.to_string())?;
@@ -616,5 +650,183 @@ mod tests {
         let mut visited = HashSet::new();
         let node = build_issue_node(1, &meta, &children_of, &mut visited).unwrap();
         assert!(node.children.is_empty());
+    }
+
+    // ── wiremock integration tests ─────────────────────────────────────────────
+    //
+    // These drive the real reqwest client against a local mock server (base URL
+    // injected via `GitHub::for_test`), covering the genuinely risky HTTP logic —
+    // ETag conditional GETs, classic-vs-fine-grained PAT scope derivation, the
+    // error-message path, and the PR lifecycle — with no network and no Keychain.
+
+    use serde_json::json;
+    use wiremock::matchers::{body_json, header, header_exists, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn get_json_serves_304_from_etag_cache() {
+        let server = MockServer::start().await;
+        // A conditional re-request (If-None-Match present) gets 304 with no body —
+        // higher priority so it wins over the plain 200 mock when the header is set.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .and(header_exists("if-none-match"))
+            .respond_with(ResponseTemplate::new(304))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        // First (unconditional) request: 200 + body + ETag, which gets cached.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"v1\"")
+                    .set_body_json(json!({ "default_branch": "main" })),
+            )
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let gh = GitHub::for_test(&server.uri());
+        let first = gh.repo("o/r").await.unwrap();
+        assert_eq!(first["default_branch"], "main");
+        // Second call sends If-None-Match, receives 304, and returns the cached
+        // body verbatim — identical to the first result.
+        let second = gh.repo("o/r").await.unwrap();
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn check_token_reads_classic_pat_scopes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("X-OAuth-Scopes", "repo, read:org")
+                    .set_body_json(json!({ "login": "octocat" })),
+            )
+            .mount(&server)
+            .await;
+
+        let info = GitHub::for_test(&server.uri()).check_token().await.unwrap();
+        assert_eq!(info.login, "octocat");
+        assert_eq!(info.scopes, vec!["repo".to_string(), "read:org".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn check_token_fine_grained_has_no_scopes() {
+        // Fine-grained PATs omit X-OAuth-Scopes; write access is later derived from
+        // the repo `permissions.push` flag instead of the scope list.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "login": "fg-user" })))
+            .mount(&server)
+            .await;
+
+        let info = GitHub::for_test(&server.uri()).check_token().await.unwrap();
+        assert_eq!(info.login, "fg-user");
+        assert!(info.scopes.is_empty(), "no scopes header → empty scope list");
+    }
+
+    #[tokio::test]
+    async fn error_response_surfaces_github_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/missing"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })))
+            .mount(&server)
+            .await;
+
+        let err = GitHub::for_test(&server.uri()).repo("o/missing").await.unwrap_err();
+        assert!(err.contains("Not Found"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn create_issue_returns_number_and_sends_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/issues"))
+            .and(body_json(json!({ "title": "Add foo", "body": "details" })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "number": 123 })))
+            .mount(&server)
+            .await;
+
+        let n = GitHub::for_test(&server.uri())
+            .create_issue("o/r", "Add foo", "details")
+            .await
+            .unwrap();
+        assert_eq!(n, 123);
+    }
+
+    #[tokio::test]
+    async fn pr_lifecycle_create_fetch_merge() {
+        let server = MockServer::start().await;
+        // create_pull
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(json!({ "number": 7, "node_id": "PR_kw", "draft": false })),
+            )
+            .mount(&server)
+            .await;
+        // pull
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/7"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "number": 7, "mergeable_state": "clean" })),
+            )
+            .mount(&server)
+            .await;
+        // merge_pull
+        Mock::given(method("PUT"))
+            .and(path("/repos/o/r/pulls/7/merge"))
+            .and(body_json(json!({ "merge_method": "squash" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "merged": true })))
+            .mount(&server)
+            .await;
+
+        let gh = GitHub::for_test(&server.uri());
+        let pr = gh.create_pull("o/r", "T", "feature/x", "main", "B", false).await.unwrap();
+        assert_eq!(pr["number"], 7);
+        let fetched = gh.pull("o/r", 7).await.unwrap();
+        assert_eq!(fetched["mergeable_state"], "clean");
+        gh.merge_pull("o/r", 7, "squash").await.expect("merge succeeds");
+    }
+
+    #[tokio::test]
+    async fn for_identity_resolves_token_from_store() {
+        use crate::credentials::{CredentialScope, CredentialStore};
+
+        let id = format!("gh-id-{}", uuid::Uuid::new_v4());
+        let scope = CredentialScope::Identity { identity_id: id.clone() };
+
+        // No token yet → a clear, user-facing error (not a panic).
+        assert!(GitHub::for_identity(&id).await.is_err());
+
+        // Seed a token via the (test-backed) store; now the client constructs.
+        CredentialStore::set("github_token", &scope, "ghp_x").unwrap();
+        let gh = GitHub::for_identity(&id).await.expect("client builds once token exists");
+        // Production clients hit the real API root.
+        assert_eq!(gh.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[tokio::test]
+    async fn requests_carry_bearer_auth() {
+        // The token rides in the Authorization header (and only there). Assert the
+        // client actually sends it so the choke-point auth can't silently regress.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .and(header("authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "login": "octocat" })))
+            .mount(&server)
+            .await;
+
+        let login = GitHub::for_test(&server.uri()).authenticated_login().await.unwrap();
+        assert_eq!(login, "octocat");
     }
 }

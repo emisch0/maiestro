@@ -1,0 +1,46 @@
+# Frontend CI — runs on every pull request and on pushes to main.
+#
+# Scope is deliberately the frontend only (typecheck + vitest) on an ubuntu
+# runner. The backend is a Tauri/objc crate that only builds on macOS, and macOS
+# minutes bill at 10× on the free private-repo plan — so `cargo test`/`cargo
+# clippy` are NOT run here. They are a LOCAL gate: run before merging as part of
+# the normal dev/review loop (see issue #111). This workflow is the natural
+# enforcement point for the PR-only-main rule.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same branch/PR cancels the in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (typecheck + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
