@@ -432,4 +432,82 @@ mod tests {
         let err = parse_and_validate("{ not json", "settings.json").expect_err("must fail");
         assert!(err.contains("not valid JSON"), "got: {err}");
     }
+
+    // ── Filesystem-level tests (MAIESTRO_HOME-injected temp root) ───────────────
+    //
+    // These exercise the real load → validate → atomic-write cycle against files,
+    // which `parse_and_validate`'s pure tests above can't reach. `TempHome`
+    // redirects `maiestro_dir` at a tempdir, so nothing touches `~/.maiestro`.
+
+    use crate::testutil::TempHome;
+
+    /// `load_validated`, outcome 1: a missing file yields defaults, not an error.
+    #[test]
+    fn get_missing_file_returns_defaults() {
+        let _home = TempHome::new();
+        let settings = repo_settings_get("acme/widget".into()).expect("missing file → defaults");
+        assert_eq!(settings.repo, "acme/widget");
+        assert!(settings.identity_id.is_none());
+        assert!(settings.env_files.is_empty());
+    }
+
+    /// `load_validated`, outcome 3 (valid), via a real set → get round-trip. Also
+    /// proves `repo_settings_set` stamps the repo and the file lands on disk.
+    #[test]
+    fn set_then_get_roundtrips_through_file() {
+        let home = TempHome::new();
+        let mut settings = RepoSettings::default_for("acme/widget");
+        settings.cloned_repo_dir = Some("~/src/widget".into());
+        settings.env_files = vec![".env".into(), ".env.local".into()];
+        settings.identity_id = Some("work".into());
+
+        repo_settings_set("acme/widget".into(), settings).expect("set should persist");
+
+        // The file exists under the injected root with the mangled name.
+        assert!(home.join("repos/acme-widget.json").exists(), "settings file should be written");
+
+        let loaded = repo_settings_get("acme/widget".into()).expect("get should load");
+        assert_eq!(loaded.cloned_repo_dir.as_deref(), Some("~/src/widget"));
+        assert_eq!(loaded.env_files, vec![".env".to_string(), ".env.local".into()]);
+        assert_eq!(loaded.identity_id.as_deref(), Some("work"));
+        assert_eq!(loaded.repo, "acme/widget", "set must stamp the repo field");
+    }
+
+    /// `load_validated`, outcome 2: a present-but-invalid file is a loud error
+    /// naming the file and field — never a silent fall back to defaults.
+    #[test]
+    fn get_invalid_file_errors_loudly() {
+        let home = TempHome::new();
+        std::fs::create_dir_all(home.join("repos")).unwrap();
+        std::fs::write(
+            home.join("repos/acme-widget.json"),
+            json!({ "env_files": "not-an-array" }).to_string(),
+        )
+        .unwrap();
+
+        let err = repo_settings_get("acme/widget".into()).expect_err("invalid file must error");
+        assert!(err.contains("env_files"), "error should name the field: {err}");
+    }
+
+    /// `repo_set_visibility` errors on an unparseable file rather than clobbering
+    /// it with defaults (issue #101 behavior).
+    #[test]
+    fn set_visibility_refuses_to_clobber_bad_file() {
+        let home = TempHome::new();
+        std::fs::create_dir_all(home.join("repos")).unwrap();
+        let path = home.join("repos/acme-widget.json");
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let err = repo_set_visibility("acme/widget".into(), None).expect_err("must refuse");
+        assert!(err.contains("not valid JSON"), "got: {err}");
+        // The bad file is left intact, not overwritten with defaults.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    /// `repo_remove` is idempotent — removing a never-tracked repo is Ok.
+    #[test]
+    fn remove_missing_is_ok() {
+        let _home = TempHome::new();
+        repo_remove("never/tracked".into()).expect("removing a missing repo is idempotent");
+    }
 }

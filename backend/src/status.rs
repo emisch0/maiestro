@@ -677,4 +677,114 @@ mod tests {
         let empty_msg = serde_json::json!({ "message": "   " });
         assert_eq!(resolve_state("notification", &empty_msg), ("needs_you".into(), None));
     }
+
+    // ── Filesystem-level tests (MAIESTRO_HOME-injected temp root) ───────────────
+    //
+    // The pure-logic tests above cover `next_last_error`/`resolve_state`; these
+    // drive the actual on-disk read-merge-write cycle through `TempHome`, so
+    // nothing touches `~/.maiestro/status/`.
+
+    use crate::testutil::TempHome;
+
+    fn record(ws: &str, state: &str) -> StatusRecord {
+        StatusRecord {
+            workspace: ws.into(),
+            state: state.into(),
+            session_id: None,
+            cwd: None,
+            detail: None,
+            last_error: None,
+            ts: "t".into(),
+        }
+    }
+
+    // A written record round-trips through the file and the temp root actually
+    // holds the file (proving the MAIESTRO_HOME override reaches status_dir).
+    #[test]
+    fn write_then_read_roundtrips() {
+        let home = TempHome::new();
+        write_record_atomic(&record("8-add-foo", "busy")).unwrap();
+        assert!(home.join("status/8-add-foo.json").exists());
+        let got = read_record("8-add-foo").expect("record should read back");
+        assert_eq!(got.state, "busy");
+        assert!(!home.join("status/.8-add-foo.json.tmp").exists(), "temp must be renamed away");
+    }
+
+    // creating → clear_creating removes the file only while still `creating`.
+    #[test]
+    fn clear_creating_only_removes_creating() {
+        let _home = TempHome::new();
+        write_creating("9-bar");
+        assert_eq!(read_record("9-bar").unwrap().state, "creating");
+        clear_creating("9-bar");
+        assert!(read_record("9-bar").is_none(), "creating marker should be removed");
+
+        // A non-creating record is left untouched by clear_creating.
+        write_record_atomic(&record("9-bar", "busy")).unwrap();
+        clear_creating("9-bar");
+        assert_eq!(read_record("9-bar").unwrap().state, "busy");
+    }
+
+    // clear_session_error rewrites the record without last_error; idempotent when
+    // already clear or missing.
+    #[test]
+    fn clear_session_error_drops_last_error() {
+        let _home = TempHome::new();
+        let mut rec = record("10-baz", "idle");
+        rec.last_error = Some(ToolError {
+            tool: Some("Bash".into()),
+            message: "boom".into(),
+            ts: "t".into(),
+            count: 2,
+            surfaced: true,
+        });
+        write_record_atomic(&rec).unwrap();
+
+        clear_session_error("10-baz".into());
+        let got = read_record("10-baz").expect("record should survive");
+        assert!(got.last_error.is_none(), "last_error should be cleared");
+        assert_eq!(got.state, "idle", "state is preserved");
+
+        // No-op paths: already-clear record and a missing one don't panic.
+        clear_session_error("10-baz".into());
+        clear_session_error("does-not-exist".into());
+    }
+
+    // write_spawn_error records a surfaced last_error the popover will show.
+    #[test]
+    fn spawn_error_is_surfaced() {
+        let _home = TempHome::new();
+        write_spawn_error("11-broken", "git worktree add failed");
+        let got = read_record("11-broken").expect("record written");
+        let err = got.last_error.expect("last_error present");
+        assert!(err.surfaced, "spawn errors surface immediately");
+        assert_eq!(err.message, "git worktree add failed");
+    }
+
+    // run_hook_cli end-to-end: the read-merge-write cycle preserves a pending
+    // error across a carrying event, exactly as the hook helper does live.
+    #[test]
+    fn hook_cli_merges_prior_error_forward() {
+        let _home = TempHome::new();
+        // Seed a pending (unsurfaced) failure.
+        let mut seed = record("12-merge", "busy");
+        seed.last_error = Some(ToolError {
+            tool: Some("Bash".into()),
+            message: "boom".into(),
+            ts: "t".into(),
+            count: 1,
+            surfaced: false,
+        });
+        write_record_atomic(&seed).unwrap();
+
+        // A `busy` (PreToolUse) event carries the pending error forward.
+        run_hook_cli(&["busy".into(), "--workspace".into(), "12-merge".into()]);
+        let after = read_record("12-merge").expect("record after hook");
+        assert!(after.last_error.is_some(), "pending error carried forward on busy");
+
+        // A `prompt` (new turn) clears it.
+        run_hook_cli(&["prompt".into(), "--workspace".into(), "12-merge".into()]);
+        let cleared = read_record("12-merge").expect("record after prompt");
+        assert!(cleared.last_error.is_none(), "new turn clears the error");
+    }
 }

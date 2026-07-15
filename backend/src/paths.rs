@@ -12,9 +12,29 @@ pub fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
 }
 
-/// A `~/.maiestro/<rel>` path — the app's config/state root under the home dir.
+/// Environment variable that overrides the config/state root. When set (and
+/// non-empty), its value — tilde-expanded — replaces `~/.maiestro` as the root
+/// under which every stateful module lives (`sessions/`, `status/`, `repos/`,
+/// `settings.json`, `identities.json`). This is the single seam that makes the
+/// whole load/validate/atomic-write layer hermetically testable: point it at a
+/// tempdir and a test can never touch the developer's real config. Read at call
+/// time (not cached) so a test can set it, run, and restore.
+pub const MAIESTRO_HOME_ENV: &str = "MAIESTRO_HOME";
+
+/// The app's config/state root: `$MAIESTRO_HOME` if set and non-empty, else
+/// `~/.maiestro`. Every path under the root goes through [`maiestro_dir`].
+pub fn maiestro_home() -> PathBuf {
+    match std::env::var(MAIESTRO_HOME_ENV) {
+        Ok(v) if !v.is_empty() => expand_tilde(&v),
+        _ => home().join(".maiestro"),
+    }
+}
+
+/// A `<root>/<rel>` path under the app's config/state root — `~/.maiestro/<rel>`
+/// by default, or `$MAIESTRO_HOME/<rel>` when that override is set (see
+/// [`maiestro_home`]).
 pub fn maiestro_dir(rel: &str) -> PathBuf {
-    home().join(".maiestro").join(rel)
+    maiestro_home().join(rel)
 }
 
 /// Write `data` to `path` atomically: write a sibling temp file, then rename it
@@ -119,5 +139,14 @@ mod tests {
     #[test]
     fn write_atomic_rejects_parentless_path() {
         assert!(write_atomic(Path::new("/"), b"x").is_err());
+    }
+
+    #[test]
+    fn maiestro_home_honors_env_override() {
+        let home = crate::testutil::TempHome::new();
+        // With the override set, both the root and a relative child resolve
+        // under the temp dir rather than `~/.maiestro`.
+        assert_eq!(maiestro_home(), home.path());
+        assert_eq!(maiestro_dir("repos"), home.path().join("repos"));
     }
 }

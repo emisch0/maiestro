@@ -68,6 +68,70 @@ struct SpawnDecision<'a> {
     force_new: bool,
 }
 
+/// The naming/placement decision for a spawn — reuse an existing worktree or
+/// create a fresh (possibly suffixed) one. Computed with no side effects by
+/// [`resolve_workspace`] from the issue facts, settings, and two existence
+/// predicates, so the bug-prone reuse-vs-create branch and `-2`/`-3` suffixing
+/// are unit-testable without git, GitHub, or the filesystem. `do_spawn` is then a
+/// thin walk over this plan.
+#[derive(Debug, PartialEq, Eq)]
+enum WorkspacePlan {
+    /// An existing worktree at `work_dir` is reopened rather than rebuilt.
+    Reuse { workspace: String, branch: String, work_dir: PathBuf },
+    /// A fresh worktree/session is created. `session_label` is the emoji-less
+    /// label (`#n — <label>`, with a ` (k)` suffix when the base name collided).
+    Create { workspace: String, branch: String, work_dir: PathBuf, session_label: String },
+}
+
+/// Resolve a spawn's workspace naming/placement — pure, no side effects.
+///
+/// `dir_exists` reports whether a candidate worktree directory is already on
+/// disk; `branch_taken` whether a candidate local branch already exists. Reuse
+/// wins only when not forcing new *and* the base worktree dir exists. Otherwise
+/// the first free `(dir, branch)` pair is found by suffixing `-2`, `-3`, … . The
+/// worktree path is `<worktree_prefix><workspace>/<repo_name>` (a string concat —
+/// the trailing `work-` is part of the dir name), tilde-expanded.
+fn resolve_workspace(
+    issue_number: u64,
+    short_label: &str,
+    repo_name: &str,
+    worktree_prefix: &str,
+    force_new: bool,
+    dir_exists: impl Fn(&Path) -> bool,
+    branch_taken: impl Fn(&str) -> bool,
+) -> WorkspacePlan {
+    let worktree_dir =
+        |workspace: &str| expand_tilde(&format!("{worktree_prefix}{workspace}")).join(repo_name);
+    let label_prefix = format!("#{issue_number} — ");
+    let base_workspace = format!("{issue_number}-{}", slugify(short_label, 25));
+    let base_branch = format!("feature/{base_workspace}");
+    let base_dir = worktree_dir(&base_workspace);
+
+    // Reuse an existing workspace by default; force_new skips straight to create.
+    if !force_new && dir_exists(&base_dir) {
+        return WorkspacePlan::Reuse {
+            workspace: base_workspace,
+            branch: base_branch,
+            work_dir: base_dir,
+        };
+    }
+
+    // Resolve to the first free (path, branch) pair, suffixing -2, -3, … .
+    let mut workspace = base_workspace.clone();
+    let mut branch = base_branch.clone();
+    let mut work_dir = base_dir;
+    let mut session_label = format!("{label_prefix}{short_label}");
+    let mut n = 2;
+    while dir_exists(&work_dir) || branch_taken(&branch) {
+        workspace = format!("{base_workspace}-{n}");
+        branch = format!("{base_branch}-{n}");
+        work_dir = worktree_dir(&workspace);
+        session_label = format!("{label_prefix}{short_label} ({n})");
+        n += 1;
+    }
+    WorkspacePlan::Create { workspace, branch, work_dir, session_label }
+}
+
 /// Everything the background phase of a fresh spawn needs, owned so it can move
 /// into the `tokio::spawn`ed task that builds the worktree after `do_spawn` has
 /// already returned. See `finish_spawn`.
@@ -114,47 +178,44 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     // (string concat — the trailing `work-` is part of the dir name). Unset
     // falls back to the schema default.
     let worktree_prefix = effective_worktree_prefix(settings.worktree_prefix.as_deref());
-    let worktree_dir = |workspace: &str| expand_tilde(&format!("{worktree_prefix}{workspace}")).join(&repo_name);
 
-    // Workspace name: "<n>-<slug>".
-    let prefix = format!("#{issue_number} — ");
-    let base_workspace = format!("{issue_number}-{}", slugify(&short_label, 25));
-    let base_branch = format!("feature/{base_workspace}");
-    let base_dir = worktree_dir(&base_workspace);
-    // Tag this span (and so every log line it emits) with the workspace session id.
-    tracing::Span::current().record("session", base_workspace.as_str());
+    // Pure resolution of the reuse-vs-create decision and the workspace id/branch/
+    // path (see `resolve_workspace`). Branch existence is snapshotted once so the
+    // resolver's suffix loop stays synchronous; on-disk collisions use `is_dir`.
+    let branches = crate::gitops::local_branches(&cloned_repo).await;
+    let plan = resolve_workspace(
+        issue_number,
+        &short_label,
+        &repo_name,
+        &worktree_prefix,
+        force_new,
+        |p| p.is_dir(),
+        |b| branches.contains(b),
+    );
 
-    // Reuse an existing workspace by default; --new forces a fresh one.
-    if !force_new && base_dir.is_dir() {
-        // Reopening doesn't rewrite hooks, so heal a stale binary path here too
-        // (without waiting for the next startup reconcile).
-        reconcile_session_hooks(&base_dir, &base_workspace);
-        open_vscode(&base_dir)?;
-        tracing::info!(repo = %repo, issue = issue_number, branch = %base_branch, reused = true, "spawned workspace");
-        return Ok(SpawnResult {
-            session_id: base_workspace,
-            work_dir: base_dir.display().to_string(),
-            branch: base_branch,
-            issue_url: issue_url.to_string(),
-            reused: true,
-            warnings: Vec::new(),
-        });
-    }
-
-    // Resolve to the first free (path, branch) pair, suffixing -2, -3, … .
-    let mut workspace = base_workspace.clone();
-    let mut branch = base_branch.clone();
-    let mut work_dir = base_dir.clone();
-    let mut session_label = format!("{prefix}{short_label}");
-    let mut n = 2;
-    while work_dir.is_dir() || local_branch_exists(&cloned_repo, &branch).await {
-        workspace = format!("{base_workspace}-{n}");
-        branch = format!("{base_branch}-{n}");
-        work_dir = worktree_dir(&workspace);
-        session_label = format!("{prefix}{short_label} ({n})");
-        n += 1;
-    }
-    // Re-record once the final (possibly suffixed) workspace id is resolved.
+    let (workspace, branch, work_dir, session_label) = match plan {
+        WorkspacePlan::Reuse { workspace, branch, work_dir } => {
+            // Tag this span (and every log line it emits) with the session id.
+            tracing::Span::current().record("session", workspace.as_str());
+            // Reopening doesn't rewrite hooks, so heal a stale binary path here
+            // too (without waiting for the next startup reconcile).
+            reconcile_session_hooks(&work_dir, &workspace);
+            open_vscode(&work_dir)?;
+            tracing::info!(repo = %repo, issue = issue_number, branch = %branch, reused = true, "spawned workspace");
+            return Ok(SpawnResult {
+                session_id: workspace,
+                work_dir: work_dir.display().to_string(),
+                branch,
+                issue_url: issue_url.to_string(),
+                reused: true,
+                warnings: Vec::new(),
+            });
+        }
+        WorkspacePlan::Create { workspace, branch, work_dir, session_label } => {
+            (workspace, branch, work_dir, session_label)
+        }
+    };
+    // Tag the span with the final (possibly suffixed) workspace id.
     tracing::Span::current().record("session", workspace.as_str());
 
     let session_title = format!("{emoji} {session_label}");
@@ -747,4 +808,147 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
 
     tracing::info!(branch = %branch, "tore down workspace");
     Ok(TeardownOutcome::Done)
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    // No collisions: a plain create at the base workspace/branch/path, with the
+    // emoji-less `#n — label` session label. Also proves the slug shape and that
+    // the worktree path is `<prefix><workspace>/<repo>`.
+    #[test]
+    fn create_when_nothing_exists() {
+        let plan = resolve_workspace(
+            42,
+            "Add Foo Bar",
+            "widget",
+            "/src/work-",
+            false,
+            |_| false,
+            |_| false,
+        );
+        assert_eq!(
+            plan,
+            WorkspacePlan::Create {
+                workspace: "42-add-foo-bar".into(),
+                branch: "feature/42-add-foo-bar".into(),
+                work_dir: PathBuf::from("/src/work-42-add-foo-bar/widget"),
+                session_label: "#42 — Add Foo Bar".into(),
+            }
+        );
+    }
+
+    // When the base worktree dir already exists and we're not forcing new, reuse
+    // it — no suffixing, no session_label (the reuse path doesn't record one).
+    #[test]
+    fn reuse_when_base_dir_exists() {
+        let plan = resolve_workspace(
+            42,
+            "Add Foo",
+            "widget",
+            "/src/work-",
+            false,
+            |p| p == Path::new("/src/work-42-add-foo/widget"),
+            |_| false,
+        );
+        assert_eq!(
+            plan,
+            WorkspacePlan::Reuse {
+                workspace: "42-add-foo".into(),
+                branch: "feature/42-add-foo".into(),
+                work_dir: PathBuf::from("/src/work-42-add-foo/widget"),
+            }
+        );
+    }
+
+    // force_new never reuses even when the base dir exists — it suffixes past it.
+    #[test]
+    fn force_new_skips_reuse_and_suffixes() {
+        let plan = resolve_workspace(
+            42,
+            "Add Foo",
+            "widget",
+            "/src/work-",
+            true, // force_new
+            |p| p == Path::new("/src/work-42-add-foo/widget"),
+            |_| false,
+        );
+        assert_eq!(
+            plan,
+            WorkspacePlan::Create {
+                workspace: "42-add-foo-2".into(),
+                branch: "feature/42-add-foo-2".into(),
+                work_dir: PathBuf::from("/src/work-42-add-foo-2/widget"),
+                session_label: "#42 — Add Foo (2)".into(),
+            }
+        );
+    }
+
+    // A pre-existing *branch* (with no worktree dir) forces a suffix even without
+    // force_new — the reuse check is dir-only, but the create loop avoids branch
+    // collisions too.
+    #[test]
+    fn existing_branch_forces_suffix() {
+        let taken: HashSet<String> = ["feature/42-add-foo".to_string()].into_iter().collect();
+        let plan = resolve_workspace(
+            42,
+            "Add Foo",
+            "widget",
+            "/src/work-",
+            false,
+            |_| false, // no dirs exist, so no reuse
+            move |b| taken.contains(b),
+        );
+        match plan {
+            WorkspacePlan::Create { workspace, branch, session_label, .. } => {
+                assert_eq!(workspace, "42-add-foo-2");
+                assert_eq!(branch, "feature/42-add-foo-2");
+                assert_eq!(session_label, "#42 — Add Foo (2)");
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    // Multiple consecutive collisions keep suffixing until a free pair is found.
+    #[test]
+    fn suffixes_past_multiple_collisions() {
+        let dirs: HashSet<PathBuf> = [
+            PathBuf::from("/src/work-7-x/widget"),
+            PathBuf::from("/src/work-7-x-2/widget"),
+            PathBuf::from("/src/work-7-x-3/widget"),
+        ]
+        .into_iter()
+        .collect();
+        let plan = resolve_workspace(
+            7,
+            "x",
+            "widget",
+            "/src/work-",
+            true, // force_new so the existing base dir doesn't become a reuse
+            move |p| dirs.contains(p),
+            |_| false,
+        );
+        match plan {
+            WorkspacePlan::Create { workspace, .. } => assert_eq!(workspace, "7-x-4"),
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    // The worktree prefix is a raw string concat (trailing text is part of the
+    // dir name) and a leading `~` is expanded.
+    #[test]
+    fn prefix_is_concatenated_and_tilde_expanded() {
+        let home = crate::paths::home();
+        let plan = resolve_workspace(1, "y", "repo", "~/src/work-", false, |_| false, |_| false);
+        match plan {
+            WorkspacePlan::Create { work_dir, .. } => {
+                assert_eq!(work_dir, home.join("src/work-1-y/repo"));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
 }
