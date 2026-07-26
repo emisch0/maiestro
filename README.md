@@ -1,21 +1,37 @@
 # mAIestro
 
-A macOS menu-bar app that launches a development workspace per GitHub issue:
-pick an issue, and mAIestro creates a dedicated git worktree and opens a
-[Claude Code](https://claude.com/claude-code) session on it in VS Code or a
-terminal. It is a launcher and dashboard — the conversation with Claude lives
-in the editor or terminal it opens, not in the app.
+## Why mAIestro
+
+Getting real leverage out of AI coding means running **several agent sessions
+in parallel** — one drafting a fix, another reviewing, a third exploring an
+idea. The bottleneck stops being any single session and becomes *you*: the
+constant context switching between them, keeping track of which one is working,
+which is blocked on your input, and which finished and needs a look. That
+juggling is the hard part, and it's what mAIestro exists to solve.
+
+mAIestro is deliberately **not** another place to chat with an agent. It
+doesn't get in the way of your session interactions — the conversation still
+happens in your editor or terminal, exactly as it would without it. Instead
+it's the **shell around your sessions**: a single dashboard that shows what each
+one is doing and where your attention is needed next, so switching between them
+is a glance instead of a hunt.
+
+## What it is
+
+A macOS menu-bar app that quickly shows active AI coding sessions. Features include:
 
 - **One worktree per issue.** Spawn Work on an issue creates a branch and a
   worktree (e.g. `~/src/work-42-fix-thing/repo`), runs your setup commands, and
-  opens your editor with Claude already briefed on the issue.
-- **Live session status.** Each row shows what Claude is doing — working,
-  waiting for you, idle — fed by Claude Code hooks, plus surfaced errors when a
-  session gets stuck.
-- **Idea → issue.** Type a rough idea and Claude drafts the GitHub issue title
+  opens your editor.
+- **Live session status.** Each row shows what the AI engine is doing — working,
+  waiting for you, idle.
+- **Idea → issue.** Type a rough idea and AI drafts the GitHub issue title
   and body before anything is created.
-- **PRs from the dashboard.** Create a Claude-drafted pull request for a
+- **PRs from the dashboard.** Create an AI-drafted pull request for a
   workspace, watch its checks, and merge it — then tear the worktree down.
+- **Multiple git repo support.** Work on multiple repos at the same time.
+- **Visibility and snooze controls.** Just focus on your active work. If there is a repo or work item you want to pause, just hide or snooze it for a couple of days.
+- **Color coded sessions.** Each session is assigned a color and emojis for remote control sessions, so it is easy to find across multiple windows.
 - **Per-identity GitHub access.** GitHub tokens are stored in the macOS
   Keychain per identity; each repo is tracked under the identity you choose.
 
