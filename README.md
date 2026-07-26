@@ -33,7 +33,7 @@ auth.
 
 ## Quick start
 
-1. Click the wizard-hat icon in the menu bar and open **Settings**.
+1. Click the brain icon in the menu bar and open **Settings**.
 2. In **Identities**, add an identity (e.g. `default`) and save a GitHub
    personal access token for it. The token goes into the macOS Keychain;
    `~/.maiestro/profiles.json` keeps only a reference to it.

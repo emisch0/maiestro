@@ -10,6 +10,8 @@ Directory layout: `backend/` (Rust/Tauri) and `frontend/` (web). Not Tauri's def
 
 The frontend uses **pnpm** (`pnpm-lock.yaml`), not npm or yarn. Use `pnpm install` / `pnpm dev` — `npm install` fails on the `link:` workspace deps.
 
+The menu-bar tray icon is a **brain** icon (`backend/icons/tray.png`, a template image set at `main.rs:258`). Any docs or prose that describe the menu-bar icon should call it the brain icon — an earlier README described it as a "wizard-hat", which was wrong.
+
 ## Architectural decisions
 
 ### mAIestro launches sessions; it does not host them
