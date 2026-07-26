@@ -434,12 +434,6 @@ body {
 }
 
 /* The count sits at the far right, dimmed. */
-.lifecycle-zone-count {
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.7;
-}
-
 /* Per-phase accent on the heading + its dot. Planning stays muted. */
 .lifecycle-zone--implementing .lifecycle-zone-name { color: var(--blue); }
 .lifecycle-zone--implementing .lifecycle-zone-dot { background: var(--blue); }
@@ -1044,11 +1038,20 @@ body {
   overflow-x: hidden;
 }
 
-.settings-sidebar::-webkit-scrollbar { width: 4px; }
+.settings-sidebar::-webkit-scrollbar { width: 12px; }
 .settings-sidebar::-webkit-scrollbar-track { background: transparent; }
 .settings-sidebar::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 2px;
+  /* Transparent border + padding-box clip insets the thumb so it looks slim
+     while the whole 12px width stays a draggable hit target. */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+  min-height: 32px;
+}
+.settings-sidebar::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+  background-clip: padding-box;
 }
 
 .settings-detail {
@@ -1426,6 +1429,126 @@ body {
   white-space: nowrap;
 }
 
+/* ── Repo health check (#93) ─────────────────────────────────────────── */
+
+.health-check-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.health-body {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 4px 4px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* Results are diagnostic text worth copying — opt back into selection, since
+     the app container sets user-select: none. */
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.health-footer {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.health-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 8px;
+  border-radius: 7px;
+}
+
+.health-row--nested {
+  margin-left: 26px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+.health-icon {
+  flex-shrink: 0;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  margin-top: 1px;
+}
+
+.health-icon--pass { color: var(--green); background: var(--green-bg); }
+.health-icon--fail { color: var(--red); background: var(--red-bg); }
+.health-icon--warn { color: var(--accent); background: rgba(250, 204, 21, 0.14); }
+.health-icon--skipped { color: var(--muted); background: var(--surface); }
+
+.health-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.health-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.health-detail {
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+.health-progress {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+}
+
+.health-spinner {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  border-top-color: transparent;
+  animation: check-spin 0.7s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .health-spinner { animation: none; }
+}
+
+.health-command {
+  margin-top: 3px;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 3px 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.health-row--nested .health-label { font-weight: 400; }
+
 /* ── Credential list ─────────────────────────────────────────────────── */
 
 .cred-list {
@@ -1437,11 +1560,20 @@ body {
   gap: 8px;
 }
 
-.cred-list::-webkit-scrollbar { width: 4px; }
+.cred-list::-webkit-scrollbar { width: 12px; }
 .cred-list::-webkit-scrollbar-track { background: transparent; }
 .cred-list::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 2px;
+  /* Transparent border + padding-box clip insets the thumb so it looks slim
+     while the whole 12px width stays a draggable hit target. */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+  min-height: 32px;
+}
+.cred-list::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+  background-clip: padding-box;
 }
 
 .cred-row {
@@ -1676,6 +1808,169 @@ body {
   background: var(--accent-bg);
   border-color: var(--accent-border);
   color: var(--accent);
+}
+
+/* Launch-at-login on/off switch: the section title stays flush-left (like the
+   other Preferences sections); the switch sits to the left of the help text on
+   the row below, rather than stretched to the far edge of a wide window. */
+.toggle-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.toggle-field .session-hint {
+  margin: 0;
+}
+
+.toggle-text {
+  min-width: 0;
+}
+
+.toggle-switch {
+  flex: none;
+  position: relative;
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s;
+}
+
+.toggle-switch:hover {
+  background: var(--surface-hover);
+}
+
+.toggle-switch.on {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+}
+
+.toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.14s, background 0.14s;
+}
+
+.toggle-switch.on .toggle-knob {
+  transform: translateX(16px);
+  background: var(--accent);
+}
+
+/* ── Onboarding dialog (issue #98) ───────────────────────────────────────── */
+
+.onboarding {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 24px 28px;
+  background: var(--bg);
+  color: var(--text);
+  text-align: center;
+  font-family: var(--font);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.onboarding-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.onboarding-logo {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  color: var(--text);
+}
+
+.onboarding-title {
+  font-size: 23px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  line-height: 1;
+}
+
+.onboarding-title .ai {
+  color: var(--accent);
+}
+
+.onboarding-subtitle {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.onboarding-options {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 18px 0 20px;
+}
+
+.onboarding-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.onboarding-option-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.onboarding-option-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+
+.onboarding-btn {
+  padding: 8px 22px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.onboarding-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.onboarding-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.onboarding-foot {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 12px;
 }
 
 .env-file-list {
@@ -1994,6 +2289,54 @@ body {
   -webkit-user-select: text;
   user-select: text;
   cursor: text;
+}
+
+/* Tool-paths: the "Not found" status line beneath an auto-resolving tool input,
+   tinted to read as a warning rather than ordinary help text. */
+.jsf-root .jsf-help.jsf-tool-missing {
+  color: var(--danger, #d66);
+}
+
+/* Path fields (issue #88): the text input and its reveal-in-Finder button sit on
+   one row; the input flexes, the button is a fixed square. */
+.path-field-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.path-field-row .text-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Folder-icon button that reveals a path in Finder. Disabled when the path is
+   empty or missing — greyed and non-interactive. */
+.path-reveal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.path-reveal-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+.path-reveal-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* An env-file path tinted as missing reuses the warning color. */
+.env-file-path.jsf-tool-missing {
+  color: var(--danger, #d66);
 }
 
 /* The worktree-prefix field surfaces its schema default as a placeholder,

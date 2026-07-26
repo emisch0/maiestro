@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maiestro.app/schemas/app-settings.schema.json",
+  "title": "AppSettings",
+  "description": "Global, app-wide settings stored at ~/.maiestro/settings.json. This schema is the hand-written specification for the file format; the Rust AppSettings struct must conform to it (a unit test enforces the two stay in sync). Every field is optional — a missing or partial file falls back to defaults. Unknown fields are tolerated so files written by a newer app version still load in an older one.",
+  "type": "object",
+  "properties": {
+    "window": {
+      "type": ["object", "null"],
+      "title": "WindowSize",
+      "description": "Persisted size (logical pixels) of the menu-bar popover. Machine-managed — saved when the popover hides, restored before it shows. Not user-editable in the Settings form. null/absent = use the tauri.conf.json default.",
+      "properties": {
+        "width": { "type": "number", "description": "Popover width in logical pixels." },
+        "height": { "type": "number", "description": "Popover height in logical pixels." }
+      }
+    },
+    "settings_window": {
+      "type": ["object", "null"],
+      "title": "WindowSize",
+      "description": "Persisted size (logical pixels) of the Settings window. Machine-managed — saved when it loses focus/closes, restored before it shows. Not user-editable in the Settings form. null/absent = use the tauri.conf.json default.",
+      "properties": {
+        "width": { "type": "number", "description": "Settings window width in logical pixels." },
+        "height": { "type": "number", "description": "Settings window height in logical pixels." }
+      }
+    },
+    "theme": {
+      "type": ["string", "null"],
+      "enum": ["light", "dark", "system", null],
+      "description": "Chosen UI appearance. \"system\" follows the macOS dark/light setting (resolved via prefers-color-scheme). null/absent means \"system\"."
+    },
+    "tool_paths": {
+      "type": ["object", "null"],
+      "title": "ToolPaths",
+      "description": "Explicit filesystem paths for the external CLIs mAIestro invokes directly. Each field null/empty = auto-resolve (login-shell PATH, then `which`, then known install locations). Set one to pin a specific binary — useful when the app, launched from /Applications with a minimal PATH, can't find a tool.",
+      "properties": {
+        "claude": {
+          "type": ["string", "null"],
+          "description": "Absolute path to the `claude` CLI (used for AI drafting of issues, labels, and PRs). null/empty = auto-resolve."
+        },
+        "git": {
+          "type": ["string", "null"],
+          "description": "Absolute path to `git` (used for worktree add and branch checks). null/empty = auto-resolve."
+        },
+        "code": {
+          "type": ["string", "null"],
+          "description": "Absolute path to the VS Code `code` CLI (used to open spawned worktrees). null/empty = auto-resolve."
+        }
+      }
+    },
+    "launch_at_login": {
+      "type": ["boolean", "null"],
+      "description": "Whether to launch mAIestro automatically when the user logs in, via a per-user LaunchAgent (~/Library/LaunchAgents/mAIestro.plist). Toggled in the Preferences panel. null/absent = false."
+    },
+    "onboarding_completed": {
+      "type": ["boolean", "null"],
+      "description": "Machine-managed. Whether the one-time onboarding flow has been completed; set once (to true) when the onboarding dialog is dismissed, so it never reappears. Gates the first-run onboarding window. Not user-editable in the Settings form. null/absent = not yet onboarded."
+    }
+  }
+}

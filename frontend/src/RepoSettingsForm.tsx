@@ -6,7 +6,7 @@
 // two custom renderers for the cases the schema alone can't express — the
 // identity select (dynamic options) and the env-files list (Scan/Add/Remove).
 //
-// Everything else (checkout dir, worktree prefix) falls through to the vanilla
+// Everything else (cloned repo dir, worktree prefix) falls through to the vanilla
 // string-input renderer, styled in styles.css.
 
 import { useState } from "react";
@@ -19,17 +19,19 @@ import {
 import { withJsonFormsControlProps } from "@jsonforms/react";
 import { vanillaRenderers, vanillaCells } from "@jsonforms/vanilla-renderers";
 import { api } from "./api";
+import { PathField, RevealButton, usePathExists } from "./PathField";
 
 /** Field order, with `repo` and `hidden` deliberately omitted (the latter is
  *  managed from the popover, not this form). */
 export const repoSettingsUISchema = {
   type: "VerticalLayout",
   elements: [
-    { type: "Control", scope: "#/properties/checkout_dir", label: "Checkout directory" },
+    { type: "Control", scope: "#/properties/cloned_repo_dir", label: "Cloned repo" },
     { type: "Control", scope: "#/properties/worktree_prefix", label: "Worktree prefix" },
     { type: "Control", scope: "#/properties/identity_id", label: "Identity" },
     { type: "Control", scope: "#/properties/env_files", label: "Environment files" },
     { type: "Control", scope: "#/properties/post_spawn_commands", label: "Post-spawn commands" },
+    { type: "Control", scope: "#/properties/prompt_model", label: "Prompt model" },
     { type: "Control", scope: "#/properties/prompts" },
   ],
 } as unknown as UISchemaElement;
@@ -38,8 +40,8 @@ export const repoSettingsUISchema = {
 export interface RepoFormConfig {
   /** Identities offered by the identity select. */
   knownIdentities: string[];
-  /** Current checkout dir, so the env-files Scan knows where to look. */
-  checkoutDir: string | null;
+  /** Current cloned repo dir, so the env-files Scan knows where to look. */
+  clonedRepoDir: string | null;
   /** Always show schema descriptions as help text, not only on focus. */
   showUnfocusedDescription: true;
 }
@@ -88,47 +90,50 @@ function IdentityControl(props: ControlProps) {
 export const identityTester = rankWith(20, scopeEndsWith("identity_id"));
 export const IdentityRenderer = withJsonFormsControlProps(IdentityControl);
 
-// ── Plain text fields (checkout dir, worktree prefix) ───────────────────────
+// ── Plain text fields (cloned repo dir, worktree prefix) ────────────────────
 // A text input with the label/description heading above it. `worktree_prefix`
 // surfaces its schema default as a disabled-looking placeholder so it's clear
 // what an empty field resolves to.
 
-function CheckoutDirControl(props: ControlProps) {
+function ClonedRepoDirControl(props: ControlProps) {
   const { data, handleChange, path, label, description } = props;
   return (
     <div className="control jsf-control">
       <FieldHeading label={label} description={description} />
-      <input
-        className="text-input"
-        type="text"
+      <PathField
         value={data ?? ""}
         placeholder="~/src/repo-name"
-        onChange={(e) => handleChange(path, e.target.value || null)}
-        spellCheck={false}
-        autoCapitalize="off"
-        autoCorrect="off"
+        onChange={(v) => handleChange(path, v || null)}
+        missingLabel="Directory not found"
       />
     </div>
   );
 }
 
-export const checkoutDirTester = rankWith(20, scopeEndsWith("checkout_dir"));
-export const CheckoutDirRenderer = withJsonFormsControlProps(CheckoutDirControl);
+export const clonedRepoDirTester = rankWith(20, scopeEndsWith("cloned_repo_dir"));
+export const ClonedRepoDirRenderer = withJsonFormsControlProps(ClonedRepoDirControl);
+
+/** The directory a worktree prefix lives in. The prefix itself is a string
+ *  base (`~/src/work-`) that's never a real path — the parent (`~/src`) is what
+ *  must exist, so that's what we validate and reveal. */
+export function prefixParentDir(prefix: string): string {
+  const slash = prefix.lastIndexOf("/");
+  return slash >= 0 ? prefix.slice(0, slash) : "";
+}
 
 function WorktreePrefixControl(props: ControlProps) {
   const { data, handleChange, path, label, description, config } = props;
+  const value: string = data ?? "";
   return (
     <div className="control jsf-control">
       <FieldHeading label={label} description={description} />
-      <input
-        className="text-input jsf-default-hint"
-        type="text"
-        value={data ?? ""}
+      <PathField
+        value={value}
         placeholder={config?.worktreePrefixDefault ?? ""}
-        onChange={(e) => handleChange(path, e.target.value || null)}
-        spellCheck={false}
-        autoCapitalize="off"
-        autoCorrect="off"
+        onChange={(v) => handleChange(path, v || null)}
+        checkPath={prefixParentDir(value)}
+        missingLabel="Parent directory not found"
+        className="jsf-default-hint"
       />
     </div>
   );
@@ -137,6 +142,47 @@ function WorktreePrefixControl(props: ControlProps) {
 export const worktreePrefixTester = rankWith(20, scopeEndsWith("worktree_prefix"));
 export const WorktreePrefixRenderer = withJsonFormsControlProps(WorktreePrefixControl);
 
+// ── Prompt model combobox ────────────────────────────────────────────────────
+// Which Claude model runs the headless drafting prompts. Deliberately NOT a
+// closed select: the value is passed verbatim to `claude --model`, which accepts
+// any tier alias or full model id. A datalist offers the common aliases as
+// suggestions while still accepting a typed-in value (e.g. a newly released
+// tier), so a new model needs no mAIestro update. Empty falls back to the schema
+// default (`haiku`), surfaced as the placeholder.
+
+/** Suggested `claude --model` aliases. Hints only — any value is accepted, so
+ *  adding a newly released tier here is optional and non-breaking. */
+const PROMPT_MODEL_SUGGESTIONS = ["haiku", "sonnet", "opus", "fable"];
+
+function PromptModelControl(props: ControlProps) {
+  const { data, handleChange, path, label, description, config } = props;
+  const listId = "prompt-model-suggestions";
+  return (
+    <div className="control jsf-control">
+      <FieldHeading label={label} description={description} />
+      <input
+        className="text-input jsf-default-hint"
+        type="text"
+        list={listId}
+        value={data ?? ""}
+        placeholder={config?.promptModelDefault ?? ""}
+        onChange={(e) => handleChange(path, e.target.value.trim() || null)}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+      />
+      <datalist id={listId}>
+        {PROMPT_MODEL_SUGGESTIONS.map((m) => (
+          <option key={m} value={m} />
+        ))}
+      </datalist>
+    </div>
+  );
+}
+
+export const promptModelTester = rankWith(20, scopeEndsWith("prompt_model"));
+export const PromptModelRenderer = withJsonFormsControlProps(PromptModelControl);
+
 // ── Env files list ──────────────────────────────────────────────────────────
 // A list with Scan / Add / Remove, preserving the existing scan flow. The array
 // is written back wholesale via handleChange.
@@ -144,7 +190,7 @@ export const WorktreePrefixRenderer = withJsonFormsControlProps(WorktreePrefixCo
 function EnvFilesControl(props: ControlProps) {
   const { data, handleChange, path, label, description, config } = props;
   const files: string[] = Array.isArray(data) ? data : [];
-  const checkoutDir: string | null = config?.checkoutDir ?? null;
+  const clonedRepoDir: string | null = config?.clonedRepoDir ?? null;
 
   const [adding, setAdding] = useState(false);
   const [input, setInput] = useState("");
@@ -153,10 +199,10 @@ function EnvFilesControl(props: ControlProps) {
   const setFiles = (next: string[]) => handleChange(path, next);
 
   async function doScan() {
-    if (!checkoutDir) return;
+    if (!clonedRepoDir) return;
     setScan("scanning");
     try {
-      const found = await api.scanEnvFiles(checkoutDir);
+      const found = await api.scanEnvFiles(clonedRepoDir);
       setFiles(found);
       setScan("done");
       setTimeout(() => setScan("idle"), 2000);
@@ -182,7 +228,7 @@ function EnvFilesControl(props: ControlProps) {
       <div className="settings-group-header">
         <span className="jsf-label" style={{ marginBottom: 0 }}>{label}</span>
         <div style={{ display: "flex", gap: 4 }}>
-          {checkoutDir && (
+          {clonedRepoDir && (
             <button
               className={`btn-add ${scan === "scanning" ? "btn-busy" : ""}`}
               disabled={scan === "scanning"}
@@ -202,6 +248,7 @@ function EnvFilesControl(props: ControlProps) {
           <input
             className="text-input"
             type="text"
+            aria-label="Environment file path"
             placeholder=".env or subdir/.env"
             value={input}
             autoFocus
@@ -221,18 +268,54 @@ function EnvFilesControl(props: ControlProps) {
 
       {files.length === 0 && !adding ? (
         <p className="session-hint" style={{ paddingTop: 2 }}>
-          No env files. Use Scan to find .env files in the checkout directory.
+          No env files. Use Scan to find .env files in the cloned repo directory.
         </p>
       ) : (
         <div className="env-file-list">
           {files.map((f) => (
-            <div key={f} className="env-file-row">
-              <span className="env-file-path">{f}</span>
-              <button className="btn-clear" onClick={() => removeFile(f)} title="Remove">✕</button>
-            </div>
+            <EnvFileRow
+              key={f}
+              file={f}
+              clonedRepoDir={clonedRepoDir}
+              onRemove={() => removeFile(f)}
+            />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Resolve a cloned-repo-relative env-file entry (e.g. `.env` or `sub/.env`)
+ *  against the repo's cloned repo dir — that's where the backend reads and copies
+ *  them from. Returns "" when there's no cloned repo dir to resolve against
+ *  (can't validate). */
+export function resolveEnvFile(clonedRepoDir: string | null, rel: string): string {
+  if (!clonedRepoDir) return "";
+  return `${clonedRepoDir.replace(/\/+$/, "")}/${rel}`;
+}
+
+/** One env-file entry: the path, a reveal-in-Finder button, a remove button,
+ *  and a "not found" hint when the file is missing. The entry is relative to the
+ *  cloned repo dir, so validation/reveal resolves it there. */
+function EnvFileRow({
+  file,
+  clonedRepoDir,
+  onRemove,
+}: {
+  file: string;
+  clonedRepoDir: string | null;
+  onRemove: () => void;
+}) {
+  const full = resolveEnvFile(clonedRepoDir, file);
+  const exists = usePathExists(full);
+  return (
+    <div className="env-file-row">
+      <span className={`env-file-path ${exists === false ? "jsf-tool-missing" : ""}`}>
+        {file}
+      </span>
+      <RevealButton path={full} exists={exists} />
+      <button className="btn-clear" onClick={onRemove} title="Remove">✕</button>
     </div>
   );
 }
@@ -275,6 +358,7 @@ function PostSpawnCommandsControl(props: ControlProps) {
               <input
                 className="text-input jsf-cmd-input"
                 type="text"
+                aria-label={`Post-spawn command ${i + 1}`}
                 placeholder="e.g. pnpm install"
                 value={c}
                 onChange={(e) => updateAt(i, e.target.value)}
@@ -296,7 +380,8 @@ export const PostSpawnCommandsRenderer = withJsonFormsControlProps(PostSpawnComm
 
 // ── AI prompt overrides ─────────────────────────────────────────────────────
 // One paragraph (textarea) per AI prompt. Each shows the built-in default text
-// (from the `repo_prompt_defaults` command, via config); editing it stores a
+// (the schema's `default` keywords, extracted by `extractFormDefaults` and
+// passed via config); editing it stores a
 // per-repo override. Clearing the field or matching the default again removes
 // the override. The runtime context (idea / issue / diff) is appended by the
 // backend, so an override only needs the instruction.
@@ -379,10 +464,11 @@ export const PromptsRenderer = withJsonFormsControlProps(PromptsControl);
 // Custom renderers first so they out-rank the vanilla defaults for their scopes.
 export const repoSettingsRenderers = [
   { tester: identityTester, renderer: IdentityRenderer },
-  { tester: checkoutDirTester, renderer: CheckoutDirRenderer },
+  { tester: clonedRepoDirTester, renderer: ClonedRepoDirRenderer },
   { tester: worktreePrefixTester, renderer: WorktreePrefixRenderer },
   { tester: envFilesTester, renderer: EnvFilesRenderer },
   { tester: postSpawnCommandsTester, renderer: PostSpawnCommandsRenderer },
+  { tester: promptModelTester, renderer: PromptModelRenderer },
   { tester: promptsTester, renderer: PromptsRenderer },
   ...vanillaRenderers,
 ];
@@ -418,6 +504,7 @@ export function sanitizeSchemaForForm(
  *  the same schema). Passed to the custom renderers via JsonForms `config`. */
 export interface RepoFormDefaults {
   worktreePrefixDefault: string;
+  promptModelDefault: string;
   promptDefaults: Record<PromptKey, string>;
 }
 
@@ -430,6 +517,7 @@ export function extractFormDefaults(
   const str = (v: unknown) => (typeof v === "string" ? v : "");
   return {
     worktreePrefixDefault: str(props.worktree_prefix?.default),
+    promptModelDefault: str(props.prompt_model?.default),
     promptDefaults: {
       draft_issue: str(promptProps.draft_issue?.default),
       short_label: str(promptProps.short_label?.default),

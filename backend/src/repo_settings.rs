@@ -37,8 +37,9 @@ pub struct RepoSettings {
     pub repo: String,
     /// Identity used for credentials and agent spawning for this repo.
     pub identity_id: Option<String>,
-    /// Absolute path to the local checkout directory.
-    pub checkout_dir: Option<String>,
+    /// Absolute path to the local cloned repo directory (the primary checkout
+    /// mAIestro creates worktrees from).
+    pub cloned_repo_dir: Option<String>,
     /// Prefix for worktree locations. The full worktree path is
     /// `<worktree_prefix><workspace>/<repo>` (a string concatenation — the
     /// trailing segment is part of the directory name, not a path component).
@@ -46,13 +47,21 @@ pub struct RepoSettings {
     /// original hardcoded behavior. Tilde-expanded via `expand_tilde` in spawn.
     #[serde(default)]
     pub worktree_prefix: Option<String>,
-    /// Env files relative to checkout_dir to source when launching user-facing tools.
+    /// Env files relative to cloned_repo_dir, copied into a fresh worktree at spawn.
+    #[serde(default)]
     pub env_files: Vec<String>,
     /// Shell commands to run in a freshly-created worktree, in order, before the
     /// editor opens (e.g. `pnpm install`). Empty by default. Run via the user's
     /// login shell so PATH and tool managers are available.
     #[serde(default)]
     pub post_spawn_commands: Vec<String>,
+    /// Which Claude model runs mAIestro's own programmatic prompts (draft_issue,
+    /// short_label, draft_pr) via the headless `claude -p` calls. `None`/empty
+    /// uses the schema default (`haiku`). A `claude --model` tier alias, not a
+    /// pinned id, so it tracks the latest model in that tier. Applies only to
+    /// these drafting calls, never to the launched worktree session.
+    #[serde(default)]
+    pub prompt_model: Option<String>,
     /// Repo-level hide/snooze state. `None` = visible. A hidden repo hides its
     /// work items too. Per-work-item state lives on the session record, not here.
     #[serde(default)]
@@ -66,14 +75,15 @@ pub struct RepoSettings {
 impl RepoSettings {
     fn default_for(repo: &str) -> Self {
         let name = repo.split('/').next_back().unwrap_or(repo);
-        let home = std::env::var("HOME").unwrap_or_default();
+        let cloned = crate::paths::home().join("src").join(name);
         Self {
             repo: repo.to_owned(),
             identity_id: None,
-            checkout_dir: Some(format!("{home}/src/{name}")),
+            cloned_repo_dir: Some(cloned.to_string_lossy().into_owned()),
             worktree_prefix: None,
             env_files: Vec::new(),
             post_spawn_commands: Vec::new(),
+            prompt_model: None,
             hidden: None,
             prompts: PromptOverrides::default(),
         }
@@ -92,7 +102,7 @@ const SCHEMA_JSON: &str = include_str!("../schemas/repo-settings.schema.json");
 /// Parse the embedded schema. Infallible in practice — the `schema_parses` test
 /// guarantees the embedded string is valid JSON, so a panic here is a build bug.
 fn schema_value() -> serde_json::Value {
-    serde_json::from_str(SCHEMA_JSON).expect("embedded repo-settings schema is valid JSON")
+    crate::schema::parse(SCHEMA_JSON, "repo-settings")
 }
 
 /// A string `default` from the embedded schema, addressed by JSON Pointer (e.g.
@@ -110,29 +120,13 @@ pub fn schema_default(pointer: &str) -> String {
 /// Validate a settings JSON value against the embedded schema. Returns a message
 /// naming the failing field(s) on error.
 fn validate_against_schema(value: &serde_json::Value) -> Result<(), String> {
-    let schema = schema_value();
-    let validator = jsonschema::validator_for(&schema)
-        .map_err(|e| format!("internal schema error: {e}"))?;
-    let errors: Vec<String> = validator
-        .iter_errors(value)
-        .map(|e| {
-            let at = e.instance_path().to_string();
-            let at = if at.is_empty() { "/".to_string() } else { at };
-            format!("at `{at}`: {e}")
-        })
-        .collect();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
+    crate::schema::validate(&schema_value(), value)
 }
 
 // ── Storage ───────────────────────────────────────────────────────────────────
 
 fn repos_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".maiestro/repos")
+    crate::paths::maiestro_dir("repos")
 }
 
 fn settings_path(repo: &str) -> PathBuf {
@@ -172,7 +166,7 @@ fn save(repo: &str, settings: &RepoSettings) -> std::io::Result<()> {
     let dir = repos_dir();
     std::fs::create_dir_all(&dir)?;
     let data = serde_json::to_string_pretty(settings).unwrap();
-    std::fs::write(settings_path(repo), data)
+    crate::paths::write_atomic(&settings_path(repo), data.as_bytes())
 }
 
 /// Clear `identity_id` from every repo settings file that references the given
@@ -198,7 +192,7 @@ pub fn clear_identity_references(identity_id: &str) {
         }
         value["identity_id"] = serde_json::Value::Null;
         let out = serde_json::to_string_pretty(&value).expect("Value is always serializable");
-        if let Err(e) = std::fs::write(&path, out) {
+        if let Err(e) = crate::paths::write_atomic(&path, out.as_bytes()) {
             tracing::warn!(error = %e, path = %path.display(), "failed to clear identity reference");
         }
     }
@@ -300,13 +294,14 @@ pub fn repo_set_visibility(repo: String, hidden: Option<HideState>) -> Result<()
 }
 
 #[tauri::command]
-pub fn repo_scan_env_files(checkout_dir: String) -> Vec<String> {
-    crate::log_invoke!("repo_scan_env_files", checkout_dir = %checkout_dir);
-    let base = Path::new(&checkout_dir);
+pub fn repo_scan_env_files(cloned_repo_dir: String) -> Vec<String> {
+    crate::log_invoke!("repo_scan_env_files", cloned_repo_dir = %cloned_repo_dir);
+    // Tilde-expand like every other consumer of this setting (spawn, health).
+    let base = crate::paths::expand_tilde(&cloned_repo_dir);
     let mut abs = Vec::new();
-    walk_env_files(base, 4, &mut abs);
+    walk_env_files(&base, 4, &mut abs);
     abs.iter()
-        .filter_map(|p| Path::new(p).strip_prefix(base).ok())
+        .filter_map(|p| Path::new(p).strip_prefix(&base).ok())
         .map(|p| p.to_string_lossy().into_owned())
         .collect()
 }
@@ -347,10 +342,11 @@ mod tests {
         let populated = RepoSettings {
             repo: "acme/widget".into(),
             identity_id: Some("id-123".into()),
-            checkout_dir: Some("/home/u/src/widget".into()),
+            cloned_repo_dir: Some("/home/u/src/widget".into()),
             worktree_prefix: Some("/home/u/src/work-".into()),
             env_files: vec![".env".into(), ".env.local".into()],
             post_spawn_commands: vec!["pnpm install".into()],
+            prompt_model: Some("sonnet".into()),
             hidden: Some(HideState { snooze_until: Some(1_717_372_800_000) }),
             prompts: PromptOverrides {
                 draft_issue: Some("Custom issue instruction".into()),
@@ -374,26 +370,41 @@ mod tests {
         }
     }
 
-    /// A minimal old file (only `checkout_dir` + `env_files`) still loads —
+    /// A minimal file (only `cloned_repo_dir` + `env_files`) still loads —
     /// backward compatible with files written before newer fields existed.
     #[test]
     fn minimal_old_file_passes() {
         let data = json!({
-            "checkout_dir": "/home/u/src/widget",
+            "cloned_repo_dir": "/home/u/src/widget",
             "env_files": [".env"]
         })
         .to_string();
         let settings = parse_and_validate(&data, "test").expect("minimal file should load");
-        assert_eq!(settings.checkout_dir.as_deref(), Some("/home/u/src/widget"));
+        assert_eq!(settings.cloned_repo_dir.as_deref(), Some("/home/u/src/widget"));
         assert_eq!(settings.env_files, vec![".env".to_string()]);
         assert!(settings.identity_id.is_none());
+    }
+
+    /// Every field is schema-optional (no `required` array), so a hand-written
+    /// file that omits any of them — including the non-Option `env_files` — must
+    /// deserialize, not fail with a "missing field" error after passing schema
+    /// validation.
+    #[test]
+    fn schema_valid_file_without_env_files_loads() {
+        let data = json!({
+            "repo": "acme/widget",
+            "cloned_repo_dir": "~/src/widget"
+        })
+        .to_string();
+        let settings = parse_and_validate(&data, "test").expect("file without env_files should load");
+        assert!(settings.env_files.is_empty());
     }
 
     /// A wrong-typed field fails with a message naming that field.
     #[test]
     fn wrong_type_fails_with_field_message() {
         let data = json!({
-            "checkout_dir": "/home/u/src/widget",
+            "cloned_repo_dir": "/home/u/src/widget",
             "env_files": "not-an-array"
         })
         .to_string();
@@ -407,7 +418,7 @@ mod tests {
     fn unknown_fields_tolerated() {
         let data = json!({
             "$schema": "./repo-settings.schema.json",
-            "checkout_dir": "/home/u/src/widget",
+            "cloned_repo_dir": "/home/u/src/widget",
             "env_files": [],
             "future_field": 42
         })
@@ -420,5 +431,83 @@ mod tests {
     fn malformed_json_fails() {
         let err = parse_and_validate("{ not json", "settings.json").expect_err("must fail");
         assert!(err.contains("not valid JSON"), "got: {err}");
+    }
+
+    // ── Filesystem-level tests (MAIESTRO_HOME-injected temp root) ───────────────
+    //
+    // These exercise the real load → validate → atomic-write cycle against files,
+    // which `parse_and_validate`'s pure tests above can't reach. `TempHome`
+    // redirects `maiestro_dir` at a tempdir, so nothing touches `~/.maiestro`.
+
+    use crate::testutil::TempHome;
+
+    /// `load_validated`, outcome 1: a missing file yields defaults, not an error.
+    #[test]
+    fn get_missing_file_returns_defaults() {
+        let _home = TempHome::new();
+        let settings = repo_settings_get("acme/widget".into()).expect("missing file → defaults");
+        assert_eq!(settings.repo, "acme/widget");
+        assert!(settings.identity_id.is_none());
+        assert!(settings.env_files.is_empty());
+    }
+
+    /// `load_validated`, outcome 3 (valid), via a real set → get round-trip. Also
+    /// proves `repo_settings_set` stamps the repo and the file lands on disk.
+    #[test]
+    fn set_then_get_roundtrips_through_file() {
+        let home = TempHome::new();
+        let mut settings = RepoSettings::default_for("acme/widget");
+        settings.cloned_repo_dir = Some("~/src/widget".into());
+        settings.env_files = vec![".env".into(), ".env.local".into()];
+        settings.identity_id = Some("work".into());
+
+        repo_settings_set("acme/widget".into(), settings).expect("set should persist");
+
+        // The file exists under the injected root with the mangled name.
+        assert!(home.join("repos/acme-widget.json").exists(), "settings file should be written");
+
+        let loaded = repo_settings_get("acme/widget".into()).expect("get should load");
+        assert_eq!(loaded.cloned_repo_dir.as_deref(), Some("~/src/widget"));
+        assert_eq!(loaded.env_files, vec![".env".to_string(), ".env.local".into()]);
+        assert_eq!(loaded.identity_id.as_deref(), Some("work"));
+        assert_eq!(loaded.repo, "acme/widget", "set must stamp the repo field");
+    }
+
+    /// `load_validated`, outcome 2: a present-but-invalid file is a loud error
+    /// naming the file and field — never a silent fall back to defaults.
+    #[test]
+    fn get_invalid_file_errors_loudly() {
+        let home = TempHome::new();
+        std::fs::create_dir_all(home.join("repos")).unwrap();
+        std::fs::write(
+            home.join("repos/acme-widget.json"),
+            json!({ "env_files": "not-an-array" }).to_string(),
+        )
+        .unwrap();
+
+        let err = repo_settings_get("acme/widget".into()).expect_err("invalid file must error");
+        assert!(err.contains("env_files"), "error should name the field: {err}");
+    }
+
+    /// `repo_set_visibility` errors on an unparseable file rather than clobbering
+    /// it with defaults (issue #101 behavior).
+    #[test]
+    fn set_visibility_refuses_to_clobber_bad_file() {
+        let home = TempHome::new();
+        std::fs::create_dir_all(home.join("repos")).unwrap();
+        let path = home.join("repos/acme-widget.json");
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let err = repo_set_visibility("acme/widget".into(), None).expect_err("must refuse");
+        assert!(err.contains("not valid JSON"), "got: {err}");
+        // The bad file is left intact, not overwritten with defaults.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    /// `repo_remove` is idempotent — removing a never-tracked repo is Ok.
+    #[test]
+    fn remove_missing_is_ok() {
+        let _home = TempHome::new();
+        repo_remove("never/tracked".into()).expect("removing a missing repo is idempotent");
     }
 }

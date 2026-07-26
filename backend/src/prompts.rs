@@ -36,3 +36,11 @@ pub fn short_label(p: &PromptOverrides) -> String {
 pub fn draft_pr(p: &PromptOverrides) -> String {
     pick(&p.draft_pr, "/properties/prompts/properties/draft_pr/default")
 }
+
+/// The effective model (a `claude --model` tier alias) for this repo's headless
+/// drafting calls — the repo's `prompt_model` override, or the schema default
+/// (`haiku`) when unset/empty. Governs only mAIestro's own `claude -p` prompts,
+/// never the launched worktree session.
+pub fn model(prompt_model: &Option<String>) -> String {
+    pick(prompt_model, "/properties/prompt_model/default")
+}

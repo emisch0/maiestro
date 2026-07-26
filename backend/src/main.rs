@@ -3,16 +3,30 @@
 
 mod app_settings;
 mod credentials;
+mod drafting;
+mod editor;
+mod gitops;
+mod health;
+mod hooks;
 mod identities;
 mod links;
 mod logging;
+mod naming;
+mod paths;
 mod plugin;
 mod plugins;
+mod pr;
 mod prompts;
+mod repo_context;
 mod repo_settings;
+mod schema;
 mod sessions;
 mod spawn;
 mod status;
+#[cfg(test)]
+mod testutil;
+mod theming;
+mod tools;
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -20,7 +34,7 @@ use std::time::{Duration, Instant};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, LogicalSize, Manager, WindowEvent,
+    Emitter, LogicalSize, Manager, Monitor, PhysicalPosition, PhysicalSize, WindowEvent,
 };
 use tauri_plugin_positioner::{Position, WindowExt};
 
@@ -33,6 +47,10 @@ use plugins::{GitHubPlugin, github_list_issues, github_list_repos};
 #[derive(Default)]
 struct PopoverState {
     last_auto_hide: Mutex<Option<Instant>>,
+    /// The tray icon's screen rect (physical px), cached from tray events so we
+    /// can position the popover analytically without reading window geometry
+    /// back (which lags a cycle on macOS). `None` until the first tray event.
+    tray_rect: Mutex<Option<(PhysicalPosition<f64>, PhysicalSize<f64>)>>,
 }
 
 /// Minimum popover size, in logical pixels. Mirrors `minWidth`/`minHeight` on the
@@ -73,13 +91,15 @@ fn persist_popover_size(window: &tauri::Window) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical = physical.to_logical::<f64>(scale);
-    // Load-merge so we don't clobber other fields (e.g. the chosen theme).
-    let mut settings = app_settings::load();
-    settings.window = Some(app_settings::WindowSize {
-        width: logical.width,
-        height: logical.height,
+    // Load-merge under the shared lock so we don't clobber other fields (e.g. the
+    // chosen theme) nor race a concurrent settings write.
+    let result = app_settings::update(|settings| {
+        settings.window = Some(app_settings::WindowSize {
+            width: logical.width,
+            height: logical.height,
+        });
     });
-    if let Err(e) = app_settings::save(&settings) {
+    if let Err(e) = result {
         tracing::warn!(error = %e, "failed to persist popover size");
     } else {
         tracing::debug!(
@@ -116,13 +136,15 @@ fn persist_settings_size(window: &tauri::Window) {
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let logical = physical.to_logical::<f64>(scale);
-    // Load-merge so we don't clobber other fields (popover size, theme).
-    let mut settings = app_settings::load();
-    settings.settings_window = Some(app_settings::WindowSize {
-        width: logical.width,
-        height: logical.height,
+    // Load-merge under the shared lock so we don't clobber other fields (popover
+    // size, theme) nor race a concurrent settings write.
+    let result = app_settings::update(|settings| {
+        settings.settings_window = Some(app_settings::WindowSize {
+            width: logical.width,
+            height: logical.height,
+        });
     });
-    if let Err(e) = app_settings::save(&settings) {
+    if let Err(e) = result {
         tracing::warn!(error = %e, "failed to persist settings size");
     } else {
         tracing::debug!(
@@ -133,9 +155,96 @@ fn persist_settings_size(window: &tauri::Window) {
     }
 }
 
+/// Find the monitor whose bounds contain the given physical point, preferring an
+/// exact hit and falling back to the primary/current monitor. We test rects
+/// ourselves rather than call `monitor_from_point`, which mis-handles the tray
+/// point on a Retina display and returns `None`.
+fn monitor_at(window: &tauri::WebviewWindow, x: i32, y: i32) -> Option<Monitor> {
+    if let Ok(monitors) = window.available_monitors() {
+        for m in monitors {
+            let mp = m.position();
+            let ms = m.size();
+            if x >= mp.x
+                && x < mp.x + ms.width as i32
+                && y >= mp.y
+                && y < mp.y + ms.height as i32
+            {
+                return Some(m);
+            }
+        }
+    }
+    window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.current_monitor().ok().flatten())
+}
+
+/// Size the popover to fit its display, position it under the tray icon, and
+/// clamp it fully on-screen — all before `show()`, so a popover larger than the
+/// monitor (a stale/huge saved size, or a small display) is shrunk to fit rather
+/// than cropped, a tray icon near the far-right edge doesn't push it off, and the
+/// window never flashes at the wrong spot. The target is computed analytically
+/// from the cached tray rect, window size, and monitor bounds (all physical px)
+/// rather than by reading the window's live geometry back, which lags a cycle on
+/// macOS and made the placement toggle between opens.
+///
+/// Falls back to the positioner's `move_window(TrayCenter)` when we have no
+/// cached tray rect yet (e.g. a single-instance relaunch before any tray click)
+/// or can't read the window size.
+fn position_popover(window: &tauri::WebviewWindow, tray: Option<(PhysicalPosition<f64>, PhysicalSize<f64>)>) {
+    let (Some((tray_pos, tray_size)), Ok(win)) = (tray, window.outer_size()) else {
+        let _ = window.move_window(Position::TrayCenter);
+        return;
+    };
+    let (mut win_w, mut win_h) = (win.width as i32, win.height as i32);
+    let (tray_x, tray_y, tray_w) = (tray_pos.x as i32, tray_pos.y as i32, tray_size.width as i32);
+
+    let monitor = monitor_at(window, tray_x, tray_y);
+
+    // Shrink to fit the display if the saved size is larger than the monitor, so
+    // the popover can never be cropped regardless of its persisted dimensions.
+    // Use the resulting size in the placement math directly — set_size, like
+    // set_position, isn't reliably readable back on the same cycle on macOS.
+    if let Some(m) = &monitor {
+        let ms = m.size();
+        let fit_w = win_w.min(ms.width as i32);
+        let fit_h = win_h.min(ms.height as i32);
+        if fit_w != win_w || fit_h != win_h {
+            let _ = window.set_size(PhysicalSize::new(fit_w as u32, fit_h as u32));
+            win_w = fit_w;
+            win_h = fit_h;
+        }
+    }
+
+    // TrayCenter (macOS): center horizontally under the icon, drop down from the
+    // menu bar. Mirrors the positioner's own math so the anchor is unchanged.
+    let mut x = tray_x + tray_w / 2 - win_w / 2;
+    let mut y = tray_y - win_h;
+    if y < 0 {
+        y = tray_y;
+    }
+
+    if let Some(monitor) = monitor {
+        let mp = monitor.position();
+        let ms = monitor.size();
+        // Right/bottom limits, floored at the top-left so a window larger than
+        // the screen still pins to the visible corner rather than overshooting.
+        let max_x = (mp.x + ms.width as i32 - win_w).max(mp.x);
+        let max_y = (mp.y + ms.height as i32 - win_h).max(mp.y);
+        x = x.clamp(mp.x, max_x);
+        y = y.clamp(mp.y, max_y);
+    }
+
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
 fn show_popover(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.move_window(Position::TrayCenter);
+        let tray = app
+            .try_state::<PopoverState>()
+            .and_then(|s| *s.tray_rect.lock().unwrap());
+        position_popover(&window, tray);
         let _ = window.show();
         let _ = window.set_focus();
         // Tell the UI it's being shown so it can refresh; the popover hides on
@@ -168,6 +277,11 @@ fn main() {
         .manage(PopoverState::default())
         .manage(registry)
         .plugin(tauri_plugin_positioner::init())
+        // Launch-at-login writes a per-user LaunchAgent (issue #98).
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Relaunch focuses the existing app instead of spawning a second.
             show_popover(app);
@@ -184,32 +298,31 @@ fn main() {
             repo_settings::repo_set_visibility,
             repo_settings::repo_remove,
             repo_settings::repo_scan_env_files,
+            health::repo_health_check,
             github_list_repos,
             github_list_issues,
             identities::identities_list,
             identities::identities_get_default,
-            identities::identities_set_default,
             identities::identities_add,
             identities::identities_remove,
             links::open_url,
             links::open_path,
-            spawn::spawn_work,
+            links::path_exists,
+            links::reveal_path,
             spawn::prepare_spawn,
-            spawn::suggest_short_title,
+            drafting::suggest_short_title,
             spawn::draft_spawn_preview,
             spawn::confirm_spawn,
-            spawn::create_issue,
             spawn::create_issue_direct,
-            spawn::create_issue_and_spawn,
-            spawn::open_in_editor,
-            spawn::open_repo_in_editor,
+            editor::open_in_editor,
+            editor::open_repo_in_editor,
             spawn::teardown,
-            spawn::open_accessibility_settings,
-            spawn::session_pr,
-            spawn::session_create_pr,
-            spawn::session_pr_checks,
-            spawn::session_work_state,
-            spawn::session_merge_pr,
+            editor::open_accessibility_settings,
+            pr::session_pr,
+            pr::session_create_pr,
+            pr::session_pr_checks,
+            pr::session_work_state,
+            pr::session_merge_pr,
             sessions::sessions_list,
             sessions::session_set_visibility,
             status::sessions_status_list,
@@ -217,12 +330,21 @@ fn main() {
             logging::logs_reveal,
             status::clear_session_error,
             app_settings::app_settings_get_theme,
-            app_settings::app_settings_set_theme,
+            app_settings::app_settings_schema,
+            app_settings::app_settings_get,
+            app_settings::app_settings_set,
+            app_settings::onboarding_complete,
+            tools::tools_resolved,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Recover the user's real login-shell PATH once, so the CLIs we invoke
+            // directly (claude, git, code) resolve even under the minimal PATH the
+            // app gets when launched from /Applications at login. See tools.rs / #85.
+            tools::init();
 
             // Apply the user's persisted popover size before the first show, so
             // the popover opens at their chosen dimensions with no resize flash.
@@ -235,10 +357,21 @@ fn main() {
             // `session-status` events. The watcher must outlive setup(), so park
             // it in managed state (dropping it would stop the watch).
             status::sweep_stale();
+            // Rescue any session left stuck in `creating` by a spawn the app
+            // quit/crashed out of mid-flight: surface it as a spawn error the row
+            // can be torn down from, rather than a permanent "Creating…" pill (#101).
+            status::reconcile_stale_creating();
             // Heal any worktree hooks still pointing at a now-stale binary path
             // (a torn-down/rebuilt spawner), so live status survives across
             // teardowns and `tauri dev` rebuilds. See spawn.rs / issue #35.
-            spawn::reconcile_all_session_hooks();
+            hooks::reconcile_all_session_hooks();
+
+            // Bring the launch-at-login LaunchAgent into agreement with the stored
+            // pref (healing a stale baked binary path), then — on the very first
+            // run only — run onboarding (which offers launch-at-login). Issue #98.
+            app_settings::reconcile_launch_at_login(app.handle());
+            app_settings::maybe_show_onboarding(app.handle());
+
             match status::start_watcher(app.handle().clone()) {
                 Ok(watcher) => {
                     app.manage(Mutex::new(watcher));
@@ -279,6 +412,17 @@ fn main() {
                     let app = tray.app_handle();
                     // Cache the tray rectangle so the positioner can place the window.
                     tauri_plugin_positioner::on_tray_event(app, &event);
+                    // Keep our own copy too: `position_popover` uses it to place
+                    // the window analytically (the positioner's cache is private).
+                    if let TrayIconEvent::Click { rect, .. }
+                    | TrayIconEvent::Enter { rect, .. }
+                    | TrayIconEvent::Move { rect, .. } = &event
+                    {
+                        if let Some(state) = app.try_state::<PopoverState>() {
+                            *state.tray_rect.lock().unwrap() =
+                                Some((rect.position.to_physical(1.0), rect.size.to_physical(1.0)));
+                        }
+                    }
 
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -336,8 +480,48 @@ fn main() {
                 }
                 _ => {}
             },
+            // Closing the onboarding window without pressing "Get started" accepts
+            // the defaults — record completion so it doesn't reappear.
+            "onboarding" => {
+                if let WindowEvent::CloseRequested { .. } = event {
+                    app_settings::complete_onboarding_if_pending(window.app_handle());
+                }
+            }
             _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running mAIestro");
+}
+
+#[cfg(test)]
+mod tests {
+    //! Drift guard: the min-window sizes are mirrored between these Rust constants
+    //! (used to clamp a restored size before first show) and `tauri.conf.json`
+    //! (the actual window `minWidth`/`minHeight`). They must agree, or a restored
+    //! size could be clamped to a value the window itself refuses.
+
+    const CONF: &str = include_str!("../tauri.conf.json");
+
+    fn min_size(label: &str) -> (f64, f64) {
+        let conf: serde_json::Value = serde_json::from_str(CONF).expect("tauri.conf.json is valid JSON");
+        let windows = conf["app"]["windows"].as_array().expect("app.windows array");
+        let w = windows
+            .iter()
+            .find(|w| w["label"] == label)
+            .unwrap_or_else(|| panic!("no window labelled {label}"));
+        (
+            w["minWidth"].as_f64().expect("minWidth"),
+            w["minHeight"].as_f64().expect("minHeight"),
+        )
+    }
+
+    #[test]
+    fn popover_min_matches_conf() {
+        assert_eq!(min_size("main"), (super::MIN_POPOVER_WIDTH, super::MIN_POPOVER_HEIGHT));
+    }
+
+    #[test]
+    fn settings_min_matches_conf() {
+        assert_eq!(min_size("settings"), (super::MIN_SETTINGS_WIDTH, super::MIN_SETTINGS_HEIGHT));
+    }
 }

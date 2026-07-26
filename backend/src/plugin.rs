@@ -6,8 +6,6 @@ pub struct CredentialTypeInfo {
     /// Stable identifier used as the `type_id` in the credential store (e.g. `"github_token"`).
     pub type_id: &'static str,
     pub display_name: &'static str,
-    /// The env var injected into subprocesses when this credential is resolved.
-    pub env_var: &'static str,
     pub description: &'static str,
 }
 
@@ -57,7 +55,6 @@ impl PluginRegistryBuilder {
 pub struct CredentialTypeDto {
     pub type_id: &'static str,
     pub display_name: &'static str,
-    pub env_var: &'static str,
     pub description: &'static str,
 }
 
@@ -71,7 +68,6 @@ pub fn plugins_list_credential_types(
         .map(|t| CredentialTypeDto {
             type_id: t.type_id,
             display_name: t.display_name,
-            env_var: t.env_var,
             description: t.description,
         })
         .collect()

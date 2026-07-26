@@ -25,8 +25,8 @@ pub struct Session {
     pub default_branch: String,
     /// Absolute path to the spawned worktree.
     pub work_dir: String,
-    /// Absolute path to the source checkout the worktree was created from.
-    pub checkout_dir: String,
+    /// Absolute path to the source cloned repo the worktree was created from.
+    pub cloned_repo_dir: String,
     /// Human-facing session name, including the leading emoji.
     pub session_title: String,
     /// Title-bar background color (hex).
@@ -43,8 +43,7 @@ fn default_branch() -> String {
 }
 
 fn sessions_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".maiestro/sessions")
+    crate::paths::maiestro_dir("sessions")
 }
 
 fn session_path(id: &str) -> PathBuf {
@@ -67,7 +66,7 @@ pub fn save(session: &Session) -> std::io::Result<()> {
     let dir = sessions_dir();
     std::fs::create_dir_all(&dir)?;
     let data = serde_json::to_string_pretty(session).unwrap();
-    std::fs::write(session_path(&session.id), data)
+    crate::paths::write_atomic(&session_path(&session.id), data.as_bytes())
 }
 
 pub fn load_all() -> Vec<Session> {
