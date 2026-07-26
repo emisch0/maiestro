@@ -10,6 +10,8 @@ Directory layout: `backend/` (Rust/Tauri) and `frontend/` (web). Not Tauri's def
 
 The frontend uses **pnpm** (`pnpm-lock.yaml`), not npm or yarn. Use `pnpm install` / `pnpm dev` — `npm install` fails on the `link:` workspace deps.
 
+The menu-bar tray icon is a **brain** icon (`backend/icons/tray.png`, a template image set at `main.rs:258`). Any docs or prose that describe the menu-bar icon should call it the brain icon — an earlier README described it as a "wizard-hat", which was wrong.
+
 ## Git workflow
 
 **Every change to `main` must go through a pull request.** Do not commit or push directly to `main`: branch, push the branch, open a PR, and merge it on GitHub. This holds even for small fixes and the release flow.
