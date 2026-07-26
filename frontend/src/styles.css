@@ -25,7 +25,7 @@
   --bg: rgba(28, 24, 38, 0.97);
   --surface: rgba(255, 255, 255, 0.04);
   --surface-hover: rgba(255, 255, 255, 0.07);
-  --border: rgba(255, 255, 255, 0.08);
+  --border: rgba(255, 255, 255, 0.16);
   --text: #ece9f2;
   --muted: #a39db5;
   --accent: #facc15;
@@ -1366,7 +1366,7 @@ body {
 
 .repo-item:hover {
   background: var(--surface-hover);
-  border-color: rgba(255, 255, 255, 0.13);
+  border-color: rgba(255, 255, 255, 0.24);
 }
 
 .repo-item-name {
