@@ -226,3 +226,7 @@ the source of truth; the short version:
 - **Launched sessions get your ambient environment.** Launches go through
   Launch Services / your login shell, so sessions inherit your PATH, git auth,
   and `claude` login — mAIestro injects nothing.
+
+## License
+
+mAIestro is released under the [MIT License](LICENSE).

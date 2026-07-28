@@ -3,6 +3,7 @@ name = "maiestro"
 version = "0.2.2"
 description = "Menu-bar launcher for per-issue dev workspaces"
 edition = "2021"
+license = "MIT"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
