@@ -1,11 +1,11 @@
-# Frontend CI — runs on every pull request and on pushes to main.
+# CI — runs on every pull request and on pushes to main.
 #
-# Scope is deliberately the frontend only (typecheck + vitest) on an ubuntu
-# runner. The backend is a Tauri/objc crate that only builds on macOS, and macOS
-# minutes bill at 10× on the free private-repo plan — so `cargo test`/`cargo
-# clippy` are NOT run here. They are a LOCAL gate: run before merging as part of
-# the normal dev/review loop (see issue #111). This workflow is the natural
-# enforcement point for the PR-only-main rule.
+# Two jobs: frontend (typecheck + vitest) on ubuntu, and backend (cargo test +
+# clippy) on macos-latest — the backend is a Tauri/objc crate that only builds
+# on macOS. Actions minutes are unmetered on public repos, so both run in CI
+# (see issue #122); on a private repo macOS minutes bill at 10×, which is why
+# the backend job was previously a local-only gate (see issue #111). This
+# workflow is the natural enforcement point for the PR-only-main rule.
 name: CI
 
 on:
@@ -44,3 +44,27 @@ jobs:
 
       - name: Unit tests
         run: pnpm test
+
+  backend:
+    name: Backend (test + clippy)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Tests
+        working-directory: backend
+        run: cargo test --locked
+
+      - name: Clippy
+        working-directory: backend
+        run: cargo clippy --locked --all-targets -- -D warnings
