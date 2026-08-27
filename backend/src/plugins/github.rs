@@ -380,6 +380,15 @@ pub struct RepoItem {
     pub description: Option<String>,
 }
 
+/// Map a repo object from the GitHub API to the picker's `RepoItem`.
+fn repo_item(v: &serde_json::Value) -> RepoItem {
+    RepoItem {
+        full_name: v["full_name"].as_str().unwrap_or("").to_string(),
+        private: v["private"].as_bool().unwrap_or(false),
+        description: v["description"].as_str().map(|s| s.to_string()),
+    }
+}
+
 #[tauri::command]
 pub async fn github_list_repos(identity_id: String) -> Result<Vec<RepoItem>, String> {
     crate::log_invoke_debug!("github_list_repos", identity = %identity_id);
@@ -408,11 +417,7 @@ pub async fn github_list_repos(identity_id: String) -> Result<Vec<RepoItem>, Str
         let count = page_data.len();
 
         for repo in page_data {
-            repos.push(RepoItem {
-                full_name: repo["full_name"].as_str().unwrap_or("").to_string(),
-                private: repo["private"].as_bool().unwrap_or(false),
-                description: repo["description"].as_str().map(|s| s.to_string()),
-            });
+            repos.push(repo_item(&repo));
         }
 
         if count < 100 || page >= 10 {
@@ -422,6 +427,18 @@ pub async fn github_list_repos(identity_id: String) -> Result<Vec<RepoItem>, Str
     }
 
     Ok(repos)
+}
+
+/// Look up one repo by "owner/name", for tracking a repo the identity has no
+/// affiliation with (so it never appears in `github_list_repos`) — see #124.
+/// The returned `full_name` is GitHub's canonical spelling, which normalizes
+/// the case of what the user typed.
+#[tauri::command]
+pub async fn github_get_repo(identity_id: String, repo: String) -> Result<RepoItem, String> {
+    crate::log_invoke_debug!("github_get_repo", identity = %identity_id, repo = %repo);
+    let gh = GitHub::for_identity(&identity_id).await?;
+    let v = gh.repo(repo.trim()).await?;
+    Ok(repo_item(&v))
 }
 
 /// An open issue plus its open sub-issues, nested recursively.
@@ -694,6 +711,57 @@ mod tests {
         // body verbatim — identical to the first result.
         let second = gh.repo("o/r").await.unwrap();
         assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn repo_item_uses_githubs_canonical_full_name() {
+        // The manual-add path (#124) types a repo by hand, so the API response —
+        // not the typed string — is the source of truth for the tracked name.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            // GitHub resolves repo names case-insensitively, so the lookup is
+            // made with what the user typed and answers with the canonical name.
+            .and(path("/repos/octo/hello-world"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "full_name": "octo/Hello-World",
+                "private": false,
+                "description": "My first repository"
+            })))
+            .mount(&server)
+            .await;
+
+        // Typed in the wrong case; GitHub resolves it to the canonical spelling.
+        let v = GitHub::for_test(&server.uri()).repo("octo/hello-world").await.unwrap();
+        let item = repo_item(&v);
+        assert_eq!(item.full_name, "octo/Hello-World");
+        assert!(!item.private);
+        assert_eq!(item.description.as_deref(), Some("My first repository"));
+    }
+
+    #[tokio::test]
+    async fn repo_lookup_surfaces_not_found_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/octo/nope"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })))
+            .mount(&server)
+            .await;
+
+        let err = GitHub::for_test(&server.uri()).repo("octo/nope").await.unwrap_err();
+        assert!(err.contains("Not Found"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn repo_item_defaults_missing_fields() {
+        let item = repo_item(&json!({}));
+        assert_eq!(item.full_name, "");
+        assert!(!item.private);
+        assert!(item.description.is_none());
+        // A null description (common on GitHub) maps to None, not "null".
+        let item = repo_item(&json!({ "full_name": "o/r", "private": true, "description": null }));
+        assert_eq!(item.full_name, "o/r");
+        assert!(item.private);
+        assert!(item.description.is_none());
     }
 
     #[tokio::test]

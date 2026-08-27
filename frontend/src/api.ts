@@ -295,6 +295,11 @@ export const api = {
   githubListRepos: (identityId: string) =>
     invoke<GHRepo[]>("github_list_repos", { identityId }),
 
+  /** Look up one repo by "owner/name" — for tracking a repo the identity has no
+   *  affiliation with, so it never shows up in `githubListRepos`. */
+  githubGetRepo: (identityId: string, repo: string) =>
+    invoke<GHRepo>("github_get_repo", { identityId, repo }),
+
   githubListIssues: (identityId: string, repo: string) =>
     invoke<IssueNode[]>("github_list_issues", { identityId, repo }),
 

@@ -240,9 +240,12 @@ fn remote_owner_name(url: &str) -> Option<String> {
 
 /// A sample `git clone` command for `repo` ("owner/name") into `dir` (kept as the
 /// user typed it, `~` and all, so it's a copy-paste-ready shell command). Uses the
-/// SSH remote, matching how private-repo checkouts are typically cloned.
+/// HTTPS remote: it needs no credentials at all for a public repo, and falls back
+/// to whatever credential helper git already has for a private one. The SSH form
+/// this used to emit silently assumed a GitHub SSH key, so on a machine that only
+/// ever authenticates over HTTPS the hint was a command that could never work.
 fn clone_command(repo: &str, dir: &str) -> String {
-    format!("git clone git@github.com:{repo}.git {dir}")
+    format!("git clone https://github.com/{repo}.git {dir}")
 }
 
 /// A directly-invoked CLI (`git`, `claude`) resolves to a real file. Because a
@@ -646,10 +649,10 @@ mod tests {
     }
 
     #[test]
-    fn clone_command_uses_ssh_remote_and_keeps_tilde_dir() {
+    fn clone_command_uses_https_remote_and_keeps_tilde_dir() {
         assert_eq!(
             clone_command("owner/name", "~/src/name"),
-            "git clone git@github.com:owner/name.git ~/src/name"
+            "git clone https://github.com/owner/name.git ~/src/name"
         );
     }
 
