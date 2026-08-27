@@ -39,7 +39,7 @@ use tauri::{
 use tauri_plugin_positioner::{Position, WindowExt};
 
 use plugin::{PluginRegistry, plugins_list_credential_types};
-use plugins::{GitHubPlugin, github_list_issues, github_list_repos};
+use plugins::{GitHubPlugin, github_get_repo, github_list_issues, github_list_repos};
 
 /// Records when the popover was auto-hidden on blur. A tray click that *caused*
 /// that blur (clicking the icon while the window is open) lands here within a few
@@ -300,6 +300,7 @@ fn main() {
             repo_settings::repo_scan_env_files,
             health::repo_health_check,
             github_list_repos,
+            github_get_repo,
             github_list_issues,
             identities::identities_list,
             identities::identities_get_default,

@@ -32,6 +32,10 @@ type SettingsSelection =
   | { kind: "preferences" }
   | null;
 
+// A hand-typed repo in the Add Repo picker, e.g. "octocat/Hello-World". Matches
+// the characters GitHub allows in an owner or repo name (#124).
+const OWNER_NAME_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
 // The "couldn't load ~/.maiestro/*.json" banner shown instead of a form full of
 // defaults (which would clobber the file on the next save). `hint` names how to
 // recover for the specific file.
@@ -87,12 +91,13 @@ export function Settings() {
   const [health, setHealth] = useState<HealthState | null>(null);
   const [browse, setBrowse] = useState<{
     identityId: string | null;
-    identityInput: string;
     repos: GHRepo[] | null;
     filter: string;
     loading: boolean;
+    // True while a typed "owner/name" is being validated against GitHub (#124).
+    adding: boolean;
     error?: string;
-  }>({ identityId: null, identityInput: "", repos: null, filter: "", loading: false });
+  }>({ identityId: null, repos: null, filter: "", loading: false, adding: false });
   // Global app settings ("Preferences" panel), rendered via JSON Forms (#85).
   const [appSchema, setAppSchema] = useState<Record<string, unknown> | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
@@ -305,14 +310,39 @@ export function Settings() {
     patchCred(type_id, { status: "idle", isSet: false, input: "" });
   }
 
+  // Picking an identity immediately loads its repos — there is no Fetch button.
+  // Switching identities is therefore cheap, so a response that arrives after
+  // the user has moved on is discarded rather than replacing the newer list.
   async function handleSelectBrowseIdentity(iid: string) {
-    setBrowse((prev) => ({ ...prev, identityId: iid, loading: true, error: undefined }));
+    if (!iid) return;
+    setBrowse((prev) => ({ ...prev, identityId: iid, repos: null, loading: true, error: undefined }));
     try {
       const fetched = await api.githubListRepos(iid);
-      setBrowse((prev) => ({ ...prev, identityId: iid, loading: false, repos: fetched, filter: "" }));
+      setBrowse((prev) => (prev.identityId === iid ? { ...prev, loading: false, repos: fetched } : prev));
       api.identitiesList().then(setKnownIdentities);
     } catch (e) {
-      setBrowse((prev) => ({ ...prev, identityId: iid, loading: false, error: String(e) }));
+      setBrowse((prev) => (prev.identityId === iid ? { ...prev, loading: false, error: String(e) } : prev));
+    }
+  }
+
+  // Entering the Add Repo view: pick the default identity (or the only/first
+  // one) and start loading its repos right away, so the picker lands ready to
+  // use. The identity stays switchable from the select at the top.
+  async function openAddRepo() {
+    setBrowse({ identityId: null, repos: null, filter: "", loading: true, adding: false });
+    setReposOpen(true);
+    setSelection({ kind: "repo-add" });
+    try {
+      const [list, preferred] = await Promise.all([api.identitiesList(), api.getDefaultIdentity()]);
+      setKnownIdentities(list);
+      const iid = preferred && list.includes(preferred) ? preferred : list[0];
+      if (!iid) {
+        setBrowse((prev) => ({ ...prev, loading: false })); // no identities yet
+        return;
+      }
+      await handleSelectBrowseIdentity(iid);
+    } catch (e) {
+      setBrowse((prev) => ({ ...prev, loading: false, error: String(e) }));
     }
   }
 
@@ -372,6 +402,24 @@ export function Settings() {
     } finally {
       unlistenRunning();
       unlistenDone();
+    }
+  }
+
+  // Track a repo typed as "owner/name" that the fetched list doesn't contain —
+  // typically one the identity has no affiliation with, so `/user/repos` never
+  // returns it (#124). Validated against GitHub first, so a typo fails here
+  // instead of becoming a broken dashboard row.
+  async function handleAddTypedRepo(typed: string) {
+    const iid = browse.identityId;
+    if (!iid) return;
+    setBrowse((prev) => ({ ...prev, adding: true, error: undefined }));
+    try {
+      const found = await api.githubGetRepo(iid, typed);
+      setBrowse((prev) => ({ ...prev, adding: false }));
+      // GitHub's canonical `full_name` wins over what was typed — it fixes case.
+      await handleSelectRepo(found.full_name);
+    } catch (e) {
+      setBrowse((prev) => ({ ...prev, adding: false, error: String(e) }));
     }
   }
 
@@ -466,12 +514,7 @@ export function Settings() {
                 </button>
                 <button
                   className="tree-add-btn"
-                  onClick={() => {
-                    api.identitiesList().then(setKnownIdentities);
-                    setBrowse({ identityId: null, identityInput: "", repos: null, filter: "", loading: false });
-                    setReposOpen(true);
-                    setSelection({ kind: "repo-add" });
-                  }}
+                  onClick={openAddRepo}
                   title="Add repo"
                   aria-label="Add repo"
                 >+</button>
@@ -653,71 +696,58 @@ export function Settings() {
               </div>
             </>
           ) : (
-            /* selection.kind === "repo-add": identity picker → GitHub repo browser */
+            /* selection.kind === "repo-add": the identity's repos, loaded on
+               open, plus manual entry of any "owner/name" (#124). */
             <>
               <div className="detail-header">
-                {browse.identityId !== null ? (
-                  <>
-                    <button
-                      className="btn-back"
-                      onClick={() => setBrowse({ identityId: null, identityInput: "", repos: null, filter: "", loading: false, error: undefined })}
-                    >‹</button>
-                    <span className="detail-title">{browse.identityId}</span>
-                  </>
-                ) : (
-                  <span className="detail-title">Add Repo</span>
-                )}
+                <span className="detail-title">Add Repo</span>
               </div>
-              {browse.repos !== null && (
-                <div className="adding-row">
-                  <input
-                    className="text-input"
-                    type="text"
-                    aria-label="Filter repos"
-                    placeholder="Filter repos…"
-                    value={browse.filter}
-                    autoFocus
-                    onChange={(e) => setBrowse((prev) => ({ ...prev, filter: e.target.value }))}
-                    spellCheck={false}
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                  />
+              {knownIdentities.length > 0 && (
+                <div className="repo-add-controls">
+                  <div className="repo-add-field">
+                    <label className="field-label" htmlFor="repo-add-identity">
+                      Identity
+                    </label>
+                    <select
+                      id="repo-add-identity"
+                      className="text-input profile-select"
+                      value={browse.identityId ?? ""}
+                      onChange={(e) => handleSelectBrowseIdentity(e.target.value)}
+                    >
+                      {knownIdentities.map((iid) => (
+                        <option key={iid} value={iid}>{iid}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="repo-add-field">
+                    <label className="field-label" htmlFor="repo-add-filter">
+                      Repository
+                    </label>
+                    <input
+                      id="repo-add-filter"
+                      className="text-input"
+                      type="text"
+                      placeholder="Filter repos, or type owner/name…"
+                      value={browse.filter}
+                      autoFocus
+                      onChange={(e) => setBrowse((prev) => ({ ...prev, filter: e.target.value }))}
+                      spellCheck={false}
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                    />
+                  </div>
                 </div>
               )}
               <div className="cred-list">
-                {browse.identityId === null && (
-                  knownIdentities.length === 0 ? (
-                    <div className="empty-state">
-                      <p className="empty-state-title">No identities yet</p>
-                      <p className="empty-state-body">
-                        Add an identity in the Identities section first, then save a GitHub token for it.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="cred-controls">
-                      <select
-                        className="text-input profile-select"
-                        aria-label="Identity"
-                        value={browse.identityInput}
-                        autoFocus
-                        onChange={(e) => setBrowse((prev) => ({ ...prev, identityInput: e.target.value }))}
-                      >
-                        <option value="">Select an identity…</option>
-                        {knownIdentities.map((iid) => (
-                          <option key={iid} value={iid}>{iid}</option>
-                        ))}
-                      </select>
-                      <button
-                        className="btn-save"
-                        disabled={!browse.identityInput.trim()}
-                        onClick={() => handleSelectBrowseIdentity(browse.identityInput.trim())}
-                      >
-                        Fetch
-                      </button>
-                    </div>
-                  )
+                {knownIdentities.length === 0 && !browse.loading && (
+                  <div className="empty-state">
+                    <p className="empty-state-title">No identities yet</p>
+                    <p className="empty-state-body">
+                      Add an identity in the Identities section first, then save a GitHub token for it.
+                    </p>
+                  </div>
                 )}
-                {browse.identityId !== null && browse.loading && (
+                {browse.loading && (
                   <div className="empty-state">
                     <p className="empty-state-body">Fetching repos…</p>
                   </div>
@@ -725,27 +755,53 @@ export function Settings() {
                 {browse.error && (
                   <p className="cred-error" style={{ paddingTop: 4 }}>{browse.error}</p>
                 )}
-                {browse.repos !== null && (() => {
-                  const filtered = browse.repos.filter((r) =>
+                {browse.identityId !== null && (() => {
+                  const repos = browse.repos ?? [];
+                  const filtered = repos.filter((r) =>
                     !browse.filter || r.full_name.toLowerCase().includes(browse.filter.toLowerCase())
                   );
-                  return filtered.length === 0 ? (
-                    <div className="empty-state">
-                      <p className="empty-state-body">No repos match your filter.</p>
-                    </div>
-                  ) : filtered.map((r) => (
-                    <button
-                      key={r.full_name}
-                      className="repo-item"
-                      onClick={() => handleSelectRepo(r.full_name)}
-                    >
-                      <span className="repo-item-name">{r.full_name}</span>
-                      {r.private
-                        ? <span className="repo-item-private">private</span>
-                        : <span className="repo-item-chevron">›</span>
-                      }
-                    </button>
-                  ));
+                  // The filter doubles as manual entry: anything shaped like
+                  // "owner/name" and absent from the fetched list can still be
+                  // tracked (#124). Offered while the list is still loading too,
+                  // so a repo you can already name never waits on the fetch.
+                  const typed = browse.filter.trim();
+                  const canAddTyped =
+                    OWNER_NAME_RE.test(typed) &&
+                    !repos.some((r) => r.full_name.toLowerCase() === typed.toLowerCase());
+                  return (
+                    <>
+                      {canAddTyped && (
+                        <button
+                          className="repo-item"
+                          disabled={browse.adding}
+                          onClick={() => handleAddTypedRepo(typed)}
+                        >
+                          <span className="repo-item-name">
+                            {browse.adding ? `Adding ${typed}…` : `Add ${typed}…`}
+                          </span>
+                          <span className="repo-item-chevron">›</span>
+                        </button>
+                      )}
+                      {browse.repos !== null && filtered.length === 0 && !canAddTyped && (
+                        <div className="empty-state">
+                          <p className="empty-state-body">No repos match your filter.</p>
+                        </div>
+                      )}
+                      {filtered.map((r) => (
+                        <button
+                          key={r.full_name}
+                          className="repo-item"
+                          onClick={() => handleSelectRepo(r.full_name)}
+                        >
+                          <span className="repo-item-name">{r.full_name}</span>
+                          {r.private
+                            ? <span className="repo-item-private">private</span>
+                            : <span className="repo-item-chevron">›</span>
+                          }
+                        </button>
+                      ))}
+                    </>
+                  );
                 })()}
               </div>
             </>

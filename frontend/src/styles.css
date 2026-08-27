@@ -1331,6 +1331,23 @@ body {
   flex-shrink: 0;
 }
 
+/* Add Repo: the identity picker and the filter/manual-entry box, stacked as
+   labeled fields. Both need a visible label — on its own the identity select
+   just reads as a bare value ("default"), naming nothing. The top padding is
+   what separates the first field from the detail header above it. */
+.repo-add-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 20px 12px;
+  flex-shrink: 0;
+}
+
+.repo-add-field {
+  display: flex;
+  flex-direction: column;
+}
+
 .btn-add {
   font-size: 12px;
   font-weight: 600;
