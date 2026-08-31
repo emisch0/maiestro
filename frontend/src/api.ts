@@ -199,6 +199,22 @@ export interface AppSettings {
   onboarding_completed?: boolean | null;
 }
 
+/** Version + build metadata for the running app, shown in Preferences → About (#126). */
+export interface AppVersion {
+  /** Semver from tauri.conf.json, e.g. "0.2.3". On a dev build, the last
+   *  released version this build sits on top of. */
+  version: string;
+  /** UTC date the binary was built, YYYY-MM-DD. */
+  build_date: string;
+  /** Short git SHA of the checkout it was built from; null when unavailable. */
+  commit: string | null;
+  /** GitHub Release page for this version's tag. */
+  release_url: string;
+  /** True for a local build made after the `version` release, rather than that
+   *  release itself — rendered as "X.Y.Z+dev". */
+  dev_build: boolean;
+}
+
 /** How a directly-invoked tool currently resolves, for the settings status line. */
 export interface ResolvedTool {
   tool: string;
@@ -396,4 +412,8 @@ export const api = {
   /** Per-tool resolution (path + whether it exists), for the Tool paths status line. */
   toolsResolved: () =>
     invoke<ResolvedTool[]>("tools_resolved"),
+
+  /** Version + build metadata of the running app, for the About section. */
+  appVersion: () =>
+    invoke<AppVersion>("app_version"),
 };

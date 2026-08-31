@@ -1,6 +1,7 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod app_settings;
 mod credentials;
 mod drafting;
@@ -336,6 +337,7 @@ fn main() {
             app_settings::app_settings_set,
             app_settings::onboarding_complete,
             tools::tools_resolved,
+            about::app_version,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
