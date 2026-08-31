@@ -225,7 +225,9 @@ cmd_build() {
   fi
 
   echo "Building signed release as: $APPLE_SIGNING_IDENTITY"
-  pnpm tauri build
+  # Marks the binary as an official release build (backend/build.rs stamps it in).
+  # Without it the About panel labels the version "X.Y.Z+dev" — see #126.
+  MAIESTRO_RELEASE=1 pnpm tauri build
 
   local app="backend/target/release/bundle/macos/mAIestro.app"
   echo

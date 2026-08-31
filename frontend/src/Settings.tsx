@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, AppSettings, CredentialScope, CredentialTypeDto, GHRepo, HealthCheck, RepoSettings, ResolvedTool } from "./api";
+import { api, AppSettings, AppVersion, CredentialScope, CredentialTypeDto, GHRepo, HealthCheck, RepoSettings, ResolvedTool } from "./api";
 import { JsonForms } from "@jsonforms/react";
 import {
   repoSettingsRenderers,
@@ -19,6 +19,7 @@ import { applyTheme } from "./theme";
 import ChevronRightIcon from "./icons/chevron-right.svg?react";
 import { CredRows, CredState } from "./components/CredRows";
 import { DetailErrorBoundary } from "./components/DetailErrorBoundary";
+import { AboutSection } from "./components/AboutSection";
 import { HealthModal, HealthState } from "./components/HealthModal";
 import { DismissibleError } from "./components/DismissibleError";
 import { RemoveConfirm } from "./components/RemoveConfirm";
@@ -105,6 +106,9 @@ export function Settings() {
   const [appSaveError, setAppSaveError] = useState<string | null>(null);
   // How each directly-invoked CLI currently resolves, for the Tool paths status line.
   const [resolvedTools, setResolvedTools] = useState<ResolvedTool[]>([]);
+  // Version + build metadata for the About block under the Preferences form
+  // (#126). Read-only, so a failed fetch just hides the block.
+  const [appVersion, setAppVersion] = useState<AppVersion | null>(null);
 
   // Debounced autosave for the two JsonForms panels. The repo form saves to the
   // repo carried in its own data (the hidden `repo` field round-trips); the app
@@ -150,6 +154,7 @@ export function Settings() {
       })
       .catch((e) => setAppLoadError(String(e)));
     api.toolsResolved().then(setResolvedTools).catch(() => setResolvedTools([]));
+    api.appVersion().then(setAppVersion).catch(() => setAppVersion(null));
   }
 
   // Autosave the Preferences form, debounced, skipped while ajv reports errors.
@@ -592,6 +597,7 @@ export function Settings() {
               ) : (
                 <p className="session-hint" style={{ paddingTop: 2 }}>Loading…</p>
               )}
+              {appVersion && <AboutSection info={appVersion} />}
             </div>
           ) : selection.kind === "identity" ? (
             <>

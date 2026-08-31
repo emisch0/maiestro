@@ -7,6 +7,8 @@ license = "MIT"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Formats the compile-time build date stamped into the binary (see build.rs, #126).
+time = { version = "0.3", features = ["formatting", "macros"] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }

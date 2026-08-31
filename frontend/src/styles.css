@@ -2433,3 +2433,63 @@ body {
 .jsf-root .control:empty {
   display: none;
 }
+
+/* ── About (Preferences → About, #126) ───────────────────────────────── */
+
+.about-group {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+/* Matches the .jsf-label look of the form fields above it, without living
+   inside .jsf-root (the About block is not a settings field). */
+.about-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.about-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.about-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  /* Version, build date and commit are worth copying into a bug report — opt
+     back into selection, since the .panel shell sets user-select: none. */
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+.about-version {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.about-version .ai {
+  color: var(--accent);
+}
+
+/* Marks a build that didn't come from scripts/release.sh, next to the
+   "X.Y.Z+dev" version label. */
+.about-dev-badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  color: var(--muted);
+  vertical-align: 1px;
+}
