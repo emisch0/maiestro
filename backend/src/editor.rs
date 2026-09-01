@@ -18,7 +18,8 @@ use crate::tools::shell_quote;
 /// Write the worktree's `.vscode/{settings,tasks}.json`: title-bar theming keyed
 /// to `color`, a `window.title` marker teardown finds the window by, and a
 /// folder-open task that starts the user-facing Claude session in the integrated
-/// terminal.
+/// terminal — themed to the same `color` via `/color`, so the session UI matches
+/// the title bar and the popover row.
 pub fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, session_title: &str) -> Result<(), String> {
     let vscode = work_dir.join(".vscode");
     std::fs::create_dir_all(&vscode).map_err(|e| e.to_string())?;
@@ -49,10 +50,20 @@ pub fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, sessi
     // Folder-open task that starts a real, user-facing Claude session in the
     // integrated terminal. --remote-control lets the user drive the session
     // remotely; mAIestro still only launches it, it does not host it. --name
-    // gives the session the same display name mAIestro tracks it by.
+    // gives the session the same display name mAIestro tracks it by, and the
+    // trailing `/color <name>` prompt carries the worktree's theme into the
+    // session UI so it matches the dashboard row and the title bar.
+    //
+    // The color goes through the initial *prompt* rather than a flag because
+    // Claude Code's `--agent-color` is only honored alongside
+    // `--agent-id`/`--agent-name`/`--team-name` (teammate sessions); passing it
+    // on its own is silently ignored. A leading-slash initial prompt is
+    // dispatched as a command, so it costs one line in the transcript and no
+    // model call.
     let command = format!(
-        "claude --remote-control --name {}",
-        shell_quote(session_title)
+        "claude --remote-control --name {} {}",
+        shell_quote(session_title),
+        shell_quote(&format!("/color {}", crate::theming::claude_color(color)))
     );
     let tasks = serde_json::json!({
         "version": "2.0.0",
@@ -284,7 +295,28 @@ pub fn open_accessibility_settings() {
 
 #[cfg(test)]
 mod tests {
-    use super::path_at_or_under;
+    use super::{path_at_or_under, write_vscode_files};
+
+    /// The generated folder-open task carries the worktree's theme into the
+    /// session as a `/color <name>` initial prompt, quoted as one argv entry, and
+    /// still names the session. A palette hex with no mapping degrades to
+    /// `default` rather than emitting a color Claude would reject.
+    #[test]
+    fn startup_task_themes_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        write_vscode_files(dir.path(), "work-127-add-session-color", "#6c1a5a", "\u{1f380} #127 \u{2014} Add session color").unwrap();
+
+        let tasks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
+        let command = tasks["tasks"][0]["command"].as_str().unwrap();
+        assert!(command.contains("'/color pink'"), "not themed: {command}");
+        assert!(command.contains("--name '\u{1f380} #127 \u{2014} Add session color'"), "not named: {command}");
+
+        write_vscode_files(dir.path(), "work-1-x", "#nonsense", "x").unwrap();
+        let tasks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
+        assert!(tasks["tasks"][0]["command"].as_str().unwrap().contains("'/color default'"));
+    }
 
     #[test]
     fn path_at_or_under_requires_boundary() {

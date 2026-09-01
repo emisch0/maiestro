@@ -132,6 +132,39 @@ fn resolve_workspace(
     WorkspacePlan::Create { workspace, branch, work_dir, session_label }
 }
 
+/// The name of the worktree's parent directory (e.g. `work-127-add-session-color`),
+/// which the generated `window.title` marker — and teardown's window lookup — are
+/// keyed on. Empty when the path has no usable parent.
+fn work_parent_of(work_dir: &Path) -> String {
+    work_dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Regenerate a reused worktree's `.vscode` files from its recorded session, so
+/// reopening picks up changes to what we generate (the session color, the window
+/// marker, the startup task) without needing a fresh spawn.
+///
+/// Deliberately sourced from the session record rather than the caller's freshly
+/// picked theme: reopening a worktree must not re-theme it. Best-effort — a
+/// worktree with no session record is left untouched, and a write failure only
+/// warns, because the reopen itself must still succeed.
+fn refresh_vscode_files(work_dir: &Path, workspace: &str) {
+    let Some(session) = crate::sessions::get(workspace) else {
+        return;
+    };
+    if let Err(e) = write_vscode_files(
+        work_dir,
+        &work_parent_of(work_dir),
+        &session.color,
+        &session.session_title,
+    ) {
+        tracing::warn!(error = %e, "could not refresh .vscode files on reuse");
+    }
+}
+
 /// Everything the background phase of a fresh spawn needs, owned so it can move
 /// into the `tokio::spawn`ed task that builds the worktree after `do_spawn` has
 /// already returned. See `finish_spawn`.
@@ -200,6 +233,9 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
             // Reopening doesn't rewrite hooks, so heal a stale binary path here
             // too (without waiting for the next startup reconcile).
             reconcile_session_hooks(&work_dir, &workspace);
+            // Same for the generated `.vscode` files, so a worktree spawned
+            // before a change to them (e.g. the session color) picks it up.
+            refresh_vscode_files(&work_dir, &workspace);
             open_vscode(&work_dir)?;
             tracing::info!(repo = %repo, issue = issue_number, branch = %branch, reused = true, "spawned workspace");
             return Ok(SpawnResult {
@@ -219,7 +255,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     tracing::Span::current().record("session", workspace.as_str());
 
     let session_title = format!("{emoji} {session_label}");
-    let work_parent = work_dir.parent().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let work_parent = work_parent_of(&work_dir);
 
     // Record the session up front so the dashboard shows the row immediately
     // (and so its color counts as taken for the next spawn) — the worktree it
