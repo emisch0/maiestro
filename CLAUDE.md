@@ -25,7 +25,7 @@ Because the repo is private on a free plan, GitHub-side branch protection isn't 
 The spawn subsystem was one ~2,200-line `spawn.rs`; issue #99 split it along its natural seams so each file owns one responsibility (and the logging/testing conventions stay uniform). Where the pieces live now:
 
 - **`spawn.rs`** — spawn core (`do_spawn`/`finish_spawn`), the preview commands (`prepare_spawn`/`draft_spawn_preview`/`confirm_spawn`), and `teardown`.
-- **`theming.rs`** — worktree title-bar color/emoji picking (`pick_theme`).
+- **`theming.rs`** — worktree color/emoji picking (`pick_theme`) and the palette → Claude-session-color mapping (`claude_color`).
 - **`hooks.rs`** — the Claude Code status-hook subsystem (write, merge, reconcile) — see "Live per-session status".
 - **`editor.rs`** — VS Code workspace-file generation, launch/focus, and the teardown window control (AppleScript/`lsof`).
 - **`drafting.rs`** — the AI-drafting calls (`claude_text`, issue/short-label drafting, `ClaudeActivity`).
@@ -108,6 +108,22 @@ Every launch hands off to the OS rather than building an env: opening an app use
 Which app a session opens in (a specific terminal, an editor) and any workspace-level env files are stored in per-repo settings — see "Per-repo settings" below.
 
 One deliberate exception: when VS Code is available, we open worktrees via its `code` CLI (resolved by `tools::find_tool("code")` — see "External tool resolution") instead of `open -a`, so we can pass `--disable-workspace-trust` and skip the "Do you trust the authors?" prompt on every freshly spawned worktree. The `code` CLI forwards that flag even to an already-running VS Code, which `open -a --args` cannot. If no `code` CLI is found we fall back to `open -a "Visual Studio Code" --args --disable-workspace-trust <worktree>`. The session still inherits the user's ambient environment either way.
+
+### One color per worktree, all the way to the session
+
+A spawned worktree gets a deterministic color and emoji from `theming::pick_theme`, seeded by the workspace name and avoiding colors already claimed by tracked sessions. That one color is applied in three places so the visual thread survives from the dashboard to where the user actually works: the popover row, VS Code's title/status/activity bars (`editor::write_vscode_files`), and — since issue #127 — the Claude session's own UI.
+
+`PALETTE` is deliberately sized and ordered to match Claude Code's eight session colors (`red, blue, green, yellow, purple, orange, pink, cyan`) one-for-one, so `theming::claude_color` is a **bijection**: no two live sessions collide on a session color while a distinct one goes unused. A unit test enforces this, so adding a ninth palette entry fails the build rather than silently doubling up. (The palette originally carried both a dark teal and a dark cyan — the same Claude color, and near-indistinguishable in a title bar anyway; the dark cyan was retired for a dark yellow to close the gap. `claude_color` is keyed off the **stored** hex and still maps the retired one, so a session recorded before the swap keeps its color.)
+
+The color reaches the session as a **`/color <name>` initial prompt** appended to the launch command:
+
+```
+claude --remote-control --name '🎀 #127 — Add session color' '/color pink'
+```
+
+Not via a flag: Claude Code's `--agent-color` is only honored alongside `--agent-id`/`--agent-name`/`--team-name` (teammate sessions) and is **silently ignored** on its own. A leading-slash initial prompt is dispatched as a command, so this costs one line in the transcript and no model call.
+
+Because the launch command lives in the worktree's generated `.vscode/tasks.json`, a worktree keeps whatever its original spawn baked in. So the **reuse** spawn path regenerates the `.vscode` files (`spawn::refresh_vscode_files`), mirroring what `reconcile_session_hooks` does for hooks: reopening picks up changes to what we generate, and worktrees spawned before this existed get themed on their next reopen. The values come from the **session record**, not the caller's freshly picked theme — reopening must never re-theme a worktree. It is best-effort: no session record means no rewrite, and a write failure only warns. Note this overwrites `.vscode/settings.json` and `tasks.json` on every reopen, so hand edits to those generated files do not survive.
 
 ### External tool resolution
 
