@@ -337,17 +337,39 @@ cmd_publish() {
   # Push the tag (no-op if the remote already has it at this sha).
   git push origin "$tag"
 
-  # 2. Release. Reuse an existing one for the tag, else create it.
-  resp="$(github_request GET "$api/repos/$owner/$repo/releases/tags/$tag")"
+  # 2. Release. Reuse an existing one for the tag, else create it as a *draft*.
+  #
+  # It is created as a draft and only published in step 4, once the .dmg is
+  # attached. With the repo's immutable releases setting on, publishing freezes
+  # the release *and its assets*, so a release created already-published can
+  # never receive its .dmg — the upload comes back "Cannot upload assets to an
+  # immutable release" (HTTP 422). A draft is still mutable, so the only order
+  # that works is create-draft -> upload -> publish.
+  #
+  # Drafts are invisible to /releases/tags/<tag> (it only resolves published
+  # releases), so the reuse lookup lists releases and matches tag_name itself —
+  # otherwise re-running after a failed upload would create a second release
+  # instead of resuming the draft.
+  resp="$(github_request GET "$api/repos/$owner/$repo/releases?per_page=100")"
   status="${resp##*$'\n'}"; data="${resp%$'\n'*}"
+  [[ "$status" == "200" ]] || die "listing releases failed (HTTP $status): $data"
 
-  local release_id upload_url
-  if [[ "$status" == "200" ]]; then
+  local release_id upload_url is_draft found
+  found="$(printf '%s' "$data" | TAG="$tag" python3 -c '
+import json, os, sys
+tag = os.environ["TAG"]
+for r in json.load(sys.stdin):
+    if r["tag_name"] == tag:
+        print("\t".join([str(r["id"]), r["upload_url"], "1" if r["draft"] else "0"]))
+        break
+')"
+  if [[ -n "$found" ]]; then
     echo "Release $tag already exists — reusing"
-    release_id="$(printf '%s' "$data" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')"
-    upload_url="$(printf '%s' "$data" | python3 -c 'import json,sys;print(json.load(sys.stdin)["upload_url"])')"
-  elif [[ "$status" == "404" ]]; then
-    echo "Creating release $tag"
+    release_id="$(printf '%s' "$found" | cut -f1)"
+    upload_url="$(printf '%s' "$found" | cut -f2)"
+    is_draft="$(printf '%s' "$found" | cut -f3)"
+  else
+    echo "Creating draft release $tag"
     local body_json
     body_json="$(NOTES_FILE="$notes_file" TAG="$tag" python3 <<'PY'
 import json, os
@@ -356,7 +378,7 @@ tag = os.environ["TAG"]
 body = open(notes_file).read() if notes_file else ""
 print(json.dumps({
     "tag_name": tag, "name": tag, "body": body,
-    "draft": False, "prerelease": False,
+    "draft": True, "prerelease": False,
 }))
 PY
 )"
@@ -368,8 +390,7 @@ PY
     [[ "$status" == "201" ]] || die "creating release failed (HTTP $status): $data"
     release_id="$(printf '%s' "$data" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')"
     upload_url="$(printf '%s' "$data" | python3 -c 'import json,sys;print(json.load(sys.stdin)["upload_url"])')"
-  else
-    die "looking up release $tag failed (HTTP $status): $data"
+    is_draft=1
   fi
 
   # 3. Asset. Skip if a same-named asset is already attached.
@@ -387,8 +408,31 @@ PY
     echo "Uploading $dmg_name"
     resp="$(github_request POST "$upload_base?name=$dmg_name" "$dmg" "application/x-apple-diskimage")"
     status="${resp##*$'\n'}"; data="${resp%$'\n'*}"
-    [[ "$status" == "201" ]] || die "uploading $dmg_name failed (HTTP $status): $data"
+    if [[ "$status" != "201" ]]; then
+      # 422 here almost always means the release was published before the asset
+      # was attached, and the repo has immutable releases on — nothing can be
+      # added to it now. The fix is a fresh version, not a retry.
+      if [[ "$status" == "422" ]]; then
+        printf '%s\n' \
+          "Note: release $tag looks already-published and immutable — assets can" \
+          "      no longer be attached to it. Cut the next patch version instead." >&2
+      fi
+      die "uploading $dmg_name failed (HTTP $status): $data"
+    fi
     echo "Uploaded $dmg_name ✓"
+  fi
+
+  # 4. Publish. The draft becomes a real release only now, with the .dmg already
+  # attached — see the immutable-releases note in step 2.
+  if [[ "$is_draft" == "1" ]]; then
+    echo "Publishing release $tag"
+    local tmp_pub; tmp_pub="$(mktemp)"
+    printf '%s' '{"draft": false}' > "$tmp_pub"
+    resp="$(github_request PATCH "$api/repos/$owner/$repo/releases/$release_id" "$tmp_pub")"
+    rm -f "$tmp_pub"
+    status="${resp##*$'\n'}"; data="${resp%$'\n'*}"
+    [[ "$status" == "200" ]] || die "publishing release $tag failed (HTTP $status): $data"
+    echo "Published $tag ✓"
   fi
 
   local html_url; html_url="$(github_request GET "$api/repos/$owner/$repo/releases/$release_id" \
