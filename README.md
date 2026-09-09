@@ -47,6 +47,26 @@ macOS only for now (Windows/Linux are a goal, not a promise). You'll also want
 in — spawned sessions run under your own `claude` login and your ambient git
 auth.
 
+**Recommended: a Nerd Font.** Claude Code's terminal UI draws box-drawing and
+powerline glyphs that a plain monospace font renders as tofu (□). mAIestro sets
+each spawned worktree's VS Code terminal to
+
+```
+'JetBrainsMono Nerd Font', 'Cascadia Code', Menlo, monospace
+```
+
+so installing the first of those makes the session render correctly:
+
+```bash
+brew install --cask font-jetbrains-mono-nerd-font
+```
+
+It's optional — without it the stack falls back to Menlo, which every macOS
+ships, so the terminal still looks fine, just without the glyphs. To use a
+different font, edit `.vscode/settings.json` in the worktree; note that
+reopening a workspace regenerates that file, so a permanent change belongs in
+your own VS Code user settings instead.
+
 ## Quick start
 
 1. Click the brain icon in the menu bar and open **Settings**.
