@@ -35,16 +35,49 @@ A macOS menu-bar app that quickly shows active AI coding sessions. Features incl
 
 ### MacOS
 
-Download the latest `.dmg` from the
+**1. Install mAIestro.** Download the latest `.dmg` from the
 [Releases page](https://github.com/emisch0/maiestro/releases) and drag
 **mAIestro** to Applications.
 
-You need `git` and [Claude Code](https://claude.com/claude-code) installed and logged
-in — spawned sessions run under your own `claude` login and your ambient git
-auth.
+**2. Install Claude Code.** mAIestro launches `claude` into every workspace it
+creates, so it has to be installed and logged in first. Either installer works:
 
-**Recommended: a Nerd Font.** Claude Code's terminal UI draws box-drawing and
-powerline glyphs that a plain monospace font renders as tofu (□). Install with this command
+```bash
+curl -fsSL https://claude.ai/install.sh | bash   # native installer
+brew install --cask claude-code                  # or via Homebrew
+```
+
+Then check it and log in — run `claude` once and follow the browser prompt:
+
+```bash
+claude --version   # prints e.g. 2.1.266 (Claude Code)
+claude             # log in on first run; /login inside a session re-runs it
+```
+
+Claude Code needs a Pro, Max, Team, Enterprise, or Console account; the free
+Claude.ai plan does not include it. mAIestro stores no API key of its own —
+sessions run under your `claude` login. See the
+[Claude Code setup docs](https://code.claude.com/docs/en/setup) if the install
+misbehaves, or run `claude doctor`.
+
+**3. Set up git and GitHub for your sessions.** Spawned sessions push branches
+and fetch under your *ambient* git auth, not through mAIestro. Make sure `git`
+is there (`git --version` prompts to install the Xcode Command Line Tools if it
+isn't), then authenticate — the GitHub CLI is the easiest way, since
+`gh auth login` also sets up git's credential helper:
+
+```bash
+brew install gh
+gh auth login      # choose HTTPS and "authenticate Git with your credentials"
+```
+
+mAIestro itself never shells out to `gh` — its own API calls use the token you
+save in [GitHub token](#github-token) below. `gh auth login` is for the git
+operations that happen *inside* a spawned session.
+
+**4. Recommended: a Nerd Font.** Claude Code's terminal UI draws box-drawing and
+powerline glyphs that a plain monospace font renders as tofu (□). Install with
+this command:
 
 ```bash
 brew install --cask font-jetbrains-mono-nerd-font
@@ -58,17 +91,76 @@ mAIestro is not yet available on other platforms, but it is designed to support 
 
 1. Click the brain icon in the menu bar and open **Settings**.
 2. In **Identities**, add an identity (e.g. `default`) and save a GitHub
-   personal access token for it. The token goes into the macOS Keychain;
-   `~/.maiestro/profiles.json` keeps only a reference to it.
+   personal access token for it — see [GitHub token](#github-token) below for
+   the permissions it needs. The token goes into the macOS Keychain;
+   `~/.maiestro/identities.json` keeps only the identity name.
 3. In **Repos**, click **Add Repo**, pick the identity, and choose a repository
-   from the fetched list. Point its settings at your local checkout if it isn't
-   at the default `~/src/<repo-name>`.
-4. Back in the popover, the repo lists its open issues. Hit **Spawn Work** on
+   from the fetched list — or type any `owner/name` you can read. Point its
+   settings at your local clone if it isn't at the default `~/src/<repo-name>`.
+4. Click **Check Health** at the top of the repo's settings and fix anything it
+   reports — see [Check Health](#check-health) below. It catches a missing
+   clone, an unresolvable `claude`, or a token without push access *before*
+   they break a spawn.
+5. Back in the popover, the repo lists its open issues. Hit **Spawn Work** on
    one — mAIestro creates the worktree, copies your env files, runs your
    post-spawn commands, and opens the editor with Claude working the issue.
    Or write your own idea and let Claude draft the issue first.
-5. When the work is ready, create the PR from the workspace row (Claude drafts
+6. When the work is ready, create the PR from the workspace row (Claude drafts
    the description), merge it once checks pass, and tear the workspace down.
+
+### GitHub token
+
+mAIestro talks to the GitHub REST API directly with a token you store per
+identity. A **fine-grained** personal access token
+([create one](https://github.com/settings/personal-access-tokens/new)) is the
+recommended kind:
+
+- **Repository access** — *Only select repositories*, and pick every repo you
+  want mAIestro to track (or *All repositories* if you prefer).
+- **Repository permissions** — these four, all **Read and write**:
+
+  | Permission | Used for |
+  | --- | --- |
+  | **Metadata** (required) | Reading the repo itself |
+  | **Contents** | How mAIestro derives whether the token can push |
+  | **Issues** | Listing and creating issues, assigning, commenting |
+  | **Pull requests** | Creating, reading, and merging PRs; the checks dot |
+
+  Add **Workflows** if PRs will touch `.github/workflows/`, and **Merge
+  queues** on a repo that merges through a queue — GitHub refuses those merges
+  otherwise. **Actions** and **Commit statuses** are *not* needed: the PR
+  pill's checks dot comes from the pull request's own `mergeable_state`, not
+  the Checks or Statuses APIs, so a token without them still shows check
+  state correctly.
+
+A **classic** token works too — it needs the `repo` scope (`public_repo` is
+enough for a public repo).
+
+Whichever kind you use, mAIestro never injects it into a spawned session;
+sessions push and fetch under your ambient git auth from `gh auth login`. The
+health check below verifies the token without ever creating a throwaway issue
+or PR to test it.
+
+### Check Health
+
+Each repo's settings form has a **Check Health** button that runs the
+prerequisites in one pass and streams the results:
+
+- **Cloned repo exists** — `cloned_repo_dir` is a git repo whose `origin`
+  really points at this `owner/name`.
+- **Git available** and **Session editor available** — the `git` and VS Code
+  `code` CLIs resolve (pin them under **Preferences → Tool paths** if not).
+- **Claude logged in**, with a **model available** sub-check — a real probe of
+  the repo's `prompt_model`, so a login problem and a bad model name are
+  reported separately.
+- **GitHub token & permissions** — the token is valid, the repo is readable,
+  and the token can push. This is derived from the scopes and permissions
+  GitHub reports; mAIestro never creates a throwaway issue or PR to test.
+- **Configured env files exist** and **Terminal font installed** — advisory
+  warnings, not failures.
+
+Failures are informational — they never block a spawn — and several rows come
+with a copy-pasteable fix.
 
 ## The main window
 
@@ -127,12 +219,12 @@ with dotfile tooling. The Settings window is the GUI over the same files.
 
 | Path | What it holds |
 | --- | --- |
-| `profiles.json` | Identities and references to their Keychain credentials (never the secrets themselves) |
+| `identities.json` | The known identity names and the optional default (the tokens themselves live in the macOS Keychain, never here) |
 | `repos/<owner>-<name>.json` | Per-repo settings (see below) |
-| `settings.json` | App-wide settings: popover size, theme (`light`/`dark`/`system`) |
+| `settings.json` | App-wide settings: theme (`light`/`dark`/`system`), CLI tool-path overrides, terminal font, launch-at-login, popover size |
 | `sessions/` / `status/` | Workspace records and live session status (managed by the app) |
 
-Per-repo settings cover the local checkout path (`checkout_dir`), where
+Per-repo settings cover the local clone path (`cloned_repo_dir`), where
 worktrees are created (`worktree_prefix`), `.env` files to copy into each new
 worktree (`env_files`), shell commands to run after a worktree is created
 (`post_spawn_commands`, e.g. `pnpm install`), and overrides for the prompts
@@ -152,7 +244,7 @@ Logs are written to `~/Library/Logs/com.maiestro.app/lYYYYMM/maiestro-YYYYMMDD.l
 Built with [Tauri v2](https://tauri.app): a Rust backend and a React + Vite +
 TypeScript frontend.
 
-```
+```text
 maiestro/
   backend/          # Rust / Tauri: tray, windows, git/GitHub, spawning, hooks
     src/main.rs
