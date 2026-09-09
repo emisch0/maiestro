@@ -124,7 +124,11 @@ export const LaunchAtLoginRenderer = withJsonFormsControlProps(LaunchAtLoginCont
 type ToolKey = "claude" | "git" | "code";
 
 const TOOL_FIELDS: { key: ToolKey; label: string; help: string }[] = [
-  { key: "claude", label: "claude", help: "Used for AI drafting of issues, labels, and PRs." },
+  {
+    key: "claude",
+    label: "claude",
+    help: "Used for AI drafting of issues, labels, and PRs, and to launch Claude in a spawned worktree's VS Code terminal.",
+  },
   { key: "git", label: "git", help: "Used for worktree creation and branch checks." },
   { key: "code", label: "code", help: "The VS Code CLI, used to open spawned worktrees." },
 ];

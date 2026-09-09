@@ -35,7 +35,7 @@
       "properties": {
         "claude": {
           "type": ["string", "null"],
-          "description": "Absolute path to the `claude` CLI (used for AI drafting of issues, labels, and PRs). null/empty = auto-resolve."
+          "description": "Absolute path to the `claude` CLI. Used both for mAIestro's own AI drafting of issues, labels, and PRs, and as the binary the spawned worktree's VS Code startup task launches in the integrated terminal. null/empty = auto-resolve."
         },
         "git": {
           "type": ["string", "null"],
