@@ -14,6 +14,8 @@ import {
   appSettingsRenderers,
   appSettingsCells,
   appSettingsUISchema,
+  extractAppFormDefaults,
+  AppFormDefaults,
 } from "./AppSettingsForm";
 import { applyTheme } from "./theme";
 import ChevronRightIcon from "./icons/chevron-right.svg?react";
@@ -106,6 +108,7 @@ export function Settings() {
   const [appSaveError, setAppSaveError] = useState<string | null>(null);
   // How each directly-invoked CLI currently resolves, for the Tool paths status line.
   const [resolvedTools, setResolvedTools] = useState<ResolvedTool[]>([]);
+  const [appFormDefaults, setAppFormDefaults] = useState<AppFormDefaults>({ terminalFontDefault: "" });
   // Version + build metadata for the About block under the Preferences form
   // (#126). Read-only, so a failed fetch just hides the block.
   const [appVersion, setAppVersion] = useState<AppVersion | null>(null);
@@ -140,7 +143,10 @@ export function Settings() {
       setRepoFormDefaults(extractFormDefaults(s));
       setRepoSchema(sanitizeSchemaForForm(s));
     });
-    api.appSettingsSchema().then((s) => setAppSchema(sanitizeSchemaForForm(s)));
+    api.appSettingsSchema().then((s) => {
+      setAppFormDefaults(extractAppFormDefaults(s));
+      setAppSchema(sanitizeSchemaForForm(s));
+    });
     loadAppSettings();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -263,10 +269,11 @@ export function Settings() {
     [knownIdentities, loadedRepo?.settings.cloned_repo_dir, repoFormDefaults],
   );
 
-  // Config the app-settings custom renderers read (the Tool paths status line).
+  // Config the app-settings custom renderers read (the Tool paths status line,
+  // the Terminal font placeholder).
   const appFormConfig = useMemo(
-    () => ({ showUnfocusedDescription: true as const, resolvedTools }),
-    [resolvedTools],
+    () => ({ showUnfocusedDescription: true as const, resolvedTools, ...appFormDefaults }),
+    [resolvedTools, appFormDefaults],
   );
 
   // Autosave on change, debounced, skipped while ajv reports errors. JsonForms

@@ -63,9 +63,10 @@ brew install --cask font-jetbrains-mono-nerd-font
 
 It's optional — without it the stack falls back to Menlo, which every macOS
 ships, so the terminal still looks fine, just without the glyphs. To use a
-different font, edit `.vscode/settings.json` in the worktree; note that
-reopening a workspace regenerates that file, so a permanent change belongs in
-your own VS Code user settings instead.
+different font, set **Terminal font** in Settings → Preferences; worktrees pick
+the change up the next time they're spawned or reopened. (Editing a worktree's
+own `.vscode/settings.json` won't stick — mAIestro regenerates that file on
+every reopen.)
 
 ## Quick start
 

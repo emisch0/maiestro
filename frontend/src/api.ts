@@ -191,6 +191,9 @@ export interface AppSettings {
    *  so they are optional here, not just nullable. */
   theme?: Theme | null;
   tool_paths?: ToolPaths | null;
+  /** Font stack for a spawned worktree's VS Code terminal
+   *  (`terminal.integrated.fontFamily`). null/empty = the schema default. */
+  terminal_font_family?: string | null;
   /** Launch mAIestro automatically at login (per-user LaunchAgent). null = false. */
   launch_at_login?: boolean | null;
   window?: { width: number; height: number } | null;

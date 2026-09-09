@@ -15,13 +15,6 @@ use crate::tools::shell_quote;
 
 // ── VS Code workspace files ─────────────────────────────────────────────────────
 
-/// Font stack for the worktree's integrated terminal, in CSS font-family order.
-/// The preferred faces are Nerd/powerline-patched (Claude Code's TUI draws box
-/// and powerline glyphs), but neither ships with macOS — so the chain ends at
-/// **Menlo**, present on every macOS since 10.6 and VS Code's own macOS default,
-/// so an unpatched machine still gets a real monospace face.
-const TERMINAL_FONT_FAMILY: &str = "'JetBrainsMono Nerd Font', 'Cascadia Code', Menlo, monospace";
-
 /// Write the worktree's `.vscode/{settings,tasks}.json`: title-bar theming keyed
 /// to `color`, a `window.title` marker teardown finds the window by, and a
 /// folder-open task that starts the user-facing Claude session in the integrated
@@ -48,12 +41,13 @@ pub fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, sessi
         // Marker used by teardown to find this window via AppleScript.
         "window.title": format!("${{dirty}}${{activeEditorShort}}${{separator}}{work_parent}/${{rootName}}"),
         "terminal.integrated.gpuAcceleration": "off",
-        // Claude Code's TUI draws box/powerline glyphs, so prefer a Nerd Font in
-        // the terminal the session runs in. The list degrades in order: a patched
-        // JetBrains Mono, then Cascadia Code, then Menlo — which every macOS has
-        // shipped since 10.6, so the chain always lands on a real monospace face
-        // rather than falling through to the generic `monospace` alias.
-        "terminal.integrated.fontFamily": TERMINAL_FONT_FAMILY,
+        // Claude Code's TUI draws box/powerline glyphs, so the terminal the
+        // session runs in wants a Nerd Font. The stack is a Preferences setting
+        // (`terminal_font_family`); its schema default degrades in order — a
+        // patched JetBrains Mono, then Cascadia Code, then Menlo, which every
+        // macOS has shipped since 10.6 — so an unpatched machine still lands on
+        // a real monospace face rather than the generic `monospace` alias.
+        "terminal.integrated.fontFamily": crate::app_settings::terminal_font_family(),
     });
     std::fs::write(
         vscode.join("settings.json"),
@@ -361,18 +355,17 @@ mod tests {
         );
     }
 
-    /// The terminal font stack ends at a face macOS always has, so a machine
-    /// without the Nerd Font installed still gets a real monospace font.
+    /// The terminal font stack comes from the `terminal_font_family` preference
+    /// (schema default when unset), not a copy hardcoded here.
     #[test]
-    fn terminal_font_falls_back_to_a_stock_macos_face() {
+    fn terminal_font_comes_from_preferences() {
         let dir = tempfile::tempdir().unwrap();
         write_vscode_files(dir.path(), "work-134-x", "#6c1a5a", "x").unwrap();
 
         let settings: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/settings.json")).unwrap()).unwrap();
         let font = settings["terminal.integrated.fontFamily"].as_str().unwrap();
-        assert!(font.starts_with("'JetBrainsMono Nerd Font'"), "not preferred: {font}");
-        assert!(font.contains("Menlo"), "no stock macOS fallback: {font}");
+        assert_eq!(font, crate::app_settings::terminal_font_family());
     }
 
     #[test]

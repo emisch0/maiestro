@@ -7,6 +7,9 @@
 //     as a dropdown).
 //   - Tool paths: one input per CLI (claude/git/code) with a live resolved-path
 //     status line.
+//   - Terminal font: a text input whose placeholder is the schema default, so an
+//     empty field visibly means "use the default" (a plain string control would
+//     just look unset).
 
 import {
   ControlProps,
@@ -25,6 +28,7 @@ export const appSettingsUISchema = {
   type: "VerticalLayout",
   elements: [
     { type: "Control", scope: "#/properties/theme", label: "Theme" },
+    { type: "Control", scope: "#/properties/terminal_font_family", label: "Terminal font" },
     { type: "Control", scope: "#/properties/launch_at_login", label: "Launch at login" },
     { type: "Control", scope: "#/properties/tool_paths", label: "Tool paths" },
   ],
@@ -35,6 +39,24 @@ export interface AppFormConfig {
   showUnfocusedDescription: true;
   /** How each tool currently resolves (from `tools_resolved`), for the status line. */
   resolvedTools: ResolvedTool[];
+  /** The `terminal_font_family` schema default, shown as the field's placeholder. */
+  terminalFontDefault: string;
+}
+
+/** Defaults the form displays, read from the schema's `default` keywords — the
+ *  single source of truth (the backend resolves the same ones). Extracted from
+ *  the *raw* schema, since `sanitizeSchemaForForm` strips `default` before the
+ *  schema reaches JsonForms (so ajv can't inject it into the saved data). */
+export interface AppFormDefaults {
+  terminalFontDefault: string;
+}
+
+export function extractAppFormDefaults(
+  schema: Record<string, unknown>,
+): AppFormDefaults {
+  const props = (schema.properties ?? {}) as Record<string, { default?: unknown }>;
+  const def = props.terminal_font_family?.default;
+  return { terminalFontDefault: typeof def === "string" ? def : "" };
 }
 
 // ── Theme (segmented control) ────────────────────────────────────────────────
@@ -115,6 +137,45 @@ function LaunchAtLoginControl(props: ControlProps) {
 
 export const launchAtLoginTester = rankWith(20, scopeEndsWith("launch_at_login"));
 export const LaunchAtLoginRenderer = withJsonFormsControlProps(LaunchAtLoginControl);
+
+// ── Terminal font ────────────────────────────────────────────────────────────
+// The font stack written into each spawned worktree's .vscode/settings.json as
+// `terminal.integrated.fontFamily`. Empty means "use the schema default", shown
+// as the placeholder — the same empty-means-default shape as the tool paths and
+// the repo form's prompt overrides, so nothing here restates the default value.
+
+function TerminalFontControl(props: ControlProps) {
+  const { data, handleChange, path, label, description, config } = props;
+  const fallback: string = config?.terminalFontDefault ?? "";
+  const value = (data as string | null | undefined) ?? "";
+  const isOverridden = value.trim() !== "";
+  return (
+    <div className="control jsf-control">
+      <div className="jsf-prompt-head">
+        <label className="jsf-label">{label}</label>
+        {isOverridden && (
+          <button type="button" className="jsf-prompt-reset" onClick={() => handleChange(path, null)}>
+            Reset to default
+          </button>
+        )}
+      </div>
+      {description && <div className="jsf-help">{description}</div>}
+      <input
+        className="text-input"
+        type="text"
+        value={value}
+        placeholder={fallback}
+        onChange={(e) => handleChange(path, e.target.value.trim() === "" ? null : e.target.value)}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+      />
+    </div>
+  );
+}
+
+export const terminalFontTester = rankWith(20, scopeEndsWith("terminal_font_family"));
+export const TerminalFontRenderer = withJsonFormsControlProps(TerminalFontControl);
 
 // ── Tool paths ───────────────────────────────────────────────────────────────
 // One input per directly-invoked CLI. Empty = auto-resolve; the resolved path (or
@@ -237,6 +298,7 @@ export const ToolPathsRenderer = withJsonFormsControlProps(ToolPathsControl);
 export const appSettingsRenderers = [
   { tester: themeTester, renderer: ThemeRenderer },
   { tester: launchAtLoginTester, renderer: LaunchAtLoginRenderer },
+  { tester: terminalFontTester, renderer: TerminalFontRenderer },
   { tester: toolPathsTester, renderer: ToolPathsRenderer },
   ...vanillaRenderers,
 ];

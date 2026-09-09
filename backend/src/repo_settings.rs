@@ -110,11 +110,7 @@ fn schema_value() -> serde_json::Value {
 /// truth for these defaults, so both backend resolution and the Settings form
 /// read them from here rather than hardcoding. Returns `""` if absent.
 pub fn schema_default(pointer: &str) -> String {
-    schema_value()
-        .pointer(pointer)
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string()
+    crate::schema::default_str(&schema_value(), pointer)
 }
 
 /// Validate a settings JSON value against the embedded schema. Returns a message
