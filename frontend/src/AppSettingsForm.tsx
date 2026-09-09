@@ -120,25 +120,26 @@ export const LaunchAtLoginRenderer = withJsonFormsControlProps(LaunchAtLoginCont
 // One input per directly-invoked CLI. Empty = auto-resolve; the resolved path (or
 // "Not found") is shown beneath each input, so it's clear what an empty field
 // falls back to and whether the current setting actually points at a real binary.
+//
+// Which tools exist, in what order, and what each one is for all come from the
+// backend's schema (`tool_paths.properties`) — this renderer keeps no list of its
+// own. The schema is the spec for the file format *and* the copy shown here, so a
+// tool added or re-described there needs no matching frontend edit.
 
-type ToolKey = "claude" | "git" | "code";
-
-const TOOL_FIELDS: { key: ToolKey; label: string; help: string }[] = [
-  {
-    key: "claude",
-    label: "claude",
-    help: "Used for AI drafting of issues, labels, and PRs, and to launch Claude in a spawned worktree's VS Code terminal.",
-  },
-  { key: "git", label: "git", help: "Used for worktree creation and branch checks." },
-  { key: "code", label: "code", help: "The VS Code CLI, used to open spawned worktrees." },
-];
+/** The per-tool rows to render, read off the `tool_paths` sub-schema: the
+ *  property key is the tool name, its `description` the help line. Object key
+ *  order is the schema's declaration order, which is the order we show. */
+function toolFields(schema: ControlProps["schema"]): { key: string; help?: string }[] {
+  const props = (schema?.properties ?? {}) as Record<string, { description?: string }>;
+  return Object.entries(props).map(([key, sub]) => ({ key, help: sub?.description }));
+}
 
 function ToolPathsControl(props: ControlProps) {
-  const { data, handleChange, path, label, description, config } = props;
-  const paths = (data ?? {}) as Partial<Record<ToolKey, string | null>>;
+  const { data, handleChange, path, label, description, config, schema } = props;
+  const paths = (data ?? {}) as Record<string, string | null | undefined>;
   const resolved: ResolvedTool[] = config?.resolvedTools ?? [];
 
-  const setPath = (key: ToolKey, v: string) => {
+  const setPath = (key: string, v: string) => {
     const next = v.trim() === "" ? null : v;
     handleChange(path, { ...paths, [key]: next });
   };
@@ -146,11 +147,8 @@ function ToolPathsControl(props: ControlProps) {
   return (
     <div className="control jsf-control">
       <label className="jsf-label">{label}</label>
-      <div className="jsf-help">
-        {description ??
-          "Explicit paths for the CLIs mAIestro runs itself. Leave empty to auto-detect; set one if the app can't find a tool."}
-      </div>
-      {TOOL_FIELDS.map((field) => (
+      {description && <div className="jsf-help">{description}</div>}
+      {toolFields(schema).map((field) => (
         <ToolPathRow
           key={field.key}
           field={field}
@@ -174,13 +172,13 @@ function ToolPathRow({
   onChange,
   onReset,
 }: {
-  field: { key: ToolKey; label: string; help: string };
+  field: { key: string; help?: string };
   override: string | null | undefined;
   resolved: ResolvedTool | undefined;
   onChange: (v: string) => void;
   onReset: () => void;
 }) {
-  const { label: name, help } = field;
+  const { key: name, help } = field;
   const isOverridden = override != null && override !== "";
   const placeholder = resolved?.exists ? resolved.path : "auto-detect";
   // Validate the override the user typed. When empty, the auto-resolution status
@@ -196,7 +194,7 @@ function ToolPathRow({
           </button>
         )}
       </div>
-      <div className="jsf-help">{help}</div>
+      {help && <div className="jsf-help">{help}</div>}
       <div className="path-field-row">
         <input
           className="text-input"

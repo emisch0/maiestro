@@ -31,19 +31,19 @@
     "tool_paths": {
       "type": ["object", "null"],
       "title": "ToolPaths",
-      "description": "Explicit filesystem paths for the external CLIs mAIestro invokes directly. Each field null/empty = auto-resolve (login-shell PATH, then `which`, then known install locations). Set one to pin a specific binary — useful when the app, launched from /Applications with a minimal PATH, can't find a tool.",
+      "description": "Explicit paths for the CLIs mAIestro runs itself. Leave a field empty to auto-detect (login-shell PATH, then known install locations); set one to pin a specific binary — useful when the app, launched from /Applications with a minimal PATH, can't find a tool.",
       "properties": {
         "claude": {
           "type": ["string", "null"],
-          "description": "Absolute path to the `claude` CLI. Used both for mAIestro's own AI drafting of issues, labels, and PRs, and as the binary the spawned worktree's VS Code startup task launches in the integrated terminal. null/empty = auto-resolve."
+          "description": "Used for AI drafting of issues, labels, and PRs, and to launch Claude in a spawned worktree's VS Code terminal. Leave empty to auto-detect."
         },
         "git": {
           "type": ["string", "null"],
-          "description": "Absolute path to `git` (used for worktree add and branch checks). null/empty = auto-resolve."
+          "description": "Used for worktree creation and branch checks. Leave empty to auto-detect."
         },
         "code": {
           "type": ["string", "null"],
-          "description": "Absolute path to the VS Code `code` CLI (used to open spawned worktrees). null/empty = auto-resolve."
+          "description": "The VS Code command-line tool, used to open spawned worktrees. Leave empty to auto-detect."
         }
       }
     },
