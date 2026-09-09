@@ -31,21 +31,26 @@
     "tool_paths": {
       "type": ["object", "null"],
       "title": "ToolPaths",
-      "description": "Explicit filesystem paths for the external CLIs mAIestro invokes directly. Each field null/empty = auto-resolve (login-shell PATH, then `which`, then known install locations). Set one to pin a specific binary — useful when the app, launched from /Applications with a minimal PATH, can't find a tool.",
+      "description": "Explicit paths for the CLIs mAIestro runs itself. Leave a field empty to auto-detect (login-shell PATH, then known install locations); set one to pin a specific binary — useful when the app, launched from /Applications with a minimal PATH, can't find a tool.",
       "properties": {
         "claude": {
           "type": ["string", "null"],
-          "description": "Absolute path to the `claude` CLI (used for AI drafting of issues, labels, and PRs). null/empty = auto-resolve."
+          "description": "Used for AI drafting of issues, labels, and PRs, and to launch Claude in a spawned worktree's VS Code terminal. Leave empty to auto-detect."
         },
         "git": {
           "type": ["string", "null"],
-          "description": "Absolute path to `git` (used for worktree add and branch checks). null/empty = auto-resolve."
+          "description": "Used for worktree creation and branch checks. Leave empty to auto-detect."
         },
         "code": {
           "type": ["string", "null"],
-          "description": "Absolute path to the VS Code `code` CLI (used to open spawned worktrees). null/empty = auto-resolve."
+          "description": "The VS Code command-line tool, used to open spawned worktrees. Leave empty to auto-detect."
         }
       }
+    },
+    "terminal_font_family": {
+      "type": ["string", "null"],
+      "description": "Font for the terminal in a spawned worktree's VS Code window. A Nerd Font renders Claude Code's box and powerline glyphs correctly; leave empty to use the default.",
+      "default": "'JetBrainsMono Nerd Font', 'Cascadia Code', Menlo, monospace"
     },
     "launch_at_login": {
       "type": ["boolean", "null"],

@@ -2,8 +2,9 @@
 //!
 //! `repo_health_check` runs a set of informational diagnostics for one tracked
 //! repo — cloned checkout, the CLIs mAIestro invokes (`git`, `claude`, `code`),
-//! the GitHub token *and the permissions it grants*, and the configured env
-//! files — and returns a `HealthReport` the Settings window renders in a modal.
+//! the GitHub token *and the permissions it grants*, the configured env files,
+//! and the worktree terminal font — and returns a `HealthReport` the Settings
+//! window renders in a modal.
 //!
 //! The checks never mutate anything and never block spawning; they surface
 //! likely problems early instead of letting them fail mid-spawn. The GitHub
@@ -23,6 +24,12 @@ pub enum HealthStatus {
     Pass,
     Fail,
     Warn,
+    /// Not a problem — something worth knowing. Used where a check found a
+    /// perfectly workable setup that the user might still want to change (the
+    /// terminal font falling back to a stock face, say). Distinct from `Warn`,
+    /// which means "this will probably bite you", so an informational row never
+    /// makes the report look broken.
+    Info,
     Skipped,
 }
 
@@ -92,7 +99,7 @@ pub async fn repo_health_check(window: tauri::Window, repo: String) -> Result<He
     // the popover streams rows (and shows a live spinner for the running one)
     // instead of waiting for the whole batch. `total` lets the UI stop spinning.
     let mut checks: Vec<HealthCheck> = Vec::new();
-    let total = 6;
+    let total = 7;
     // Each `step!` announces the check's title (so the spinner can name what's
     // running) *before* running it, then emits the result. The title here must
     // match the label the check function produces — the result event carries the
@@ -114,6 +121,7 @@ pub async fn repo_health_check(window: tauri::Window, repo: String) -> Result<He
     step!("GitHub token & permissions", check_github(&repo, settings.identity_id.as_deref()).await);
     step!("Session editor available", check_editor());
     step!("Configured env files exist", check_env_files(settings.cloned_repo_dir.as_deref(), &settings.env_files));
+    step!("Terminal font installed", check_terminal_font());
 
     Ok(HealthReport { repo, checks })
 }
@@ -497,6 +505,144 @@ fn check_env_files(cloned_repo_dir: Option<&str>, env_files: &[String]) -> Healt
     }
 }
 
+// ── Terminal font ───────────────────────────────────────────────────────────
+//
+// The `terminal_font_family` preference is written into every spawned worktree's
+// `.vscode/settings.json`. Claude Code's TUI draws box-drawing and powerline
+// glyphs, which only a patched (Nerd) font renders — but an unpatched machine
+// still gets a perfectly usable terminal from the stack's stock fallback. So a
+// missing Nerd Font is reported as `Info`, never a failure: nothing is broken,
+// the user just might want to install it.
+//
+// Detection is a filename scan of the macOS font directories rather than
+// CoreText or `system_profiler` (seconds slow) — no new dependency, and fast
+// enough to sit in a health run.
+
+/// Directories macOS loads fonts from, in search order: the user's own, the
+/// machine's, and the system's (whose `Supplemental` subdirectory holds many of
+/// the stock faces, so each directory is scanned one level deep).
+fn font_dirs() -> Vec<std::path::PathBuf> {
+    vec![
+        crate::paths::home().join("Library/Fonts"),
+        std::path::PathBuf::from("/Library/Fonts"),
+        std::path::PathBuf::from("/System/Library/Fonts"),
+    ]
+}
+
+/// Normalized form for comparing a font family to a font *file* name: lowercase,
+/// with everything but letters and digits dropped. Collapses the many ways the
+/// same family is written — `JetBrainsMono Nerd Font` vs.
+/// `JetBrainsMonoNerdFont-Regular.ttf` — into one comparable token.
+fn normalize_font_name(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// Generic CSS font families — aliases the browser/editor resolves itself, not
+/// installable faces, so they're excluded from "is it installed?".
+const GENERIC_FONT_FAMILIES: &[&str] = &["monospace", "serif", "sansserif", "cursive", "fantasy", "systemui"];
+
+/// The concrete families named by a CSS `font-family` stack, in order, unquoted
+/// and with the generic aliases dropped.
+fn font_families(stack: &str) -> Vec<String> {
+    stack
+        .split(',')
+        .map(|f| f.trim().trim_matches(['\'', '"']).trim().to_string())
+        .filter(|f| !f.is_empty() && !GENERIC_FONT_FAMILIES.contains(&normalize_font_name(f).as_str()))
+        .collect()
+}
+
+/// Normalized names of every font file installed in [`font_dirs`]. Unreadable
+/// directories are skipped — a missing `~/Library/Fonts` just means no user fonts.
+fn installed_font_names() -> Vec<String> {
+    let mut out = Vec::new();
+    let push_dir = |dir: &std::path::Path, out: &mut Vec<String>, sub: &mut Vec<std::path::PathBuf>| {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                sub.push(path);
+            } else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                out.push(normalize_font_name(stem));
+            }
+        }
+    };
+    for dir in font_dirs() {
+        let mut sub = Vec::new();
+        push_dir(&dir, &mut out, &mut sub);
+        // One level deeper (e.g. /System/Library/Fonts/Supplemental).
+        for d in sub {
+            push_dir(&d, &mut out, &mut Vec::new());
+        }
+    }
+    out
+}
+
+/// Whether `family` is among `installed`. A font file is named for the family
+/// *plus* its style (`JetBrainsMonoNerdFont-Regular`), so the family matches when
+/// it's a prefix of the file name.
+fn font_installed(family: &str, installed: &[String]) -> bool {
+    let want = normalize_font_name(family);
+    !want.is_empty() && installed.iter().any(|f| f.starts_with(&want))
+}
+
+/// The Homebrew cask that installs `family`, for the remediation one-liner. A
+/// cask name can't be derived from a family name (`JetBrainsMono Nerd Font` ships
+/// as `font-jetbrains-mono-nerd-font`), so this is a small verified table rather
+/// than a guess — an unknown family gets no command, which beats a wrong one.
+fn font_install_command(family: &str) -> Option<String> {
+    let cask = match normalize_font_name(family).as_str() {
+        "jetbrainsmononerdfont" => "font-jetbrains-mono-nerd-font",
+        "hacknerdfont" => "font-hack-nerd-font",
+        "firacodenerdfont" => "font-fira-code-nerd-font",
+        "meslolgnerdfont" | "meslolgsnf" => "font-meslo-lg-nerd-font",
+        "caskaydiacovenerdfont" => "font-caskaydia-cove-nerd-font",
+        "saucecodepronerdfont" => "font-sauce-code-pro-nerd-font",
+        "symbolsnerdfont" | "symbolsnerdfontmono" => "font-symbols-only-nerd-font",
+        "cascadiacode" => "font-cascadia-code",
+        _ => return None,
+    };
+    Some(format!("brew install --cask {cask}"))
+}
+
+/// Is the preferred terminal font actually installed? Informational: the font
+/// stack always degrades to a stock face, so a missing Nerd Font costs glyphs,
+/// not a working session. `Warn` is reserved for the one genuinely broken case —
+/// *no* family in the configured stack is installed, which means the user typed
+/// something that resolves to nothing.
+fn check_terminal_font() -> HealthCheck {
+    terminal_font_check(&crate::app_settings::terminal_font_family(), &installed_font_names())
+}
+
+/// The verdict itself, split from the filesystem scan so every branch is
+/// unit-testable against a fixed set of installed fonts.
+fn terminal_font_check(stack: &str, installed: &[String]) -> HealthCheck {
+    let id = "terminal_font";
+    let label = "Terminal font installed";
+    let families = font_families(stack);
+    let Some(preferred) = families.first() else {
+        return HealthCheck::new(id, label, HealthStatus::Warn, format!("No font family configured: {stack}"));
+    };
+
+    if font_installed(preferred, installed) {
+        return HealthCheck::new(id, label, HealthStatus::Pass, preferred.clone());
+    }
+
+    let fallback = families.iter().skip(1).find(|f| font_installed(f, installed));
+    let detail = match fallback {
+        Some(f) => format!(
+            "{preferred} isn't installed — the terminal falls back to {f}. \
+             Claude Code's box and powerline glyphs may not render."
+        ),
+        None => format!("None of the configured fonts are installed: {stack}"),
+    };
+    let status = if fallback.is_some() { HealthStatus::Info } else { HealthStatus::Warn };
+    let check = HealthCheck::new(id, label, status, detail);
+    match font_install_command(preferred) {
+        Some(cmd) => check.with_command(cmd),
+        None => check,
+    }
+}
+
 /// The GitHub token check: validity + read access + a derived write-permission
 /// verdict, as three sub-checks under one parent. Uses the repo's assigned
 /// identity token; skipped entirely if no identity is assigned. Never mutates
@@ -617,6 +763,8 @@ fn write_permission_check(
 
 /// Worst-case roll-up of a group's sub-checks into the parent status:
 /// any Fail → Fail; else any Warn → Warn; else any Skipped → Skipped; else Pass.
+/// `Info` is deliberately *not* ranked — it reports no problem, so a group whose
+/// only non-pass sub is informational still rolls up to Pass.
 fn rollup(sub: &[HealthCheck]) -> HealthStatus {
     if sub.iter().any(|c| c.status == HealthStatus::Fail) {
         HealthStatus::Fail
@@ -632,6 +780,80 @@ fn rollup(sub: &[HealthCheck]) -> HealthStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_families_unquotes_and_drops_generics() {
+        assert_eq!(
+            font_families("'JetBrainsMono Nerd Font', 'Cascadia Code', Menlo, monospace"),
+            vec!["JetBrainsMono Nerd Font", "Cascadia Code", "Menlo"]
+        );
+        assert_eq!(font_families("\"Fira Code\" , sans-serif"), vec!["Fira Code"]);
+        // A stack of nothing but generics leaves no installable family.
+        assert!(font_families("monospace").is_empty());
+        assert!(font_families("").is_empty());
+    }
+
+    /// A font file is named for the family plus its style, and spellings differ in
+    /// spacing/case — so matching is on the normalized name as a prefix.
+    #[test]
+    fn font_installed_matches_family_against_file_names() {
+        let installed = vec![
+            normalize_font_name("JetBrainsMonoNerdFont-Regular"),
+            normalize_font_name("Menlo"),
+        ];
+        assert!(font_installed("JetBrainsMono Nerd Font", &installed));
+        assert!(font_installed("Menlo", &installed));
+        assert!(!font_installed("Cascadia Code", &installed));
+        // An empty family never matches everything.
+        assert!(!font_installed("", &installed));
+    }
+
+    /// The schema default's preferred family must map to a real cask, or the
+    /// health check would offer no way to fix what it reports.
+    #[test]
+    fn default_font_has_an_install_command() {
+        let stack = crate::app_settings::terminal_font_family();
+        let preferred = font_families(&stack).first().cloned().expect("a family");
+        assert_eq!(
+            font_install_command(&preferred).as_deref(),
+            Some("brew install --cask font-jetbrains-mono-nerd-font"),
+            "no install command for the preferred font {preferred}"
+        );
+        assert_eq!(font_install_command("Some Unknown Face"), None);
+    }
+
+    /// A missing Nerd Font is Info, not a failure — the stack still resolves to a
+    /// stock face — and carries the one-liner that installs it.
+    #[test]
+    fn missing_preferred_font_is_info_with_an_install_command() {
+        let installed = vec![normalize_font_name("Menlo")];
+        let check = terminal_font_check("'JetBrainsMono Nerd Font', Menlo, monospace", &installed);
+        assert_eq!(check.status, HealthStatus::Info);
+        assert!(check.detail.contains("falls back to Menlo"), "detail: {}", check.detail);
+        assert_eq!(check.command.as_deref(), Some("brew install --cask font-jetbrains-mono-nerd-font"));
+    }
+
+    /// Nothing in the configured stack installed is a real misconfiguration, so
+    /// that one warns rather than merely informing.
+    #[test]
+    fn stack_with_nothing_installed_warns() {
+        let check = terminal_font_check("'Not A Font', monospace", &[normalize_font_name("Menlo")]);
+        assert_eq!(check.status, HealthStatus::Warn);
+        // No cask is known for it, so no command is offered rather than a wrong one.
+        assert_eq!(check.command, None);
+    }
+
+    /// An informational row reports no problem, so it must not drag a group's
+    /// roll-up below Pass.
+    #[test]
+    fn rollup_ignores_info_rows() {
+        let info = HealthCheck::new("i", "i", HealthStatus::Info, "");
+        let pass = HealthCheck::new("p", "p", HealthStatus::Pass, "");
+        assert_eq!(rollup(&[info, pass]), HealthStatus::Pass);
+        let info = HealthCheck::new("i", "i", HealthStatus::Info, "");
+        let warn = HealthCheck::new("w", "w", HealthStatus::Warn, "");
+        assert_eq!(rollup(&[info, warn]), HealthStatus::Warn);
+    }
 
     #[test]
     fn remote_owner_name_parses_all_url_forms() {

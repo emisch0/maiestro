@@ -7,6 +7,9 @@
 //     as a dropdown).
 //   - Tool paths: one input per CLI (claude/git/code) with a live resolved-path
 //     status line.
+//   - Terminal font: a text input whose placeholder is the schema default, so an
+//     empty field visibly means "use the default" (a plain string control would
+//     just look unset).
 
 import {
   ControlProps,
@@ -25,6 +28,7 @@ export const appSettingsUISchema = {
   type: "VerticalLayout",
   elements: [
     { type: "Control", scope: "#/properties/theme", label: "Theme" },
+    { type: "Control", scope: "#/properties/terminal_font_family", label: "Terminal font" },
     { type: "Control", scope: "#/properties/launch_at_login", label: "Launch at login" },
     { type: "Control", scope: "#/properties/tool_paths", label: "Tool paths" },
   ],
@@ -35,6 +39,24 @@ export interface AppFormConfig {
   showUnfocusedDescription: true;
   /** How each tool currently resolves (from `tools_resolved`), for the status line. */
   resolvedTools: ResolvedTool[];
+  /** The `terminal_font_family` schema default, shown as the field's placeholder. */
+  terminalFontDefault: string;
+}
+
+/** Defaults the form displays, read from the schema's `default` keywords — the
+ *  single source of truth (the backend resolves the same ones). Extracted from
+ *  the *raw* schema, since `sanitizeSchemaForForm` strips `default` before the
+ *  schema reaches JsonForms (so ajv can't inject it into the saved data). */
+export interface AppFormDefaults {
+  terminalFontDefault: string;
+}
+
+export function extractAppFormDefaults(
+  schema: Record<string, unknown>,
+): AppFormDefaults {
+  const props = (schema.properties ?? {}) as Record<string, { default?: unknown }>;
+  const def = props.terminal_font_family?.default;
+  return { terminalFontDefault: typeof def === "string" ? def : "" };
 }
 
 // ── Theme (segmented control) ────────────────────────────────────────────────
@@ -116,25 +138,69 @@ function LaunchAtLoginControl(props: ControlProps) {
 export const launchAtLoginTester = rankWith(20, scopeEndsWith("launch_at_login"));
 export const LaunchAtLoginRenderer = withJsonFormsControlProps(LaunchAtLoginControl);
 
+// ── Terminal font ────────────────────────────────────────────────────────────
+// The font stack written into each spawned worktree's .vscode/settings.json as
+// `terminal.integrated.fontFamily`. Empty means "use the schema default", shown
+// as the placeholder — the same empty-means-default shape as the tool paths and
+// the repo form's prompt overrides, so nothing here restates the default value.
+
+function TerminalFontControl(props: ControlProps) {
+  const { data, handleChange, path, label, description, config } = props;
+  const fallback: string = config?.terminalFontDefault ?? "";
+  const value = (data as string | null | undefined) ?? "";
+  const isOverridden = value.trim() !== "";
+  return (
+    <div className="control jsf-control">
+      <div className="jsf-prompt-head">
+        <label className="jsf-label">{label}</label>
+        {isOverridden && (
+          <button type="button" className="jsf-prompt-reset" onClick={() => handleChange(path, null)}>
+            Reset to default
+          </button>
+        )}
+      </div>
+      {description && <div className="jsf-help">{description}</div>}
+      <input
+        className="text-input"
+        type="text"
+        value={value}
+        placeholder={fallback}
+        onChange={(e) => handleChange(path, e.target.value.trim() === "" ? null : e.target.value)}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+      />
+    </div>
+  );
+}
+
+export const terminalFontTester = rankWith(20, scopeEndsWith("terminal_font_family"));
+export const TerminalFontRenderer = withJsonFormsControlProps(TerminalFontControl);
+
 // ── Tool paths ───────────────────────────────────────────────────────────────
 // One input per directly-invoked CLI. Empty = auto-resolve; the resolved path (or
 // "Not found") is shown beneath each input, so it's clear what an empty field
 // falls back to and whether the current setting actually points at a real binary.
+//
+// Which tools exist, in what order, and what each one is for all come from the
+// backend's schema (`tool_paths.properties`) — this renderer keeps no list of its
+// own. The schema is the spec for the file format *and* the copy shown here, so a
+// tool added or re-described there needs no matching frontend edit.
 
-type ToolKey = "claude" | "git" | "code";
-
-const TOOL_FIELDS: { key: ToolKey; label: string; help: string }[] = [
-  { key: "claude", label: "claude", help: "Used for AI drafting of issues, labels, and PRs." },
-  { key: "git", label: "git", help: "Used for worktree creation and branch checks." },
-  { key: "code", label: "code", help: "The VS Code CLI, used to open spawned worktrees." },
-];
+/** The per-tool rows to render, read off the `tool_paths` sub-schema: the
+ *  property key is the tool name, its `description` the help line. Object key
+ *  order is the schema's declaration order, which is the order we show. */
+function toolFields(schema: ControlProps["schema"]): { key: string; help?: string }[] {
+  const props = (schema?.properties ?? {}) as Record<string, { description?: string }>;
+  return Object.entries(props).map(([key, sub]) => ({ key, help: sub?.description }));
+}
 
 function ToolPathsControl(props: ControlProps) {
-  const { data, handleChange, path, label, description, config } = props;
-  const paths = (data ?? {}) as Partial<Record<ToolKey, string | null>>;
+  const { data, handleChange, path, label, description, config, schema } = props;
+  const paths = (data ?? {}) as Record<string, string | null | undefined>;
   const resolved: ResolvedTool[] = config?.resolvedTools ?? [];
 
-  const setPath = (key: ToolKey, v: string) => {
+  const setPath = (key: string, v: string) => {
     const next = v.trim() === "" ? null : v;
     handleChange(path, { ...paths, [key]: next });
   };
@@ -142,11 +208,8 @@ function ToolPathsControl(props: ControlProps) {
   return (
     <div className="control jsf-control">
       <label className="jsf-label">{label}</label>
-      <div className="jsf-help">
-        {description ??
-          "Explicit paths for the CLIs mAIestro runs itself. Leave empty to auto-detect; set one if the app can't find a tool."}
-      </div>
-      {TOOL_FIELDS.map((field) => (
+      {description && <div className="jsf-help">{description}</div>}
+      {toolFields(schema).map((field) => (
         <ToolPathRow
           key={field.key}
           field={field}
@@ -170,13 +233,13 @@ function ToolPathRow({
   onChange,
   onReset,
 }: {
-  field: { key: ToolKey; label: string; help: string };
+  field: { key: string; help?: string };
   override: string | null | undefined;
   resolved: ResolvedTool | undefined;
   onChange: (v: string) => void;
   onReset: () => void;
 }) {
-  const { label: name, help } = field;
+  const { key: name, help } = field;
   const isOverridden = override != null && override !== "";
   const placeholder = resolved?.exists ? resolved.path : "auto-detect";
   // Validate the override the user typed. When empty, the auto-resolution status
@@ -192,7 +255,7 @@ function ToolPathRow({
           </button>
         )}
       </div>
-      <div className="jsf-help">{help}</div>
+      {help && <div className="jsf-help">{help}</div>}
       <div className="path-field-row">
         <input
           className="text-input"
@@ -235,6 +298,7 @@ export const ToolPathsRenderer = withJsonFormsControlProps(ToolPathsControl);
 export const appSettingsRenderers = [
   { tester: themeTester, renderer: ThemeRenderer },
   { tester: launchAtLoginTester, renderer: LaunchAtLoginRenderer },
+  { tester: terminalFontTester, renderer: TerminalFontRenderer },
   { tester: toolPathsTester, renderer: ToolPathsRenderer },
   ...vanillaRenderers,
 ];

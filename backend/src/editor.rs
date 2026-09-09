@@ -19,7 +19,8 @@ use crate::tools::shell_quote;
 /// to `color`, a `window.title` marker teardown finds the window by, and a
 /// folder-open task that starts the user-facing Claude session in the integrated
 /// terminal — themed to the same `color` via `/color`, so the session UI matches
-/// the title bar and the popover row.
+/// the title bar and the popover row, and invoked through the resolved `claude`
+/// path rather than PATH.
 pub fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, session_title: &str) -> Result<(), String> {
     let vscode = work_dir.join(".vscode");
     std::fs::create_dir_all(&vscode).map_err(|e| e.to_string())?;
@@ -40,6 +41,13 @@ pub fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, sessi
         // Marker used by teardown to find this window via AppleScript.
         "window.title": format!("${{dirty}}${{activeEditorShort}}${{separator}}{work_parent}/${{rootName}}"),
         "terminal.integrated.gpuAcceleration": "off",
+        // Claude Code's TUI draws box/powerline glyphs, so the terminal the
+        // session runs in wants a Nerd Font. The stack is a Preferences setting
+        // (`terminal_font_family`); its schema default degrades in order — a
+        // patched JetBrains Mono, then Cascadia Code, then Menlo, which every
+        // macOS has shipped since 10.6 — so an unpatched machine still lands on
+        // a real monospace face rather than the generic `monospace` alias.
+        "terminal.integrated.fontFamily": crate::app_settings::terminal_font_family(),
     });
     std::fs::write(
         vscode.join("settings.json"),
@@ -60,8 +68,19 @@ pub fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, sessi
     // on its own is silently ignored. A leading-slash initial prompt is
     // dispatched as a command, so it costs one line in the transcript and no
     // model call.
+    //
+    // The binary is the **resolved** `claude` path (`tools::resolve_tool`), not a
+    // bare `claude` left to PATH (issue #134). The task runs in VS Code's
+    // integrated terminal, whose PATH is whatever the VS Code process inherited —
+    // and when mAIestro launched that VS Code from the packaged bundle at login,
+    // that can be the minimal Launch Services PATH with no `claude` on it. The
+    // same `tool_paths.claude` override that pins mAIestro's own drafting calls
+    // therefore also decides which binary the session starts with. When nothing
+    // concrete resolves, `resolve_tool` yields the bare name, i.e. exactly the
+    // previous behavior.
     let command = format!(
-        "claude --remote-control --name {} {}",
+        "{} --remote-control --name {} {}",
+        shell_quote(&crate::tools::resolve_tool("claude").to_string_lossy()),
         shell_quote(session_title),
         shell_quote(&format!("/color {}", crate::theming::claude_color(color)))
     );
@@ -316,6 +335,37 @@ mod tests {
         let tasks: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
         assert!(tasks["tasks"][0]["command"].as_str().unwrap().contains("'/color default'"));
+    }
+
+    /// The task invokes the *resolved* `claude` binary (shell-quoted, so a path
+    /// with spaces survives), not a bare `claude` left to the integrated
+    /// terminal's PATH (issue #134).
+    #[test]
+    fn startup_task_uses_the_resolved_claude_path() {
+        let dir = tempfile::tempdir().unwrap();
+        write_vscode_files(dir.path(), "work-134-x", "#6c1a5a", "x").unwrap();
+
+        let tasks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
+        let command = tasks["tasks"][0]["command"].as_str().unwrap();
+        let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("claude").to_string_lossy());
+        assert!(
+            command.starts_with(&format!("{expected} --remote-control")),
+            "expected the resolved claude path {expected}: {command}"
+        );
+    }
+
+    /// The terminal font stack comes from the `terminal_font_family` preference
+    /// (schema default when unset), not a copy hardcoded here.
+    #[test]
+    fn terminal_font_comes_from_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        write_vscode_files(dir.path(), "work-134-x", "#6c1a5a", "x").unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/settings.json")).unwrap()).unwrap();
+        let font = settings["terminal.integrated.fontFamily"].as_str().unwrap();
+        assert_eq!(font, crate::app_settings::terminal_font_family());
     }
 
     #[test]

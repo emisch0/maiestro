@@ -3,8 +3,8 @@
 //! Sibling to `profiles.json` and the per-repo `repos/<…>.json` files, but holds
 //! configuration that is neither a credential nor repo-scoped. Today that is the
 //! popover and Settings window persisted sizes (issue #40), the UI theme (issue #12),
-//! per-tool CLI path overrides (issue #85), and the onboarding / launch-at-login
-//! state (issue #98); the file is intentionally
+//! per-tool CLI path overrides (issue #85), the spawned-worktree terminal font,
+//! and the onboarding / launch-at-login state (issue #98); the file is intentionally
 //! human-editable and dotfile-manageable. A missing or partial file is fine —
 //! every field is optional and defaults to "not set".
 //!
@@ -72,6 +72,10 @@ pub struct AppSettings {
     /// Per-tool CLI path overrides. `None` (absent) means all tools auto-resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_paths: Option<ToolPaths>,
+    /// Font stack for a spawned worktree's VS Code integrated terminal.
+    /// `None`/empty means the schema `default`. See [`terminal_font_family`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_font_family: Option<String>,
     /// Whether to launch mAIestro automatically at login via a per-user
     /// LaunchAgent (issue #98). `None` (absent) means `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +103,17 @@ pub fn tool_path_override(name: &str) -> Option<String> {
     v.filter(|s| !s.trim().is_empty())
 }
 
+/// The font stack to write as `terminal.integrated.fontFamily` into a spawned
+/// worktree's `.vscode/settings.json`. The user's setting when they've set a
+/// non-empty one, otherwise the schema's `default` — which is the single source
+/// of truth for it, so neither this module nor the Settings form hardcodes a copy.
+pub fn terminal_font_family() -> String {
+    load()
+        .terminal_font_family
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| schema_default("/properties/terminal_font_family/default"))
+}
+
 // ── Schema (hand-written spec; the structs must conform to it) ──────────────
 
 /// The canonical schema for `~/.maiestro/settings.json`. Hand-written and
@@ -109,6 +124,11 @@ const SCHEMA_JSON: &str = include_str!("../schemas/app-settings.schema.json");
 
 fn schema_value() -> serde_json::Value {
     crate::schema::parse(SCHEMA_JSON, "app-settings")
+}
+
+/// A string `default` from the embedded schema, addressed by JSON Pointer.
+fn schema_default(pointer: &str) -> String {
+    crate::schema::default_str(&schema_value(), pointer)
 }
 
 /// Validate a settings JSON value against the embedded schema, naming the failing
@@ -207,7 +227,8 @@ pub fn app_settings_get() -> Result<AppSettings, String> {
 }
 
 /// Persist the settings edited in the Settings form. The form owns only the
-/// user-editable fields (`theme`, `tool_paths`); the machine-managed window sizes
+/// user-editable fields (`theme`, `tool_paths`, `terminal_font_family`,
+/// `launch_at_login`); the machine-managed window sizes
 /// are load-merged from disk so a concurrent size save from another window isn't
 /// clobbered. Validates before writing, and broadcasts `theme-changed` when the
 /// theme actually changed so every window re-applies live.
@@ -233,6 +254,7 @@ pub fn app_settings_set(app: tauri::AppHandle, settings: AppSettings) -> Result<
         theme_changed = current.theme != settings.theme;
         current.theme = settings.theme;
         current.tool_paths = settings.tool_paths.clone();
+        current.terminal_font_family = settings.terminal_font_family.clone();
         current.launch_at_login = settings.launch_at_login;
         // onboarding_completed / window / settings_window are deliberately kept
         // from disk (machine-managed).
@@ -389,6 +411,7 @@ mod tests {
                 git: Some("/opt/homebrew/bin/git".into()),
                 code: Some("/usr/local/bin/code".into()),
             }),
+            terminal_font_family: Some("Menlo, monospace".into()),
             launch_at_login: Some(true),
             onboarding_completed: Some(true),
         };

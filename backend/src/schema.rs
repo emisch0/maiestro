@@ -32,3 +32,15 @@ pub fn validate(schema: &serde_json::Value, value: &serde_json::Value) -> Result
         Err(errors.join("; "))
     }
 }
+
+/// A string `default` from a parsed schema, addressed by JSON Pointer (e.g.
+/// `/properties/worktree_prefix/default`). The schemas are the single source of
+/// truth for these defaults, so backend resolution and the Settings form both
+/// read them from there rather than hardcoding a copy. Returns `""` if absent.
+pub fn default_str(schema: &serde_json::Value, pointer: &str) -> String {
+    schema
+        .pointer(pointer)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}

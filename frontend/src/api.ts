@@ -191,6 +191,9 @@ export interface AppSettings {
    *  so they are optional here, not just nullable. */
   theme?: Theme | null;
   tool_paths?: ToolPaths | null;
+  /** Font stack for a spawned worktree's VS Code terminal
+   *  (`terminal.integrated.fontFamily`). null/empty = the schema default. */
+  terminal_font_family?: string | null;
   /** Launch mAIestro automatically at login (per-user LaunchAgent). null = false. */
   launch_at_login?: boolean | null;
   window?: { width: number; height: number } | null;
@@ -223,7 +226,9 @@ export interface ResolvedTool {
   exists: boolean;
 }
 
-export type HealthStatus = "pass" | "fail" | "warn" | "skipped";
+/** `info` reports no problem — something worth knowing that needs no action
+ *  (e.g. the preferred terminal font isn't installed, so a stock one is used). */
+export type HealthStatus = "pass" | "fail" | "warn" | "info" | "skipped";
 
 /** One prerequisite check in a repo health report; `sub` nests the GitHub
  *  token check's validity / read / write sub-checks. */
