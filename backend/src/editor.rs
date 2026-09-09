@@ -32,12 +32,7 @@ pub fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, sessi
             "statusBar.background": color,
             "activityBar.background": color,
         },
-        "task.allowAutomaticTasks": "on",
         "workbench.startupEditor": "none",
-        "workbench.secondarySideBar.visible": false,
-        // Let teardown close the window without a "Are you sure?" prompt blocking
-        // the programmatic close (dirty files are preserved via hot exit).
-        "window.confirmBeforeClose": "never",
         // Marker used by teardown to find this window via AppleScript.
         "window.title": format!("${{dirty}}${{activeEditorShort}}${{separator}}{work_parent}/${{rootName}}"),
         "terminal.integrated.gpuAcceleration": "off",
