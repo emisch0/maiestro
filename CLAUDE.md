@@ -16,7 +16,9 @@ The menu-bar tray icon is a **brain** icon (`backend/icons/tray.png`, a template
 
 **Every change to `main` must go through a pull request.** Do not commit or push directly to `main`: branch, push the branch, open a PR, and merge it on GitHub. This holds even for small fixes and the release flow.
 
-Because the repo is private on a free plan, GitHub-side branch protection isn't available, so this is enforced locally by a committed `pre-push` hook (`.githooks/pre-push`) that rejects any push to `main`. Enable it once per clone with `git config core.hooksPath .githooks` (already set in the primary checkout; worktrees share it via the common git dir). The hook is a guardrail, not a hard wall — an emergency override is `git push --no-verify`, to be used sparingly.
+This is enforced on **both** sides. Server-side, the repo (now public) has an active branch ruleset, **"Require PR for main merge"**, scoped to the default branch: it requires a pull request to merge, requires the two CI checks (**Backend (test + clippy)** and **Frontend (typecheck + tests)**) to pass, and blocks deletion and non-fast-forward pushes. Zero approving reviews are required, so a solo PR merges itself once CI is green — but until then `gh pr merge` fails with *"the base branch policy prohibits the merge"*, so a release has to wait on CI rather than pushing through. (An earlier version of this file said branch protection wasn't available because the repo was private on a free plan; that stopped being true when the repo went public.)
+
+Locally, a committed `pre-push` hook (`.githooks/pre-push`) rejects any push to `main`, catching the mistake before it reaches GitHub. Enable it once per clone with `git config core.hooksPath .githooks` (already set in the primary checkout; worktrees share it via the common git dir). `git push --no-verify` bypasses the hook, but not the ruleset.
 
 ## Architectural decisions
 
