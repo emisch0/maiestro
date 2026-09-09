@@ -3,18 +3,14 @@
 ## Why mAIestro
 
 Getting real leverage out of AI coding means running **several agent sessions
-in parallel** — one drafting a fix, another reviewing, a third exploring an
-idea. The bottleneck stops being any single session and becomes *you*: the
-constant context switching between them, keeping track of which one is working,
-which is blocked on your input, and which finished and needs a look. That
-juggling is the hard part, and it's what mAIestro exists to solve.
+in parallel**. The bottleneck stops being any single session and becomes *you*: the
+constant context switching between them. That's what mAIestro exists to solve.
+mAIestro colors and launches each session, and displays the session status highlighting
+which sessions need attention.
 
 mAIestro is deliberately **not** another place to chat with an agent. It
 doesn't get in the way of your session interactions — the conversation still
-happens in your editor or terminal, exactly as it would without it. Instead
-it's the **shell around your sessions**: a single dashboard that shows what each
-one is doing and where your attention is needed next, so switching between them
-is a glance instead of a hunt.
+happens in your editor or terminal.
 
 ## What it is
 
@@ -37,36 +33,26 @@ A macOS menu-bar app that quickly shows active AI coding sessions. Features incl
 
 ## Installation
 
+### MacOS
+
 Download the latest `.dmg` from the
 [Releases page](https://github.com/emisch0/maiestro/releases) and drag
-**mAIestro** to Applications. Builds are signed and notarized, so the app opens
-without Gatekeeper warnings.
+**mAIestro** to Applications.
 
-macOS only for now (Windows/Linux are a goal, not a promise). You'll also want
-`git` and [Claude Code](https://claude.com/claude-code) installed and logged
+You need `git` and [Claude Code](https://claude.com/claude-code) installed and logged
 in — spawned sessions run under your own `claude` login and your ambient git
 auth.
 
 **Recommended: a Nerd Font.** Claude Code's terminal UI draws box-drawing and
-powerline glyphs that a plain monospace font renders as tofu (□). mAIestro sets
-each spawned worktree's VS Code terminal to
-
-```
-'JetBrainsMono Nerd Font', 'Cascadia Code', Menlo, monospace
-```
-
-so installing the first of those makes the session render correctly:
+powerline glyphs that a plain monospace font renders as tofu (□). Install with this command
 
 ```bash
 brew install --cask font-jetbrains-mono-nerd-font
 ```
 
-It's optional — without it the stack falls back to Menlo, which every macOS
-ships, so the terminal still looks fine, just without the glyphs. To use a
-different font, set **Terminal font** in Settings → Preferences; worktrees pick
-the change up the next time they're spawned or reopened. (Editing a worktree's
-own `.vscode/settings.json` won't stick — mAIestro regenerates that file on
-every reopen.)
+### Other Platforms
+
+mAIestro is not yet available on other platforms, but it is designed to support multiple OS, AI agents, etc. Please submit a github issue to request more platforms.
 
 ## Quick start
 
