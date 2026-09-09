@@ -18,6 +18,7 @@ const HEALTH_ICON: Record<HealthStatus, string> = {
   pass: "✓",
   fail: "✕",
   warn: "!",
+  info: "i",
   skipped: "–",
 };
 

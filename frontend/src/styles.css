@@ -1507,6 +1507,7 @@ body {
 .health-icon--pass { color: var(--green); background: var(--green-bg); }
 .health-icon--fail { color: var(--red); background: var(--red-bg); }
 .health-icon--warn { color: var(--accent); background: rgba(250, 204, 21, 0.14); }
+.health-icon--info { color: var(--blue); background: var(--blue-bg); }
 .health-icon--skipped { color: var(--muted); background: var(--surface); }
 
 .health-row-text {
