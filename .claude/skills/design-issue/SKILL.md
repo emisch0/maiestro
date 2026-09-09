@@ -15,7 +15,7 @@ The repo is the current working directory's GitHub remote.
    **Fetch the issue.** `gh issue view <id>`. Treat the body as raw intent — it's typically one or two sentences and missing structure.
 
 2. **Investigate before designing.** A plan written without reading the code becomes generic and wrong. Spend tool calls on:
-   - `CLAUDE.md` for architecture, conventions, and the recorded design decisions.
+   - `CLAUDE.md` for architecture, conventions, and the recorded design decisions, and `docs/` for the per-feature reference (settings, health check, session status, theming, tool resolution).
    - The files most likely to change. mAIestro is split into `backend/` (Rust/Tauri) and `frontend/` (web) — read enough of both to know exact paths and the surrounding patterns.
    - Similar features that already exist in the repo — copy their shape rather than inventing.
    Do not skip this step even when the issue feels obvious. The investigation is what makes the plan useful.
@@ -26,7 +26,7 @@ The repo is the current working directory's GitHub remote.
 
    - **Goals** — clarified scope in 2–4 bullets. Distinguish soft vs. hard behaviors, backend vs. frontend responsibilities, etc.
    - **Design** — concrete shapes: Tauri command signatures, frontend component/module names, file paths under `backend/`/`frontend/`, data flow. If the work crosses the backend/frontend boundary, give each side its own subsection.
-   - **Configuration** — new settings, per-repo or per-profile config (`~/.maiestro/`), defaults. Note where they're read and where they're documented (`CLAUDE.md`).
+   - **Configuration** — new settings, per-repo or per-profile config (`~/.maiestro/`), defaults. Note where they're read and where they're documented (`docs/settings.md`).
    - **Out of scope** — explicitly list things a reader might assume are included but aren't. This is the most undervalued section: it prevents scope creep and aligns expectations.
    - **Implementation steps** — numbered. If split into sub-issues, group steps under each sub-issue heading.
    - **Manual prerequisites** — if the issue involves steps that must be completed outside the repo (e.g. creating accounts, configuring third-party dashboards, generating tokens, code-signing certs), list them as a GitHub task checklist (`- [ ]`). This gives the implementer trackable progress and makes it obvious what must happen before the code work begins.

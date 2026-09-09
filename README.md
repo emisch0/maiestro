@@ -309,8 +309,10 @@ pnpm tauri icon path/to/source.png -o backend/icons
 
 ## Architecture
 
-The recorded design decisions live in [`CLAUDE.md`](CLAUDE.md) — that file is
-the source of truth; the short version:
+The recorded design decisions live in [`CLAUDE.md`](CLAUDE.md), and the
+per-feature reference (settings, health check, session status, theming, tool
+resolution) in [`docs/`](docs/) — those are the source of truth; the short
+version:
 
 - **mAIestro launches sessions, it doesn't host them.** Starting work opens a
   real VS Code window or terminal running `claude`; the app never owns the
