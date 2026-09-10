@@ -255,6 +255,38 @@ fn show_popover(app: &tauri::AppHandle) {
     }
 }
 
+/// Show the Settings window, announcing a genuine open (hidden → shown) to its
+/// webview.
+///
+/// The `settings` webview is created at startup and merely *hidden* when closed
+/// (`useHideOnClose`), so it keeps whatever it read on mount — which happens
+/// before the first-run onboarding dialog has even been answered. Telling it
+/// about each open lets it re-read `~/.maiestro/settings.json`, so the
+/// Preferences panel can't go on showing a launch-at-login (or hand-edited)
+/// value that is no longer true (#139). Mirrors `popover-shown`; the
+/// already-visible guard keeps a second Settings click from reloading the form
+/// out from under an edit in progress.
+fn show_settings(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("settings") else {
+        return;
+    };
+    let was_visible = window.is_visible().unwrap_or(false);
+    let _ = window.show();
+    let _ = window.set_focus();
+    if !was_visible {
+        let _ = window.emit("settings-shown", ());
+    }
+}
+
+/// Open the Settings window from the popover's gear button. Routed through the
+/// backend (rather than `show()` in JS) so both entry points — this and the tray
+/// menu — go through [`show_settings`] and announce the open the same way.
+#[tauri::command]
+fn open_settings(app: tauri::AppHandle) {
+    crate::log_invoke!("open_settings");
+    show_settings(&app);
+}
+
 fn main() {
     // The app binary doubles as the Claude Code hook helper. When invoked as
     // `maiestro hook <state> --workspace <ws-id>` (from a spawned worktree's
@@ -307,6 +339,7 @@ fn main() {
             identities::identities_get_default,
             identities::identities_add,
             identities::identities_remove,
+            open_settings,
             links::open_url,
             links::open_path,
             links::path_exists,
@@ -397,12 +430,7 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "quit" => app.exit(0),
-                    "settings" => {
-                        if let Some(window) = app.get_webview_window("settings") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
+                    "settings" => show_settings(app),
                     "logs" => {
                         if let Some(window) = app.get_webview_window("logs") {
                             let _ = window.show();

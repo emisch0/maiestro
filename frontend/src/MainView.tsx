@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { getCurrentWindow, getAllWindows } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, DraftPreviewOutcome, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
 import {
   ActiveSessions,
@@ -26,12 +26,13 @@ import EyeIcon from "./icons/eye.svg?react";
 import VSCodeIcon from "./icons/vscode.svg?react";
 import ChevronRightIcon from "./icons/chevron-right.svg?react";
 
-async function openSettings() {
-  const settings = (await getAllWindows()).find((w) => w.label === "settings");
-  if (settings) {
-    await settings.show();
-    await settings.setFocus();
-  }
+// Opening Settings goes through the backend so this and the tray menu share one
+// show path — the one that tells the Settings webview about each fresh open, so
+// it re-reads settings it may have fetched before onboarding ran (#139).
+// Best-effort: the window is defined in tauri.conf.json, so a failure here is
+// nothing the popover can act on.
+function openSettings() {
+  api.openSettings().catch(() => {});
 }
 
 export function MainView() {
