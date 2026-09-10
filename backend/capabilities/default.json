@@ -5,7 +5,6 @@
   "windows": ["main", "settings", "logs", "onboarding"],
   "permissions": [
     "core:default",
-    "core:window:allow-get-all-windows",
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:window:allow-set-focus",

@@ -25,7 +25,7 @@ import { AboutSection } from "./components/AboutSection";
 import { HealthModal, HealthState } from "./components/HealthModal";
 import { DismissibleError } from "./components/DismissibleError";
 import { RemoveConfirm } from "./components/RemoveConfirm";
-import { useHideOnClose } from "./hooks/useTauriListen";
+import { useHideOnClose, useTauriListen } from "./hooks/useTauriListen";
 import { useDebouncedAutosave } from "./hooks/useDebouncedAutosave";
 
 type SettingsSelection =
@@ -171,6 +171,16 @@ export function Settings() {
   }
 
   useHideOnClose();
+
+  // This webview is created at app startup and only hidden (never destroyed) on
+  // close, so what it fetched on mount can be stale by the time the window is
+  // actually opened — most visibly right after first-run onboarding, which
+  // writes `launch_at_login` seconds after this mounted, leaving the Preferences
+  // toggle showing the old value (#139). The backend announces each fresh open;
+  // re-read then, exactly as the popover refreshes on `popover-shown`.
+  // `loadAppSettings` re-seeds the autosave baseline, so the reload can't save
+  // itself back over the file.
+  useTauriListen("settings-shown", () => loadAppSettings());
 
   const patchCred = useCallback((type_id: string, patch: Partial<CredState>) => {
     setCredStates((prev) => ({ ...prev, [type_id]: { ...prev[type_id], ...patch } }));

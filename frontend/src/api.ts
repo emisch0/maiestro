@@ -396,6 +396,12 @@ export const api = {
   logsReveal: () =>
     invoke<void>("logs_reveal"),
 
+  /** Open (and focus) the Settings window. Routed through the backend so this
+   *  and the tray menu share one show path, which tells the Settings webview to
+   *  re-read its data on each fresh open (#139). */
+  openSettings: () =>
+    invoke<void>("open_settings"),
+
   getTheme: () =>
     invoke<Theme>("app_settings_get_theme"),
 
