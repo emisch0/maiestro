@@ -150,6 +150,9 @@ fn fallbacks(name: &str) -> Vec<PathBuf> {
     match name {
         "claude" => vec![
             home().join(".claude/local/claude"),
+            // `pip install --user` and Claude Code's native installer both land
+            // here, and a fresh account's login shell often lacks it on PATH.
+            home().join(".local/bin/claude"),
             PathBuf::from("/opt/homebrew/bin/claude"),
             PathBuf::from("/usr/local/bin/claude"),
         ],
@@ -344,6 +347,13 @@ mod tests {
         assert_eq!(shell_quote("a b"), "'a b'");
         // An embedded single quote is closed, escaped, and reopened.
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn claude_fallbacks_probe_the_user_local_bin() {
+        // `~/.local/bin` is where `pip install --user` and the native installer
+        // put `claude`; a fresh account's login shell may not have it on PATH.
+        assert!(fallbacks("claude").contains(&home().join(".local/bin/claude")));
     }
 
     #[test]
