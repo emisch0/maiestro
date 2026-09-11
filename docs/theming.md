@@ -4,7 +4,30 @@ How a spawned worktree gets its color and emoji, and how that one color reaches 
 
 A spawned worktree gets a deterministic color and emoji from `theming::pick_theme`, seeded by the workspace name and avoiding colors already claimed by tracked sessions. That one color is applied in three places so the visual thread survives from the dashboard to where the user actually works: the popover row, VS Code's title/status/activity bars (`editor::write_vscode_files`), and the Claude session's own UI.
 
-`PALETTE` is deliberately sized and ordered to match Claude Code's eight session colors (`red, blue, green, yellow, purple, orange, pink, cyan`) one-for-one, so `theming::claude_color` is a **bijection**: no two live sessions collide on a session color while a distinct one goes unused. A unit test enforces this, so adding a ninth palette entry fails the build rather than silently doubling up. `claude_color` is keyed off each session's **stored** hex and also maps a retired palette color, so a session recorded under an older palette keeps the color it was given.
+`PALETTE` **is** Claude Code's session palette: the eight entries are the exact hex values Claude Code's standard theme paints its eight session colors with (`red, blue, green, yellow, purple, orange, pink, cyan`), in the order `/color` lists them. Using Claude's own values, rather than a hand-darkened approximation, is what makes the row, the bars, and the session read as one color (issue #142: the old dark palette's "orange" read as brown next to Claude's terracotta). `theming::claude_color` is therefore a **bijection**: no two live sessions collide on a session color while a distinct one goes unused. Two unit tests enforce this — one for the bijection (a ninth palette entry fails the build rather than silently doubling up) and one pinning each hex to Claude's RGB value (a drifted hex fails rather than shipping a mismatched title bar).
+
+| Claude color | Hex | Emoji |
+|---|---|---|
+| red | `#dc2626` | 🔴 🍒 🌶️ 🦞 🍓 |
+| blue | `#6a9bcc` | 🔵 🫐 🦋 💙 🐳 |
+| green | `#16a34a` | 🟢 🌿 🐸 🍀 🐊 |
+| yellow | `#ca8a04` | 🟡 🍋 🌻 🐝 ⭐ |
+| purple | `#827dbd` | 🟣 🔮 💜 🍇 |
+| orange | `#d97757` | 🟠 🦊 🍊 🦁 🍑 |
+| pink | `#c46686` | 🎀 🌸 🦩 🐷 🩷 |
+| cyan | `#0891b2` | 🐬 🐠 🌊 🧊 🦚 |
+
+Where the values come from: Claude Code ships as a single binary with its themes embedded, and each theme carries the session colors as `<name>_FOR_SUBAGENTS_ONLY` entries. To re-check them after a Claude Code upgrade:
+
+```
+strings -n 6 "$(readlink -f "$(which claude)")" | grep -o -E '(red|blue|green|yellow|purple|orange|pink|cyan)_FOR_SUBAGENTS_ONLY:"[^"]+"'
+```
+
+The `rgb(...)` blocks are the standard dark and light themes (they share one set of values, which is what the palette pins); the `ansi:` blocks are the ANSI themes and the remaining `rgb` blocks the daltonized ones, none of which we track.
+
+`claude_color` is keyed off each session's **stored** hex and also maps every retired palette hex (the pre-#142 dark palette, and the dark cyan that palette had itself replaced), so a session recorded under an older palette keeps the color it was given. `pick_theme` likewise avoids colors by their *Claude color* rather than raw hex, so an old-hex session still claims its session color against new spawns.
+
+Because the palette is mid-tone rather than dark, `write_vscode_files` also pins a white foreground on the title, status, and activity bars: VS Code does not auto-contrast, and its theme default (light grey on dark themes, near-black on light ones) is unreadable on several of these backgrounds.
 
 The color reaches the session as a **`/color <name>` initial prompt** appended to the launch command:
 
