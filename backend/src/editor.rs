@@ -26,11 +26,19 @@ pub fn write_vscode_files(work_dir: &Path, work_parent: &str, color: &str, sessi
     std::fs::create_dir_all(&vscode).map_err(|e| e.to_string())?;
 
     let settings = serde_json::json!({
+        // The palette is Claude Code's own mid-tone session colors, so pin a
+        // white foreground: VS Code's theme default (light grey on dark
+        // themes, near-black on light ones) is unreadable on some of them.
         "workbench.colorCustomizations": {
             "titleBar.activeBackground": color,
+            "titleBar.activeForeground": "#ffffff",
             "titleBar.inactiveBackground": format!("{color}99"),
+            "titleBar.inactiveForeground": "#ffffffcc",
             "statusBar.background": color,
+            "statusBar.foreground": "#ffffff",
             "activityBar.background": color,
+            "activityBar.foreground": "#ffffff",
+            "activityBar.inactiveForeground": "#ffffff99",
         },
         "workbench.startupEditor": "none",
         // Marker used by teardown to find this window via AppleScript.
@@ -318,7 +326,7 @@ mod tests {
     #[test]
     fn startup_task_themes_the_session() {
         let dir = tempfile::tempdir().unwrap();
-        write_vscode_files(dir.path(), "work-127-add-session-color", "#6c1a5a", "\u{1f380} #127 \u{2014} Add session color").unwrap();
+        write_vscode_files(dir.path(), "work-127-add-session-color", "#c46686", "\u{1f380} #127 \u{2014} Add session color").unwrap();
 
         let tasks: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
@@ -338,7 +346,7 @@ mod tests {
     #[test]
     fn startup_task_uses_the_resolved_claude_path() {
         let dir = tempfile::tempdir().unwrap();
-        write_vscode_files(dir.path(), "work-134-x", "#6c1a5a", "x").unwrap();
+        write_vscode_files(dir.path(), "work-134-x", "#c46686", "x").unwrap();
 
         let tasks: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
@@ -355,7 +363,7 @@ mod tests {
     #[test]
     fn terminal_font_comes_from_preferences() {
         let dir = tempfile::tempdir().unwrap();
-        write_vscode_files(dir.path(), "work-134-x", "#6c1a5a", "x").unwrap();
+        write_vscode_files(dir.path(), "work-134-x", "#c46686", "x").unwrap();
 
         let settings: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/settings.json")).unwrap()).unwrap();
