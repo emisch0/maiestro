@@ -6,7 +6,9 @@
 //! open a real VS Code window whose integrated terminal starts the user-facing
 //! agent session, and later close it. Window control goes through System Events
 //! (`osascript`) rather than direct Apple events, matching `focus_editor_window`
-//! and avoiding a second Automation grant. Extracted from `spawn.rs` (issue #99).
+//! and avoiding a second Automation grant. On Windows it uses Win32 window
+//! enumeration and messages instead (the `win32` module, #166). Extracted from
+//! `spawn.rs` (issue #99).
 
 use std::path::Path;
 use std::process::Command;
@@ -64,19 +66,27 @@ pub fn write_vscode_files(
     )
     .map_err(|e| e.to_string())?;
 
-    let command = session_command(agent, color, session_title);
-    let tasks = serde_json::json!({
-        "version": "2.0.0",
-        "tasks": [{
-            "label": format!("Start {}", agent.display_name()),
-            "type": "shell",
-            "command": command,
-            "isBackground": true,
-            "problemMatcher": [],
-            "presentation": { "reveal": "always", "panel": "new", "focus": true },
-            "runOptions": { "runOn": "folderOpen" },
-        }],
+    let mut task = serde_json::json!({
+        "label": format!("Start {}", agent.display_name()),
+        "isBackground": true,
+        "problemMatcher": [],
+        "presentation": { "reveal": "always", "panel": "new", "focus": true },
+        "runOptions": { "runOn": "folderOpen" },
     });
+    let (program, args) = session_argv(agent, color, session_title);
+    if cfg!(target_os = "windows") {
+        // A `process` task runs the program directly with an argv — no shell,
+        // so no quoting that depends on the user's default terminal shell
+        // (PowerShell would read a quoted path followed by flags as an
+        // expression, cmd uses different quotes entirely).
+        task["type"] = "process".into();
+        task["command"] = program.into();
+        task["args"] = args.into_iter().map(|(a, _)| a).collect::<Vec<_>>().into();
+    } else {
+        task["type"] = "shell".into();
+        task["command"] = shell_command(&program, &args).into();
+    }
+    let tasks = serde_json::json!({ "version": "2.0.0", "tasks": [task] });
     std::fs::write(
         vscode.join("tasks.json"),
         serde_json::to_string_pretty(&tasks).unwrap() + "\n",
@@ -85,8 +95,10 @@ pub fn write_vscode_files(
     Ok(())
 }
 
-/// The shell command the folder-open task runs to start a real, user-facing
-/// `agent` session in the integrated terminal.
+/// The program and arguments the folder-open task runs to start a real,
+/// user-facing `agent` session in the integrated terminal. Each argument
+/// carries whether the POSIX shell form ([`shell_command`], macOS) quotes it;
+/// Windows runs the argv directly as a `process` task.
 ///
 /// **Claude:** `--remote-control` lets the user drive the session remotely;
 /// mAIestro Code still only launches it, it does not host it. `--name` gives the
@@ -120,20 +132,33 @@ pub fn write_vscode_files(
 /// also decides which binary the session starts with. When nothing concrete
 /// resolves, `resolve_tool` yields the bare name, i.e. exactly the previous
 /// behavior.
-fn session_command(agent: Agent, color: &str, session_title: &str) -> String {
-    let bin = shell_quote(&crate::tools::resolve_tool(agent.tool()).to_string_lossy());
-    match agent {
-        Agent::Claude => format!(
-            "{bin} --remote-control --name {} {}",
-            shell_quote(session_title),
-            shell_quote(&format!("/color {}", crate::theming::claude_color(color)))
-        ),
-        Agent::Codex => std::iter::once(bin)
-            .chain(crate::hooks::codex_hook_overrides().iter().map(|o| format!("-c {}", shell_quote(o))))
-            .collect::<Vec<_>>()
-            .join(" "),
-        Agent::Antigravity => bin,
-    }
+fn session_argv(agent: Agent, color: &str, session_title: &str) -> (String, Vec<(String, bool)>) {
+    let bin = crate::tools::resolve_tool(agent.tool()).to_string_lossy().into_owned();
+    let flag = |s: &str| (s.to_string(), false);
+    let value = |s: String| (s, true);
+    let args = match agent {
+        Agent::Claude => vec![
+            flag("--remote-control"),
+            flag("--name"),
+            value(session_title.to_string()),
+            value(format!("/color {}", crate::theming::claude_color(color))),
+        ],
+        Agent::Codex => crate::hooks::codex_hook_overrides()
+            .into_iter()
+            .flat_map(|o| [flag("-c"), value(o)])
+            .collect(),
+        Agent::Antigravity => Vec::new(),
+    };
+    (bin, args)
+}
+
+/// The POSIX shell form of [`session_argv`]: the program and every value
+/// argument single-quoted, flags bare.
+fn shell_command(program: &str, args: &[(String, bool)]) -> String {
+    std::iter::once(shell_quote(program))
+        .chain(args.iter().map(|(a, quote)| if *quote { shell_quote(a) } else { a.clone() }))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ── Launch / focus ──────────────────────────────────────────────────────────────
@@ -178,8 +203,96 @@ pub fn window_marker(work_dir: &Path) -> Option<String> {
 /// literal: drop both `"` (would close the literal early) and `\` (AppleScript's
 /// escape character — a trailing one would escape the closing quote and break the
 /// script). `marker` is already path-safe in normal use; this is belt-and-braces.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn applescript_literal_safe(s: &str) -> String {
     s.replace(['"', '\\'], "")
+}
+
+/// Whether a window title is a VS Code window for the worktree `marker` names.
+/// The title ends in "Visual Studio Code" (VS Code appends it after our
+/// `window.title`), which keeps an unrelated window that happens to show the
+/// same folder name — an Explorer window, say — from ever being closed.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_editor_window_title(title: &str, marker: &str) -> bool {
+    title.contains(marker) && title.contains("Visual Studio Code")
+}
+
+/// VS Code window control on Windows (#166), the counterpart of the System
+/// Events scripts: enumerate top-level windows, match titles with
+/// [`is_editor_window_title`], and focus or close them with plain Win32
+/// messages. Unlike macOS this needs no permission grant for same-user
+/// windows, so the Windows probe never answers `Denied`.
+#[cfg(target_os = "windows")]
+mod win32 {
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible, PostMessageW, SetForegroundWindow,
+        ShowWindow, SW_RESTORE, WM_CLOSE,
+    };
+
+    /// Visible top-level VS Code windows for `marker`.
+    pub fn find(marker: &str) -> Vec<HWND> {
+        struct Search<'a> {
+            marker: &'a str,
+            found: Vec<HWND>,
+        }
+        unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            // SAFETY: `lparam` is the `&mut Search` passed to `EnumWindows`
+            // below, alive for the whole (synchronous) enumeration.
+            let search = unsafe { &mut *(lparam as *mut Search) };
+            if unsafe { IsWindowVisible(hwnd) } == 0 {
+                return 1;
+            }
+            let len = unsafe { GetWindowTextLengthW(hwnd) };
+            if len <= 0 {
+                return 1;
+            }
+            let mut buf = vec![0u16; len as usize + 1];
+            let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+            let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+            if super::is_editor_window_title(&title, search.marker) {
+                search.found.push(hwnd);
+            }
+            1 // keep enumerating
+        }
+        let mut search = Search { marker, found: Vec::new() };
+        // SAFETY: the callback only reads window titles and writes to `search`.
+        unsafe { EnumWindows(Some(visit), &mut search as *mut Search as LPARAM) };
+        search.found
+    }
+
+    /// Restore (if minimized) and raise the first matching window.
+    pub fn focus(marker: &str) -> bool {
+        let Some(&hwnd) = find(marker).first() else {
+            return false;
+        };
+        // SAFETY: `hwnd` came from `EnumWindows`; a window that has since
+        // closed just makes these calls fail harmlessly.
+        unsafe {
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            SetForegroundWindow(hwnd);
+        }
+        true
+    }
+
+    /// Ask every matching window to close, like clicking its close button. Fire
+    /// and forget, as on macOS: the caller confirms with [`find`].
+    pub fn close(marker: &str) {
+        for hwnd in find(marker) {
+            // SAFETY: as in `focus`.
+            unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+        }
+    }
+}
+
+/// Look for an open VS Code window whose title contains `marker` and, if found,
+/// raise it to the front. Returns true when one was focused.
+#[cfg(target_os = "windows")]
+async fn focus_editor_window(marker: &str) -> bool {
+    win32::focus(marker)
 }
 
 /// Look for an open VS Code window whose title contains `marker` and, if found,
@@ -187,6 +300,7 @@ fn applescript_literal_safe(s: &str) -> String {
 /// focused. Requires Accessibility permission for System Events; any failure
 /// (including a missing grant) is treated as "not found" so the caller can fall
 /// back to launching a window.
+#[cfg(not(target_os = "windows"))]
 async fn focus_editor_window(marker: &str) -> bool {
     // marker is path-safe (slug + repo dir name); sanitize defensively.
     let safe = applescript_literal_safe(marker);
@@ -243,6 +357,7 @@ pub async fn open_repo_in_editor(repo: String) -> Result<(), String> {
 /// unreliable, and the direct-events path also needs a *separate* Automation
 /// grant that we'd never prompted for — so the close was failing silently.
 /// No-op if VS Code isn't running.
+#[cfg(not(target_os = "windows"))]
 pub async fn close_editor_window(marker: &str) {
     let safe = applescript_literal_safe(marker);
     let script = format!(
@@ -262,6 +377,13 @@ end tell"#
     let _ = tokio::process::Command::new("osascript").arg("-e").arg(&script).output().await;
 }
 
+/// Close the VS Code window(s) for this worktree (`WM_CLOSE`, as the close
+/// button sends). No-op when none is open.
+#[cfg(target_os = "windows")]
+pub async fn close_editor_window(marker: &str) {
+    win32::close(marker);
+}
+
 /// What we could learn about a worktree's VS Code window. The `Denied` case is
 /// critical: when mAIestro Code lacks Accessibility permission, osascript errors and
 /// we genuinely cannot see the window — which must NOT be mistaken for "closed",
@@ -271,12 +393,26 @@ pub enum WinProbe {
     Open,
     /// VS Code isn't running, or no window matches the marker.
     Absent,
-    /// Couldn't determine — almost always a missing Accessibility grant.
+    /// Couldn't determine — almost always a missing Accessibility grant. macOS
+    /// only; the Windows probe always knows.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     Denied,
+}
+
+/// Probe for an open VS Code window whose title contains `marker`. Never
+/// `Denied` on Windows: enumerating same-user windows needs no grant.
+#[cfg(target_os = "windows")]
+pub async fn probe_editor_window(marker: &str) -> WinProbe {
+    if win32::find(marker).is_empty() {
+        WinProbe::Absent
+    } else {
+        WinProbe::Open
+    }
 }
 
 /// Probe for an open VS Code window whose title contains `marker`, via the
 /// accessibility API (System Events).
+#[cfg(not(target_os = "windows"))]
 pub async fn probe_editor_window(marker: &str) -> WinProbe {
     let safe = applescript_literal_safe(marker);
     let script = format!(
@@ -397,8 +533,73 @@ pub fn open_accessibility_settings() {
 
 #[cfg(test)]
 mod tests {
-    use super::{path_at_or_under, write_vscode_files};
+    use super::{is_editor_window_title, path_at_or_under, write_vscode_files};
+
+    /// Teardown only ever matches (and so closes) a VS Code window for this
+    /// exact worktree.
+    #[test]
+    fn editor_window_title_matches_only_vscode_for_the_worktree() {
+        let marker = "work-200-tray-brain-icon-red/maiestro";
+        assert!(is_editor_window_title(
+            "main.rs \u{2014} work-200-tray-brain-icon-red/maiestro - Visual Studio Code",
+            marker
+        ));
+        assert!(!is_editor_window_title("work-200-tray-brain-icon-red/maiestro - File Explorer", marker));
+        assert!(!is_editor_window_title("work-201-other/maiestro - Visual Studio Code", marker));
+    }
     use crate::agent::Agent;
+
+    /// The task's command line in its POSIX shell form, whichever platform
+    /// wrote it: the `shell` task's own string (macOS), or the same string
+    /// rebuilt from a Windows `process` task's argv — so one set of assertions
+    /// covers both.
+    fn task_command_line(task: &serde_json::Value) -> String {
+        let command = task["command"].as_str().unwrap();
+        if task["type"] == "shell" {
+            return command.to_string();
+        }
+        assert_eq!(task["type"], "process", "{task}");
+        let args: Vec<(String, bool)> = task["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                let a = a.as_str().unwrap().to_string();
+                let quote = !a.starts_with('-');
+                (a, quote)
+            })
+            .collect();
+        super::shell_command(command, &args)
+    }
+
+    fn read_task(dir: &std::path::Path) -> serde_json::Value {
+        let tasks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(".vscode/tasks.json")).unwrap()).unwrap();
+        tasks["tasks"][0].clone()
+    }
+
+    /// Windows runs the session as a `process` task: the resolved binary and a
+    /// plain argv, nothing for a shell to parse (#165). macOS keeps the `shell`
+    /// task with a single-quoted command string.
+    #[test]
+    fn startup_task_is_a_process_on_windows_and_a_shell_command_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        write_vscode_files(dir.path(), "work-2-x", "#c46686", "\u{1f981} #2 \u{2014} It's here", Agent::Claude).unwrap();
+        let task = read_task(dir.path());
+        let bin = crate::tools::resolve_tool("claude").to_string_lossy().into_owned();
+        if cfg!(target_os = "windows") {
+            assert_eq!(task["type"], "process");
+            assert_eq!(task["command"], bin.as_str());
+            assert_eq!(
+                task["args"],
+                serde_json::json!(["--remote-control", "--name", "\u{1f981} #2 \u{2014} It's here", "/color pink"])
+            );
+        } else {
+            assert_eq!(task["type"], "shell");
+            assert!(task.get("args").is_none(), "{task}");
+            assert!(task["command"].as_str().unwrap().contains("--name '\u{1f981} #2 \u{2014} It'\\''s here'"), "{task}");
+        }
+    }
 
     /// The generated folder-open task carries the worktree's theme into the
     /// session as a `/color <name>` initial prompt, quoted as one argv entry, and
@@ -409,16 +610,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_vscode_files(dir.path(), "work-127-add-session-color", "#c46686", "\u{1f380} #127 \u{2014} Add session color", Agent::Claude).unwrap();
 
-        let tasks: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
-        let command = tasks["tasks"][0]["command"].as_str().unwrap();
+        let command = task_command_line(&read_task(dir.path()));
         assert!(command.contains("'/color pink'"), "not themed: {command}");
         assert!(command.contains("--name '\u{1f380} #127 \u{2014} Add session color'"), "not named: {command}");
 
         write_vscode_files(dir.path(), "work-1-x", "#nonsense", "x", Agent::Claude).unwrap();
-        let tasks: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
-        assert!(tasks["tasks"][0]["command"].as_str().unwrap().contains("'/color default'"));
+        assert!(task_command_line(&read_task(dir.path())).contains("'/color default'"));
     }
 
     /// The task invokes the *resolved* `claude` binary (shell-quoted, so a path
@@ -429,9 +626,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_vscode_files(dir.path(), "work-134-x", "#c46686", "x", Agent::Claude).unwrap();
 
-        let tasks: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
-        let command = tasks["tasks"][0]["command"].as_str().unwrap();
+        let command = task_command_line(&read_task(dir.path()));
         let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("claude").to_string_lossy());
         assert!(
             command.starts_with(&format!("{expected} --remote-control")),
@@ -460,11 +655,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_vscode_files(dir.path(), "work-162-x", "#c46686", "x", Agent::Codex).unwrap();
 
-        let tasks: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
-        let task = &tasks["tasks"][0];
+        let task = &read_task(dir.path());
         let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("codex").to_string_lossy());
-        let command = task["command"].as_str().unwrap();
+        let command = task_command_line(task);
         assert!(command.starts_with(&format!("{expected} -c 'hooks.SessionStart=")), "{command}");
         assert_eq!(command.matches(" -c ").count(), 7, "{command}");
         assert!(!command.contains("/color") && !command.contains("--name"), "{command}");
@@ -483,11 +676,9 @@ mod tests {
     fn antigravity_task_runs_the_bare_resolved_agy() {
         let dir = tempfile::tempdir().unwrap();
         write_vscode_files(dir.path(), "work-185-x", "#c46686", "x", Agent::Antigravity).unwrap();
-        let tasks: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
-        let task = &tasks["tasks"][0];
+        let task = &read_task(dir.path());
         let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("agy").to_string_lossy());
-        assert_eq!(task["command"].as_str().unwrap(), expected);
+        assert_eq!(task_command_line(task), expected);
         assert_eq!(task["label"], "Start Antigravity");
         let settings: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/settings.json")).unwrap()).unwrap();

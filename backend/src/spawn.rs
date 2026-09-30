@@ -719,6 +719,20 @@ impl Landed {
     }
 }
 
+/// Why teardown asks for confirmation when none of its checks produced a
+/// warning: which part of "is this branch's work safe?" couldn't be answered.
+/// The prompt must never appear with no reason at all.
+fn unconfirmed_reason(landed: Landed, unmerged: Option<u32>, base: &str) -> String {
+    match (landed, unmerged) {
+        (Landed::Unknown, None) => {
+            format!("Couldn't check the pull request on GitHub or compare the branch with origin/{base}")
+        }
+        (Landed::Unknown, _) => "Couldn't check the branch's pull request on GitHub".to_string(),
+        (_, None) => format!("Couldn't compare the branch with origin/{base}"),
+        _ => "Couldn't confirm this branch's work was merged".to_string(),
+    }
+}
+
 /// How many commits on `branch` carry work that isn't already on `origin/<base>`,
 /// or `None` when the question can't be answered (missing base ref, git failure).
 ///
@@ -793,10 +807,24 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     // ── Checks ──────────────────────────────────────────────────────────────
     let mut warnings = Vec::new();
 
-    let dirty = git(&work_dir, &["status", "--porcelain"])
-        .await
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
+    // A worktree whose `.git` link is gone (a removal that stopped halfway,
+    // or a folder deleted by hand) can't answer the git checks below — and in a
+    // plain folder git would walk up and answer for some *other* repo — so skip
+    // them and say why instead.
+    let worktree_ok = work_dir.join(".git").exists();
+    if !worktree_ok {
+        warnings.push(if work_dir.exists() {
+            "The worktree folder is no longer a git worktree (a previous removal may have stopped halfway)".to_string()
+        } else {
+            "The worktree folder is missing".to_string()
+        });
+    }
+
+    let dirty = worktree_ok
+        && git(&work_dir, &["status", "--porcelain"])
+            .await
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
     if dirty {
         warnings.push("Worktree has uncommitted changes".to_string());
     }
@@ -826,7 +854,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
             // branch's tip commit instead, which still points at the merged PR
             // (true for a squash merge too — the PR still lists its original
             // commits, even though none of them is an ancestor of the base).
-            if landed != Landed::Yes {
+            if landed != Landed::Yes && worktree_ok {
                 if let Ok(sha) = git(&work_dir, &["rev-parse", "HEAD"]).await {
                     if let Ok(prs) = gh.pulls_for_commit(&session.repo, &sha).await {
                         if Landed::from_prs(&prs) == Landed::Yes {
@@ -848,7 +876,7 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     }
 
     // Commits on the branch not yet on the base, when no merged PR accounts for them.
-    let unmerged = unmerged_commit_count(&work_dir, &base, &branch).await;
+    let unmerged = if worktree_ok { unmerged_commit_count(&work_dir, &base, &branch).await } else { None };
     if landed != Landed::Yes && unmerged.is_some_and(|n| n > 0) {
         warnings.push(format!("Branch has {} commit(s) not merged", unmerged.unwrap_or(0)));
     }
@@ -859,6 +887,9 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     // Skip confirmation only when the PR is merged and nothing new remains.
     let safe = landed == Landed::Yes && !dirty;
     if !safe && !confirmed {
+        if warnings.is_empty() {
+            warnings.push(unconfirmed_reason(landed, unmerged, &base));
+        }
         return Ok(TeardownOutcome::NeedsConfirmation { warnings });
     }
 
@@ -899,8 +930,28 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     //    A spawn that failed in the background (issue #77) can leave a Session
     //    record whose worktree was never created — tolerate a missing dir so the
     //    broken row can still be torn down, just pruning any dangling admin entry.
+    //
+    //    `git worktree remove` deletes the files (the `.git` link first) and
+    //    unregisters the worktree *before* removing the folder itself. On Windows
+    //    that last step fails while any process still has its working directory
+    //    inside (a terminal the window close didn't end yet), and every retry
+    //    then fails with "is not a working tree". Once `.git` is gone git is done
+    //    with it, so prune and remove the leftover folder ourselves instead.
     if work_dir.exists() {
-        git(&cloned_repo, &["worktree", "remove", "--force", &work_dir.to_string_lossy()]).await?;
+        if let Err(e) = git(&cloned_repo, &["worktree", "remove", "--force", &work_dir.to_string_lossy()]).await {
+            if work_dir.join(".git").exists() {
+                return Err(e);
+            }
+            // Never remove_dir_all a folder outside the worktree prefix, whatever
+            // the session record says.
+            let prefix = expand_tilde(&effective_worktree_prefix(settings.worktree_prefix.as_deref()));
+            if !is_under_worktree_prefix(&work_dir, &prefix) {
+                return Err(e);
+            }
+            tracing::warn!(error = %e, dir = %work_dir.display(), "worktree remove left the folder behind; removing it");
+            let _ = git(&cloned_repo, &["worktree", "prune"]).await;
+            remove_leftover_worktree_dir(&work_dir).await?;
+        }
     } else {
         let _ = git(&cloned_repo, &["worktree", "prune"]).await;
     }
@@ -941,25 +992,17 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     // it costs no network and runs even when the delete was skipped.
     let _ = git(&cloned_repo, &["update-ref", "-d", &format!("refs/remotes/origin/{branch}")]).await;
 
-    // 5. Remove the leftover wrapper dir (`<prefix><workspace>`), gating removal
-    //    on the path actually starting with the repo's configured worktree
-    //    prefix so we never remove_dir_all something outside it. A spawn-generated
-    //    path never contains `..`; reject any that does before the string-prefix
-    //    check, so a tampered session record can't tunnel out of the prefix (e.g.
-    //    `.../work-x/../../../etc`) while still matching the prefix literally.
+    // 5. Remove the leftover wrapper dir (`<prefix><workspace>`), gated on
+    //    `is_under_worktree_prefix` so we never remove_dir_all something outside
+    //    the repo's configured worktree prefix.
     if let Some(parent) = work_dir.parent() {
-        let prefix = effective_worktree_prefix(settings.worktree_prefix.as_deref());
-        let expanded = expand_tilde(&prefix);
-        let has_dotdot = parent
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir));
-        let under_prefix = parent.to_string_lossy().starts_with(&*expanded.to_string_lossy());
+        let prefix = expand_tilde(&effective_worktree_prefix(settings.worktree_prefix.as_deref()));
         // Only remove the wrapper once it's empty: the wrapper is keyed by
         // `<issue>-<slug>` alone, so two repos with an identically-slugged issue
         // share it — removing it while the sibling's worktree is inside would
         // destroy that repo's work.
         let empty = std::fs::read_dir(parent).map(|mut d| d.next().is_none()).unwrap_or(false);
-        if !has_dotdot && under_prefix && parent.exists() {
+        if is_under_worktree_prefix(parent, &prefix) && parent.exists() {
             if !empty {
                 tracing::info!(dir = %parent.display(), "wrapper dir not empty after teardown; leaving it in place");
             } else if let Err(e) = std::fs::remove_dir_all(parent) {
@@ -978,12 +1021,78 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     Ok(TeardownOutcome::Done)
 }
 
+/// Whether teardown may delete `dir`: it starts with the repo's (expanded)
+/// worktree prefix and has no `..` component. A spawn-generated path never
+/// contains `..`; rejecting any that does before the string-prefix check keeps
+/// a tampered session record from tunnelling out of the prefix (e.g.
+/// `.../work-x/../../../etc`) while still matching it literally.
+fn is_under_worktree_prefix(dir: &Path, prefix: &Path) -> bool {
+    let has_dotdot = dir.components().any(|c| matches!(c, std::path::Component::ParentDir));
+    !has_dotdot && dir.to_string_lossy().starts_with(&*prefix.to_string_lossy())
+}
+
+/// Remove a worktree folder git has already unregistered (see step 2 of
+/// [`teardown`]). Retries briefly: a VS Code window that was just closed can
+/// take a moment to end its terminal's processes and release the folder. A
+/// folder that stays locked is a hard error naming the likely cause, and the
+/// session record is kept so Tear Down can simply be retried.
+async fn remove_leftover_worktree_dir(dir: &Path) -> Result<(), String> {
+    let mut last = None;
+    for attempt in 0..10 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(format!(
+        "Couldn't remove {}: {}. A program still has it open (a terminal or editor window in that folder); close it and try Tear Down again.",
+        dir.display(),
+        last.map(|e| e.to_string()).unwrap_or_default()
+    ))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// A confirmation with no warnings still names what couldn't be checked.
+    #[test]
+    fn unconfirmed_reason_names_the_missing_check() {
+        assert!(unconfirmed_reason(Landed::Unknown, None, "main").contains("GitHub"));
+        assert!(unconfirmed_reason(Landed::Unknown, None, "main").contains("origin/main"));
+        assert!(unconfirmed_reason(Landed::Unknown, Some(0), "main").contains("GitHub"));
+        assert!(unconfirmed_reason(Landed::No, None, "main").contains("origin/main"));
+        assert!(!unconfirmed_reason(Landed::No, Some(0), "main").is_empty());
+    }
+
+    #[test]
+    fn worktree_prefix_guard_rejects_escapes_and_outsiders() {
+        let prefix = Path::new("/home/me/src/work-");
+        assert!(is_under_worktree_prefix(Path::new("/home/me/src/work-200-x/repo"), prefix));
+        assert!(!is_under_worktree_prefix(Path::new("/home/me/src/work-200-x/../../../etc"), prefix));
+        assert!(!is_under_worktree_prefix(Path::new("/home/me/src/repo"), prefix));
+    }
+
+    /// The teardown half-removal case: git unregistered the worktree and deleted
+    /// its files but not the folder. The leftover (including anything still
+    /// inside) is removed, and an already-missing folder is fine.
+    #[tokio::test]
+    async fn leftover_worktree_dir_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("work-1-x").join("repo");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("f.txt"), "x").unwrap();
+        remove_leftover_worktree_dir(&dir).await.unwrap();
+        assert!(!dir.exists());
+        remove_leftover_worktree_dir(&dir).await.unwrap();
+    }
 
     // No collisions: a plain create at the base workspace/branch/path, with the
     // emoji-less `#n — label` session label. Also proves the slug shape and that

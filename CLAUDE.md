@@ -42,7 +42,7 @@ The spawn subsystem is split along its natural seams so each file owns one respo
 - **`spawn.rs`** — spawn core (`do_spawn`/`finish_spawn`), the preview commands (`prepare_spawn`/`draft_spawn_preview`/`confirm_spawn`), and `teardown`.
 - **`theming.rs`** — worktree color/emoji picking (`pick_theme`) and the palette → Claude-session-color mapping (`claude_color`).
 - **`hooks.rs`** — the agent status-hook subsystem, Claude Code, Codex or Antigravity (write, merge, reconcile) — see "Live per-session status".
-- **`editor.rs`** — VS Code workspace-file generation, launch/focus, and the teardown window control (AppleScript/`lsof`).
+- **`editor.rs`** — VS Code workspace-file generation, launch/focus, and the teardown window control (AppleScript/`lsof` on macOS, Win32 `EnumWindows`/`WM_CLOSE` on Windows).
 - **`drafting.rs`** — the AI-drafting calls (`agent_text`, which dispatches to `claude -p`, `codex exec` or headless `agy`; issue/short-label drafting; `AgentActivity`).
 - **`agent.rs`** — the `Agent` enum (`claude` / `codex` / `antigravity`, whose binary is `agy` — resolve via `Agent::tool()`); `repo_settings::effective_agent` resolves a repo's agent. A session records its agent at spawn, so changing the repo setting never switches an existing worktree; only the explicit per-session switch does.
 - **`session_agent.rs`** — switching an existing session's agent (`session_set_agent`), the session-aware `session_open_in_editor`, and the VS Code restart that applies a switch (`session_restart_editor`).
