@@ -1,8 +1,8 @@
 # CI — runs on every pull request and on pushes to main.
 #
-# Two jobs: frontend (typecheck + vitest) on ubuntu, and backend (cargo test +
-# clippy) on macos-latest — the backend is a Tauri/objc crate that only builds
-# on macOS. Actions minutes are unmetered on public repos, so both run in CI
+# Three jobs: frontend (typecheck + vitest) on ubuntu, backend (cargo test +
+# clippy) on macos-latest, and the same backend checks on windows-latest for
+# the Windows port (#160). Actions minutes are unmetered on public repos, so both run in CI
 # (see issue #122); on a private repo macOS minutes bill at 10×, which is why
 # the backend job was previously a local-only gate (see issue #111). This
 # workflow is the natural enforcement point for the PR-only-main rule.
@@ -48,6 +48,32 @@ jobs:
   backend:
     name: Backend (test + clippy)
     runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Tests
+        working-directory: backend
+        run: cargo test --locked
+
+      - name: Clippy
+        working-directory: backend
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  # Windows port (#160). Advisory for now: not one of the ruleset's required
+  # checks, so it can't block a merge while the port stabilizes.
+  backend-windows:
+    name: Backend Windows (test + clippy)
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 

@@ -29,7 +29,7 @@
 //! auto-resolve — `which` on the enriched PATH → known install locations → the
 //! bare name (let the OS try, as a last resort preserving prior behavior).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// The user's login-shell PATH, resolved once and cached. `None` when the login
@@ -274,6 +274,46 @@ pub fn spawn_reaped(cmd: &mut std::process::Command) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The command that opens `target` (an http(s) URL, a file or a folder) with the
+/// user's default handler, like a double-click: macOS `open`, and on Windows the
+/// shell's own handler via `rundll32 url.dll,FileProtocolHandler`. Not `cmd /C
+/// start`: cmd would re-parse the target, so an `&` in a URL splits the command,
+/// and it flashes a console window from a GUI app. Run it with [`spawn_reaped`].
+pub fn os_open(target: &std::ffi::OsStr) -> std::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.arg("url.dll,FileProtocolHandler").arg(target);
+        c
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut c = std::process::Command::new("open");
+        c.arg(target);
+        c
+    }
+}
+
+/// The command that shows `path` selected in its parent folder: Finder via
+/// `open -R`, Explorer via `explorer /select,"<path>"`. Explorer only honors the
+/// select when the quotes sit after the comma, which std's own argument quoting
+/// can't produce, hence `raw_arg` (a Windows path can't contain `"`).
+pub fn os_reveal(path: &Path) -> std::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("explorer.exe");
+        c.raw_arg(format!("/select,\"{}\"", path.display()));
+        c
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    }
+}
+
 /// A short, trimmed preview of some (possibly large) subprocess output for a
 /// diagnostic error/log line: whitespace-trimmed, capped at 240 chars, with a
 /// stand-in for empty output. Shared by every caller that surfaces `claude`/`git`
@@ -342,6 +382,9 @@ mod tests {
         assert_eq!(once, twice);
     }
 
+    // Unix-only: a `:`-separated PATH and `/bin/sh`. Windows lookup (`;`,
+    // PATHEXT) is #165.
+    #[cfg(unix)]
     #[test]
     fn which_on_finds_a_known_system_binary() {
         // `sh` exists in /bin on every macOS/Linux host the tests run on.

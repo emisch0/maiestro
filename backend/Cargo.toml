@@ -15,7 +15,12 @@ tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
-keyring = { version = "3", features = ["apple-native"] }
+# Each native backend only compiles on its own OS: macOS Keychain, Windows
+# Credential Manager.
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+# Home and per-user data dirs from the OS rather than `$HOME`, which Windows
+# doesn't reliably set (paths.rs, logging.rs).
+dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

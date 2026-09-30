@@ -310,16 +310,18 @@ fn main() {
         .manage(PopoverState::default())
         .manage(registry)
         .plugin(tauri_plugin_positioner::init())
-        // Launch-at-login writes a per-user LaunchAgent (issue #98). The plist
-        // name is pinned to the pre-rebrand "mAIestro" rather than following
-        // productName, so existing installs keep (and reconcile) the same
+        // Launch-at-login writes a per-user LaunchAgent on macOS (issue #98) and
+        // an HKCU `Run` registry value on Windows. The name is pinned to the
+        // pre-rebrand "mAIestro" rather than following productName, so existing
+        // installs keep (and reconcile) the same
         // ~/Library/LaunchAgents/mAIestro.plist instead of orphaning it.
-        .plugin(
-            tauri_plugin_autostart::Builder::new()
-                .macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent)
-                .app_name("mAIestro")
-                .build(),
-        )
+        .plugin({
+            let autostart = tauri_plugin_autostart::Builder::new();
+            // `macos_launcher` only exists on the macOS build of the plugin.
+            #[cfg(target_os = "macos")]
+            let autostart = autostart.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
+            autostart.app_name("mAIestro").build()
+        })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Relaunch focuses the existing app instead of spawning a second.
             show_popover(app);

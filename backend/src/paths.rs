@@ -6,10 +6,12 @@
 
 use std::path::{Component, Path, PathBuf};
 
-/// The user's home directory (`$HOME`, or an empty path if unset). Re-derived in
-/// several modules before this was promoted here; they now call this one copy.
+/// The user's home directory, or an empty path if it can't be determined.
+/// Re-derived in several modules before this was promoted here; they now call
+/// this one copy. `dirs::home_dir` reads `$HOME` on Unix (so tests that set it
+/// still work) and asks the OS on Windows, where `$HOME` usually isn't set.
 pub fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+    dirs::home_dir().unwrap_or_default()
 }
 
 /// Environment variable that overrides the config/state root. When set (and

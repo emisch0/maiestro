@@ -633,7 +633,10 @@ mod tests {
     /// The Antigravity drafting call has no usable tools: it runs in the
     /// mAIestro-owned lockdown folder (not the repo), whose hook denies every
     /// tool, and never passes a flag that would auto-approve one. The prompt
-    /// comes from stdin, and `--model` is passed only when set.
+    /// comes from stdin, and `--model` is passed only when set. Unix-only: runs
+    /// the POSIX-shell hook command through `sh`; Windows hook commands are not
+    /// supported yet (#160).
+    #[cfg(unix)]
     #[test]
     fn antigravity_drafting_has_no_tools() {
         let hooks = antigravity_lockdown_hooks();
