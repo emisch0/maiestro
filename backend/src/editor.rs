@@ -208,28 +208,63 @@ fn applescript_literal_safe(s: &str) -> String {
     s.replace(['"', '\\'], "")
 }
 
-/// Whether a window title is a VS Code window for the worktree `marker` names.
-/// The title ends in "Visual Studio Code" (VS Code appends it after our
-/// `window.title`), which keeps an unrelated window that happens to show the
-/// same folder name — an Explorer window, say — from ever being closed.
+/// Whether a top-level window is a VS Code window for the worktree `marker`
+/// names: its title contains the marker (our `window.title` puts it there),
+/// and it belongs to VS Code's own executable. The title alone isn't enough to
+/// be safe — an Explorer window can show the same folder name — and it can't
+/// carry "Visual Studio Code" either: a custom `window.title` replaces VS
+/// Code's default, `${appName}` suffix included, so the real title is just
+/// e.g. `main.rs - work-200-x/repo`. The executable plays the part the "Code"
+/// process filter plays in the macOS scripts.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn is_editor_window_title(title: &str, marker: &str) -> bool {
-    title.contains(marker) && title.contains("Visual Studio Code")
+fn is_editor_window(title: &str, exe_name: &str, marker: &str) -> bool {
+    let exe = exe_name.to_ascii_lowercase();
+    title.contains(marker) && (exe == "code.exe" || exe == "code - insiders.exe")
 }
 
 /// VS Code window control on Windows (#166), the counterpart of the System
-/// Events scripts: enumerate top-level windows, match titles with
-/// [`is_editor_window_title`], and focus or close them with plain Win32
-/// messages. Unlike macOS this needs no permission grant for same-user
-/// windows, so the Windows probe never answers `Denied`.
+/// Events scripts: enumerate top-level windows, match them with
+/// [`is_editor_window`], and focus or close them with plain Win32 messages.
+/// Unlike macOS this needs no permission grant for same-user windows, so the
+/// Windows probe never answers `Denied`.
 #[cfg(target_os = "windows")]
 mod win32 {
     use windows_sys::core::BOOL;
-    use windows_sys::Win32::Foundation::{HWND, LPARAM};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible, PostMessageW, SetForegroundWindow,
-        ShowWindow, SW_RESTORE, WM_CLOSE,
+    use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        PostMessageW, SetForegroundWindow, ShowWindow, SW_RESTORE, WM_CLOSE,
+    };
+
+    /// The file name of the executable that owns `hwnd` (e.g. `Code.exe`), or
+    /// empty when it can't be read.
+    fn owner_exe_name(hwnd: HWND) -> String {
+        let mut pid = 0u32;
+        // SAFETY: plain queries on a window handle / process id; the process
+        // handle is closed before returning.
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == 0 {
+                return String::new();
+            }
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return String::new();
+            }
+            let mut buf = vec![0u16; 1024];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len);
+            CloseHandle(process);
+            if ok == 0 {
+                return String::new();
+            }
+            let path = String::from_utf16_lossy(&buf[..len as usize]);
+            path.rsplit(['\\', '/']).next().unwrap_or_default().to_string()
+        }
+    }
 
     /// Visible top-level VS Code windows for `marker`.
     pub fn find(marker: &str) -> Vec<HWND> {
@@ -251,7 +286,8 @@ mod win32 {
             let mut buf = vec![0u16; len as usize + 1];
             let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
             let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
-            if super::is_editor_window_title(&title, search.marker) {
+            // The cheap title test first; only a match pays for the process lookup.
+            if title.contains(search.marker) && super::is_editor_window(&title, &owner_exe_name(hwnd), search.marker) {
                 search.found.push(hwnd);
             }
             1 // keep enumerating
@@ -533,19 +569,21 @@ pub fn open_accessibility_settings() {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_editor_window_title, path_at_or_under, write_vscode_files};
+    use super::{is_editor_window, path_at_or_under, write_vscode_files};
 
     /// Teardown only ever matches (and so closes) a VS Code window for this
-    /// exact worktree.
+    /// exact worktree. The real Windows title carries no "Visual Studio Code"
+    /// (our `window.title` replaces VS Code's default, suffix included), so
+    /// VS Code is recognized by its executable instead.
     #[test]
-    fn editor_window_title_matches_only_vscode_for_the_worktree() {
+    fn editor_window_matches_only_vscode_for_the_worktree() {
         let marker = "work-200-tray-brain-icon-red/maiestro";
-        assert!(is_editor_window_title(
-            "main.rs \u{2014} work-200-tray-brain-icon-red/maiestro - Visual Studio Code",
-            marker
-        ));
-        assert!(!is_editor_window_title("work-200-tray-brain-icon-red/maiestro - File Explorer", marker));
-        assert!(!is_editor_window_title("work-201-other/maiestro - Visual Studio Code", marker));
+        assert!(is_editor_window("Welcome - work-200-tray-brain-icon-red/maiestro", "Code.exe", marker));
+        assert!(is_editor_window("main.rs - work-200-tray-brain-icon-red/maiestro", "code.exe", marker));
+        assert!(is_editor_window("work-200-tray-brain-icon-red/maiestro", "Code - Insiders.exe", marker));
+        assert!(!is_editor_window("work-200-tray-brain-icon-red/maiestro", "explorer.exe", marker));
+        assert!(!is_editor_window("work-200-tray-brain-icon-red/maiestro", "", marker));
+        assert!(!is_editor_window("Welcome - work-201-other/maiestro", "Code.exe", marker));
     }
     use crate::agent::Agent;
 
