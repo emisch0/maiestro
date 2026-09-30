@@ -2,7 +2,8 @@
 #
 # Three jobs: frontend (typecheck + vitest) on ubuntu, backend (cargo test +
 # clippy) on macos-latest, and the same backend checks on windows-latest for
-# the Windows port (#160). Actions minutes are unmetered on public repos, so both run in CI
+# the Windows port (#160). The Mac backend job and the frontend job are the
+# branch ruleset's required checks, matched by these exact job names. Actions minutes are unmetered on public repos, so both run in CI
 # (see issue #122); on a private repo macOS minutes bill at 10×, which is why
 # the backend job was previously a local-only gate (see issue #111). This
 # workflow is the natural enforcement point for the PR-only-main rule.
@@ -46,7 +47,7 @@ jobs:
         run: pnpm test
 
   backend:
-    name: Backend (test + clippy)
+    name: Backend Mac (test + clippy)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
