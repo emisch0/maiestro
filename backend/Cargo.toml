@@ -36,6 +36,11 @@ chrono = { version = "0.4", features = ["clock"], default-features = false }
 semver = "1"
 jsonschema = { version = "0.46", default-features = false }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# `GetForegroundWindow`, to tell a real blur of the popover from focus moving
+# off its webview onto its own frame (e.g. a resize drag). See `main.rs`.
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"

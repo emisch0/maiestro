@@ -57,6 +57,10 @@ struct PopoverState {
     /// popover analytically without reading window geometry back (which lags a
     /// cycle on macOS). `None` until the first tray event.
     tray: Mutex<Option<TrayCapture>>,
+    /// Whether a Windows foreground watcher is running (see
+    /// `watch_popover_foreground`). Unused on macOS.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    watching_foreground: std::sync::atomic::AtomicBool,
 }
 
 /// A tray rect as tray-icon reports it — physical px at the clicked display's
@@ -308,6 +312,63 @@ fn tray_icon_px(scale: f64) -> u32 {
         .into_iter()
         .min_by(|a, b| (f64::from(*a) - want).abs().total_cmp(&(f64::from(*b) - want).abs()))
         .unwrap_or(16)
+}
+
+/// Hide the popover because it lost focus, saving its (possibly just-resized)
+/// size first. Records the time so a tray click that caused the blur closes
+/// the popover rather than reopening it.
+fn auto_hide_popover(window: &tauri::Window) {
+    if let Some(state) = window.app_handle().try_state::<PopoverState>() {
+        *state.last_auto_hide.lock().unwrap() = Some(Instant::now());
+    }
+    persist_popover_size(window);
+    let _ = window.hide();
+}
+
+/// Whether the popover is still the OS foreground window. On Windows, Tauri
+/// reports a single-webview window's focus from the WebView2 control itself,
+/// so `Focused(false)` also fires when focus merely moves off the webview onto
+/// the popover's own frame — which is exactly what a resize grip's
+/// `startResizeDragging` does. The window hasn't really lost focus then.
+#[cfg(target_os = "windows")]
+fn popover_is_foreground(window: &tauri::Window) -> bool {
+    let Ok(hwnd) = window.hwnd() else {
+        return false;
+    };
+    // SAFETY: a plain query with no arguments.
+    let fg = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    fg == hwnd.0
+}
+
+/// After a blur that left the popover in the foreground (see
+/// [`popover_is_foreground`]), the webview no longer has focus, so no further
+/// `Focused(false)` will come when the user clicks away. Poll instead, and hide
+/// the popover as soon as another window takes the foreground. One watcher at a
+/// time; it ends once the popover is hidden.
+#[cfg(target_os = "windows")]
+fn watch_popover_foreground(window: tauri::Window) {
+    use std::sync::atomic::Ordering;
+    let Some(state) = window.app_handle().try_state::<PopoverState>() else {
+        return;
+    };
+    if state.watching_foreground.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            if !window.is_visible().unwrap_or(false) {
+                break;
+            }
+            if !popover_is_foreground(&window) {
+                auto_hide_popover(&window);
+                break;
+            }
+        }
+        if let Some(state) = window.app_handle().try_state::<PopoverState>() {
+            state.watching_foreground.store(false, Ordering::SeqCst);
+        }
+    });
 }
 
 pub(crate) fn show_popover(app: &tauri::AppHandle) {
@@ -591,12 +652,12 @@ fn main() {
             // just-resized) size before hiding so it survives the next launch.
             "main" => {
                 if let WindowEvent::Focused(false) = event {
-                    let app = window.app_handle();
-                    if let Some(state) = app.try_state::<PopoverState>() {
-                        *state.last_auto_hide.lock().unwrap() = Some(Instant::now());
+                    #[cfg(target_os = "windows")]
+                    if popover_is_foreground(window) {
+                        watch_popover_foreground(window.clone());
+                        return;
                     }
-                    persist_popover_size(window);
-                    let _ = window.hide();
+                    auto_hide_popover(window);
                 }
             }
             // The Settings window stays open on blur (it's a normal window), so
