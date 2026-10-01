@@ -57,11 +57,16 @@ struct PopoverState {
     /// popover analytically without reading window geometry back (which lags a
     /// cycle on macOS). `None` until the first tray event.
     tray: Mutex<Option<TrayCapture>>,
+    /// Whether a Windows foreground watcher is running (see
+    /// `watch_popover_foreground`). Unused on macOS.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    watching_foreground: std::sync::atomic::AtomicBool,
 }
 
 /// A tray rect as tray-icon reports it — physical px at the clicked display's
-/// (unknown) scale — plus the pointer in points sampled at the same event,
-/// which was over the icon and so identifies its display unambiguously.
+/// (unknown) scale on macOS, plain virtual-screen px on Windows — plus the
+/// pointer sampled at the same event, which was over the icon and so identifies
+/// its display unambiguously (only needed on macOS).
 #[derive(Clone, Copy)]
 struct TrayCapture {
     rect: PlacementRect,
@@ -170,9 +175,11 @@ fn persist_settings_size(window: &tauri::Window) {
     }
 }
 
-/// Snapshot every display in macOS points (see `popover_placement`). tao
-/// reports monitor bounds as points × that monitor's own scale, so dividing by
-/// it recovers the exact point rect.
+/// Snapshot every display in the placement space (see `popover_placement`).
+/// macOS: points — tao reports monitor bounds as points × that monitor's own
+/// scale, so dividing by it recovers the exact point rect, and the work area
+/// is the whole display (the menu bar holds the tray). Windows: physical
+/// virtual-screen px as reported, with the work area excluding the taskbar.
 fn displays(window: &tauri::WebviewWindow) -> Vec<Display> {
     window
         .available_monitors()
@@ -180,24 +187,31 @@ fn displays(window: &tauri::WebviewWindow) -> Vec<Display> {
         .iter()
         .map(|m| {
             let scale = m.scale_factor();
+            let rect = |x: i32, y: i32, w: u32, h: u32| {
+                let div = if cfg!(target_os = "windows") { 1.0 } else { scale };
+                PlacementRect { x: x as f64 / div, y: y as f64 / div, w: w as f64 / div, h: h as f64 / div }
+            };
             let (p, s) = (m.position(), m.size());
-            Display {
-                bounds: PlacementRect {
-                    x: p.x as f64 / scale,
-                    y: p.y as f64 / scale,
-                    w: s.width as f64 / scale,
-                    h: s.height as f64 / scale,
-                },
-                scale,
-            }
+            let bounds = rect(p.x, p.y, s.width, s.height);
+            let work_area = if cfg!(target_os = "windows") {
+                let a = m.work_area();
+                rect(a.position.x, a.position.y, a.size.width, a.size.height)
+            } else {
+                bounds
+            };
+            Display { bounds, work_area, scale }
         })
         .collect()
 }
 
-/// The mouse pointer in macOS points. tao converts `NSEvent.mouseLocation` to
-/// physical px with the *primary* monitor's scale, so divide by that to undo it.
+/// The mouse pointer in the placement space. macOS: points — tao converts
+/// `NSEvent.mouseLocation` to physical px with the *primary* monitor's scale,
+/// so divide by that to undo it. Windows: physical px as reported.
 fn cursor_points(app: &tauri::AppHandle) -> Option<(f64, f64)> {
     let cursor = app.cursor_position().ok()?;
+    if cfg!(target_os = "windows") {
+        return Some((cursor.x, cursor.y));
+    }
     let scale = app.primary_monitor().ok().flatten()?.scale_factor();
     Some((cursor.x / scale, cursor.y / scale))
 }
@@ -212,18 +226,36 @@ fn cursor_points(app: &tauri::AppHandle) -> Option<(f64, f64)> {
 ///
 /// With no cached tray rect yet (e.g. onboarding finishing, or a single-instance
 /// relaunch, before the user has ever hovered/clicked the tray icon) the popover
-/// is pinned to the top-right of the display under the cursor. This deliberately
+/// is pinned to the tray's usual corner of the display under the cursor
+/// (top-right on macOS, bottom-right on Windows). This deliberately
 /// isn't the positioner plugin's own `move_window(TrayCenter)`: that panics
 /// ("Tray position not set") when *its* internal tray cache is also empty.
+///
+/// On Windows everything is physical px (#198): the logical window size is
+/// scaled by the *target* display's factor, since Windows rescales the window
+/// to that display's DPI once it lands there.
 fn position_popover(window: &tauri::WebviewWindow, tray: Option<TrayCapture>) {
     let Ok(outer) = window.outer_size() else {
         return;
     };
-    let win = outer.to_logical::<f64>(window.scale_factor().unwrap_or(1.0));
+    let logical = outer.to_logical::<f64>(window.scale_factor().unwrap_or(1.0));
     let displays = displays(window);
-    let tray = tray.and_then(|t| popover_placement::tray_to_logical(t.rect, t.cursor, &displays));
     let cursor = cursor_points(window.app_handle());
-    let Some(p) = popover_placement::place(tray, (win.width, win.height), &displays, cursor) else {
+    let windows = cfg!(target_os = "windows");
+    let tray = tray.and_then(|t| {
+        if windows {
+            popover_placement::tray_in_global(t.rect, &displays)
+        } else {
+            popover_placement::tray_to_logical(t.rect, t.cursor, &displays)
+        }
+    });
+    let (win, corner) = if windows {
+        let scale = popover_placement::target_display(tray, &displays, cursor).map_or(1.0, |i| displays[i].scale);
+        ((logical.width * scale, logical.height * scale), popover_placement::Corner::BottomRight)
+    } else {
+        ((logical.width, logical.height), popover_placement::Corner::TopRight)
+    };
+    let Some(p) = popover_placement::place(tray, win, &displays, cursor, corner) else {
         return;
     };
     tracing::debug!(
@@ -234,10 +266,109 @@ fn position_popover(window: &tauri::WebviewWindow, tray: Option<TrayCapture>) {
         size = ?p.size,
         "placing popover"
     );
+    if windows {
+        // Move first: landing on a display with another DPI makes Windows
+        // rescale the window, which would undo a size set beforehand.
+        let _ = window.set_position(tauri::PhysicalPosition::new(p.position.0.round() as i32, p.position.1.round() as i32));
+        if let Some((w, h)) = p.size {
+            let _ = window.set_size(tauri::PhysicalSize::new(w.round() as u32, h.round() as u32));
+        }
+        return;
+    }
     if let Some((w, h)) = p.size {
         let _ = window.set_size(LogicalSize::new(w, h));
     }
     let _ = window.set_position(LogicalPosition::new(p.position.0, p.position.1));
+}
+
+/// The tray icon image. macOS scales the 64px template itself. Windows shrinks
+/// it to the tray's 16–32px with a crude resize that turns the brain's thin
+/// strokes into noise, so it gets a copy pre-scaled for the primary display's
+/// scale factor (100% → 16px, 125% → 20px, 150% → 24px, 200% → 32px).
+fn tray_icon(app: &tauri::AppHandle) -> tauri::image::Image<'static> {
+    #[cfg(target_os = "windows")]
+    {
+        let scale = app.primary_monitor().ok().flatten().map_or(1.0, |m| m.scale_factor());
+        match tray_icon_px(scale) {
+            16 => tauri::include_image!("icons/tray-windows-16.png"),
+            20 => tauri::include_image!("icons/tray-windows-20.png"),
+            24 => tauri::include_image!("icons/tray-windows-24.png"),
+            _ => tauri::include_image!("icons/tray-windows-32.png"),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        tauri::include_image!("icons/tray.png")
+    }
+}
+
+/// The pre-scaled Windows tray icon size for a display scale factor: the
+/// nearest of the 16 / 20 / 24 / 32px renders to Windows' 16px × scale.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn tray_icon_px(scale: f64) -> u32 {
+    let want = 16.0 * scale;
+    [16u32, 20, 24, 32]
+        .into_iter()
+        .min_by(|a, b| (f64::from(*a) - want).abs().total_cmp(&(f64::from(*b) - want).abs()))
+        .unwrap_or(16)
+}
+
+/// Hide the popover because it lost focus, saving its (possibly just-resized)
+/// size first. Records the time so a tray click that caused the blur closes
+/// the popover rather than reopening it.
+fn auto_hide_popover(window: &tauri::Window) {
+    if let Some(state) = window.app_handle().try_state::<PopoverState>() {
+        *state.last_auto_hide.lock().unwrap() = Some(Instant::now());
+    }
+    persist_popover_size(window);
+    let _ = window.hide();
+}
+
+/// Whether the popover is still the OS foreground window. On Windows, Tauri
+/// reports a single-webview window's focus from the WebView2 control itself,
+/// so `Focused(false)` also fires when focus merely moves off the webview onto
+/// the popover's own frame — which is exactly what a resize grip's
+/// `startResizeDragging` does. The window hasn't really lost focus then.
+#[cfg(target_os = "windows")]
+fn popover_is_foreground(window: &tauri::Window) -> bool {
+    let Ok(hwnd) = window.hwnd() else {
+        return false;
+    };
+    // SAFETY: a plain query with no arguments.
+    let fg = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    fg == hwnd.0
+}
+
+/// After a blur that left the popover in the foreground (see
+/// [`popover_is_foreground`]), the webview no longer has focus, so no further
+/// `Focused(false)` will come when the user clicks away. Poll instead, and hide
+/// the popover as soon as another window takes the foreground. One watcher at a
+/// time; it ends once the popover is hidden.
+#[cfg(target_os = "windows")]
+fn watch_popover_foreground(window: tauri::Window) {
+    use std::sync::atomic::Ordering;
+    let Some(state) = window.app_handle().try_state::<PopoverState>() else {
+        return;
+    };
+    if state.watching_foreground.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            if !window.is_visible().unwrap_or(false) {
+                break;
+            }
+            if !popover_is_foreground(&window) {
+                auto_hide_popover(&window);
+                break;
+            }
+        }
+        if let Some(state) = window.app_handle().try_state::<PopoverState>() {
+            state.watching_foreground.store(false, Ordering::SeqCst);
+        }
+    });
 }
 
 pub(crate) fn show_popover(app: &tauri::AppHandle) {
@@ -310,16 +441,18 @@ fn main() {
         .manage(PopoverState::default())
         .manage(registry)
         .plugin(tauri_plugin_positioner::init())
-        // Launch-at-login writes a per-user LaunchAgent (issue #98). The plist
-        // name is pinned to the pre-rebrand "mAIestro" rather than following
-        // productName, so existing installs keep (and reconcile) the same
+        // Launch-at-login writes a per-user LaunchAgent on macOS (issue #98) and
+        // an HKCU `Run` registry value on Windows. The name is pinned to the
+        // pre-rebrand "mAIestro" rather than following productName, so existing
+        // installs keep (and reconcile) the same
         // ~/Library/LaunchAgents/mAIestro.plist instead of orphaning it.
-        .plugin(
-            tauri_plugin_autostart::Builder::new()
-                .macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent)
-                .app_name("mAIestro")
-                .build(),
-        )
+        .plugin({
+            let autostart = tauri_plugin_autostart::Builder::new();
+            // `macos_launcher` only exists on the macOS build of the plugin.
+            #[cfg(target_os = "macos")]
+            let autostart = autostart.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
+            autostart.app_name("mAIestro").build()
+        })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Relaunch focuses the existing app instead of spawning a second.
             show_popover(app);
@@ -442,7 +575,8 @@ fn main() {
             TrayIconBuilder::with_id("main")
                 // White brain mark rendered as a macOS template image, so the
                 // system tints it for both light and dark menu-bar appearances.
-                .icon(tauri::include_image!("icons/tray.png"))
+                // Windows ignores the template flag and shows the pixels as is.
+                .icon(tray_icon(app.handle()))
                 .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -518,12 +652,12 @@ fn main() {
             // just-resized) size before hiding so it survives the next launch.
             "main" => {
                 if let WindowEvent::Focused(false) = event {
-                    let app = window.app_handle();
-                    if let Some(state) = app.try_state::<PopoverState>() {
-                        *state.last_auto_hide.lock().unwrap() = Some(Instant::now());
+                    #[cfg(target_os = "windows")]
+                    if popover_is_foreground(window) {
+                        watch_popover_foreground(window.clone());
+                        return;
                     }
-                    persist_popover_size(window);
-                    let _ = window.hide();
+                    auto_hide_popover(window);
                 }
             }
             // The Settings window stays open on blur (it's a normal window), so
@@ -578,5 +712,14 @@ mod tests {
     #[test]
     fn settings_min_matches_conf() {
         assert_eq!(min_size("settings"), (super::MIN_SETTINGS_WIDTH, super::MIN_SETTINGS_HEIGHT));
+    }
+
+    /// Windows' display scale settings map to the matching pre-scaled tray
+    /// icon, and anything in between picks the nearest one.
+    #[test]
+    fn tray_icon_px_follows_the_display_scale() {
+        for (scale, px) in [(1.0, 16), (1.25, 20), (1.5, 24), (1.75, 24), (2.0, 32), (3.0, 32), (0.5, 16)] {
+            assert_eq!(super::tray_icon_px(scale), px, "scale {scale}");
+        }
     }
 }

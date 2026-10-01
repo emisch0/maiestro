@@ -569,7 +569,6 @@ pub fn ensure_hook_wrapper() -> Result<bool, String> {
 }
 
 fn write_hook_wrapper(path: &Path, bin: &Path) -> Result<bool, String> {
-    use std::os::unix::fs::PermissionsExt;
     let script = hook_wrapper_script(bin);
     if std::fs::read_to_string(path).is_ok_and(|s| s == script) {
         return Ok(false);
@@ -578,7 +577,13 @@ fn write_hook_wrapper(path: &Path, bin: &Path) -> Result<bool, String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     crate::paths::write_atomic(path, script.as_bytes()).map_err(|e| e.to_string())?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    // Windows has no execute bit. (A `#!/bin/sh` wrapper can't run there anyway;
+    // Codex hooks on Windows are not supported yet.)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
     Ok(true)
 }
 
@@ -839,7 +844,6 @@ mod tests {
     /// is only rewritten when the binary changes.
     #[test]
     fn hook_wrapper_follows_the_binary() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bin/maiestro-hook");
         assert!(write_hook_wrapper(&path, Path::new("/old/maiestro")).unwrap());
@@ -847,7 +851,11 @@ mod tests {
         assert!(write_hook_wrapper(&path, Path::new("/Applications/mAIestro Code.app/Contents/MacOS/maiestro")).unwrap());
         let script = std::fs::read_to_string(&path).unwrap();
         assert!(script.contains(r#"exec '/Applications/mAIestro Code.app/Contents/MacOS/maiestro' hook "$@""#), "{script}");
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o111, 0o111);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o111, 0o111);
+        }
     }
 
     /// Reconcile rewrites a Claude worktree's hook file to the current binary.
@@ -903,6 +911,9 @@ mod tests {
     /// Antigravity treats any `PreToolUse` output — even `{}` — or a non-zero
     /// exit as a deny. Every command we install is silent and exits 0, even when
     /// the baked binary is gone (a moved app must never block the user's tools).
+    /// Unix-only: the commands are POSIX shell strings, run here through `sh`;
+    /// Windows hook commands are not supported yet (#160).
+    #[cfg(unix)]
     #[test]
     fn antigravity_hook_commands_are_silent_and_never_fail() {
         let gone = Path::new("/nonexistent/mAIestro Code.app/Contents/MacOS/maiestro");

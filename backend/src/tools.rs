@@ -29,7 +29,7 @@
 //! auto-resolve — `which` on the enriched PATH → known install locations → the
 //! bare name (let the OS try, as a last resort preserving prior behavior).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// The user's login-shell PATH, resolved once and cached. `None` when the login
@@ -62,7 +62,11 @@ fn resolve_login_path() -> Option<String> {
     // Tests must never run the developer's login shell: sourcing their profile
     // can prompt, authenticate, or hang. Resolution then uses the process PATH
     // plus the known-location probes, which is all the tests need.
-    if cfg!(test) {
+    //
+    // Windows has no login-shell gap to fill: a GUI app inherits the user and
+    // machine PATH from the registry, not from a shell profile, and there is
+    // no `$SHELL` to run.
+    if cfg!(test) || cfg!(target_os = "windows") {
         return None;
     }
     use std::io::Read;
@@ -124,26 +128,49 @@ pub fn enriched_path() -> String {
     merge_paths(&login, &current)
 }
 
-/// Concatenate two `:`-separated PATH strings, `first` then `second`, dropping
-/// empty and duplicate entries while preserving first-seen order.
+/// Concatenate two PATH strings (`:`-separated, `;` on Windows), `first` then
+/// `second`, dropping empty and duplicate entries while preserving first-seen
+/// order. If the merged list can't be re-joined (Windows rejects an entry
+/// containing `"`), the process PATH `second` is returned unchanged.
 fn merge_paths(first: &str, second: &str) -> String {
     let mut seen = std::collections::HashSet::new();
-    let mut parts: Vec<&str> = Vec::new();
-    for p in first.split(':').chain(second.split(':')) {
-        if p.is_empty() {
-            continue;
-        }
-        if seen.insert(p) {
-            parts.push(p);
-        }
+    let parts: Vec<PathBuf> = std::env::split_paths(first)
+        .chain(std::env::split_paths(second))
+        .filter(|p| !p.as_os_str().is_empty() && seen.insert(p.clone()))
+        .collect();
+    match std::env::join_paths(parts) {
+        Ok(joined) => joined.to_string_lossy().into_owned(),
+        Err(_) => second.to_string(),
     }
-    parts.join(":")
 }
 
-/// First existing `bin` found in the given `:`-separated PATH.
+/// The files that running `path` could mean. On Windows a name without an
+/// extension (`claude`, `code`) is only runnable as `name` + one of `%PATHEXT%`'s
+/// extensions (`claude.exe`, `code.cmd`), tried in that order; a bare
+/// extensionless file there (VS Code ships a `code` shell script for WSL next
+/// to `code.cmd`) is not a Windows executable. Elsewhere it's just `path`.
+fn exe_candidates(path: PathBuf) -> Vec<PathBuf> {
+    if cfg!(target_os = "windows") && path.extension().is_none() {
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        pathext
+            .split(';')
+            .filter(|ext| !ext.is_empty())
+            .map(|ext| {
+                let mut p = path.clone().into_os_string();
+                p.push(ext.to_ascii_lowercase());
+                PathBuf::from(p)
+            })
+            .collect()
+    } else {
+        vec![path]
+    }
+}
+
+/// First existing `bin` found in the given PATH (see [`exe_candidates`] for
+/// Windows extensions).
 fn which_on(path: &str, bin: &str) -> Option<PathBuf> {
     std::env::split_paths(path)
-        .map(|d| d.join(bin))
+        .flat_map(|d| exe_candidates(d.join(bin)))
         .find(|p| p.is_file())
 }
 
@@ -205,8 +232,9 @@ pub fn find_tool(name: &str) -> Option<PathBuf> {
     if let Some(p) = which_on(&enriched_path(), name) {
         return Some(p);
     }
-    // 3. Then known install locations.
-    fallbacks(name).into_iter().find(|p| p.is_file())
+    // 3. Then known install locations. On Windows `~/.local/bin/claude` matches
+    //    the native installer's `claude.exe`.
+    fallbacks(name).into_iter().flat_map(exe_candidates).find(|p| p.is_file())
 }
 
 /// The configured `tool_paths` override for `name` when it's set but does *not*
@@ -274,6 +302,46 @@ pub fn spawn_reaped(cmd: &mut std::process::Command) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The command that opens `target` (an http(s) URL, a file or a folder) with the
+/// user's default handler, like a double-click: macOS `open`, and on Windows the
+/// shell's own handler via `rundll32 url.dll,FileProtocolHandler`. Not `cmd /C
+/// start`: cmd would re-parse the target, so an `&` in a URL splits the command,
+/// and it flashes a console window from a GUI app. Run it with [`spawn_reaped`].
+pub fn os_open(target: &std::ffi::OsStr) -> std::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.arg("url.dll,FileProtocolHandler").arg(target);
+        c
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut c = std::process::Command::new("open");
+        c.arg(target);
+        c
+    }
+}
+
+/// The command that shows `path` selected in its parent folder: Finder via
+/// `open -R`, Explorer via `explorer /select,"<path>"`. Explorer only honors the
+/// select when the quotes sit after the comma, which std's own argument quoting
+/// can't produce, hence `raw_arg` (a Windows path can't contain `"`).
+pub fn os_reveal(path: &Path) -> std::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("explorer.exe");
+        c.raw_arg(format!("/select,\"{}\"", path.display()));
+        c
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    }
+}
+
 /// A short, trimmed preview of some (possibly large) subprocess output for a
 /// diagnostic error/log line: whitespace-trimmed, capped at 240 chars, with a
 /// stand-in for empty output. Shared by every caller that surfaces `claude`/`git`
@@ -326,22 +394,42 @@ pub fn tools_resolved() -> Vec<ResolvedTool> {
 mod tests {
     use super::*;
 
+    /// Join entries with this platform's PATH separator (`:`, or `;` on
+    /// Windows), where an empty entry makes a doubled/leading/trailing one.
+    fn path_of(entries: &[&str]) -> String {
+        let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+        entries.join(sep)
+    }
+
     #[test]
     fn merge_paths_dedups_and_preserves_order() {
-        assert_eq!(merge_paths("/a:/b", "/b:/c"), "/a:/b:/c");
-        assert_eq!(merge_paths("/a:/a", ""), "/a");
-        assert_eq!(merge_paths("", "/x:/y"), "/x:/y");
-        // Empty segments (leading/trailing/doubled colons) are dropped.
-        assert_eq!(merge_paths("/a::/b:", ":/c"), "/a:/b:/c");
+        let p = path_of;
+        assert_eq!(merge_paths(&p(&["/a", "/b"]), &p(&["/b", "/c"])), p(&["/a", "/b", "/c"]));
+        assert_eq!(merge_paths(&p(&["/a", "/a"]), ""), "/a");
+        assert_eq!(merge_paths("", &p(&["/x", "/y"])), p(&["/x", "/y"]));
+        // Empty segments (leading/trailing/doubled separators) are dropped.
+        assert_eq!(merge_paths(&p(&["/a", "", "/b", ""]), &p(&["", "/c"])), p(&["/a", "/b", "/c"]));
     }
 
     #[test]
     fn merge_paths_is_idempotent() {
-        let once = merge_paths("/opt/homebrew/bin:/usr/bin", "/usr/bin:/bin");
+        let once = merge_paths(&path_of(&["/opt/homebrew/bin", "/usr/bin"]), &path_of(&["/usr/bin", "/bin"]));
         let twice = merge_paths(&once, &once);
         assert_eq!(once, twice);
     }
 
+    /// Windows paths contain `:` after the drive letter, so a `:` split would
+    /// break every entry; each must survive the merge intact.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn merge_paths_keeps_windows_drive_letters() {
+        assert_eq!(
+            merge_paths(r"C:\Users\me\.local\bin;C:\Windows", r"C:\Windows;D:\tools"),
+            r"C:\Users\me\.local\bin;C:\Windows;D:\tools"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn which_on_finds_a_known_system_binary() {
         // `sh` exists in /bin on every macOS/Linux host the tests run on.
@@ -350,9 +438,35 @@ mod tests {
         assert!(found.unwrap().is_file());
     }
 
+    /// A bare name resolves to its `%PATHEXT%` form: `cmd` → `cmd.exe`.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn which_on_finds_a_known_system_binary() {
+        let system32 = PathBuf::from(std::env::var("SystemRoot").unwrap()).join("System32");
+        let path = format!(r"C:\nonexistent;{}", system32.display());
+        let found = which_on(&path, "cmd").expect("expected to find cmd on PATH");
+        assert_eq!(found.file_name().unwrap().to_ascii_lowercase(), "cmd.exe");
+        // A name that already has an extension is looked up as is.
+        assert!(which_on(&path, "cmd.exe").is_some());
+    }
+
+    #[test]
+    fn exe_candidates_add_extensions_only_on_windows() {
+        let c = exe_candidates(PathBuf::from("bin").join("claude"));
+        if cfg!(target_os = "windows") {
+            assert!(c.contains(&PathBuf::from("bin").join("claude.exe")), "{c:?}");
+            assert!(c.contains(&PathBuf::from("bin").join("claude.cmd")), "{c:?}");
+            assert!(!c.contains(&PathBuf::from("bin").join("claude")), "bare file isn't runnable: {c:?}");
+        } else {
+            assert_eq!(c, vec![PathBuf::from("bin").join("claude")]);
+        }
+        let with_ext = PathBuf::from("bin").join("code.cmd");
+        assert_eq!(exe_candidates(with_ext.clone()), vec![with_ext]);
+    }
+
     #[test]
     fn which_on_misses_a_nonexistent_binary() {
-        assert!(which_on("/bin:/usr/bin", "definitely-not-a-real-binary-xyz").is_none());
+        assert!(which_on(&path_of(&["/bin", "/usr/bin"]), "definitely-not-a-real-binary-xyz").is_none());
     }
 
     #[test]

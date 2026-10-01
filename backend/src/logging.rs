@@ -1,9 +1,10 @@
 //! Backend logging: a `tracing` subscriber writing to a daily, UTC-dated file
 //! plus stderr.
 //!
-//! The file path is `~/Library/Logs/com.maiestro.app/lYYYYMM/maiestro-YYYYMMDD.log`,
-//! with the monthly directory and the filename both derived from the current UTC
-//! date. The file rolls over at UTC midnight even while the long-running menu-bar
+//! The file path is `<log root>/lYYYYMM/maiestro-YYYYMMDD.log`, where the root is
+//! `~/Library/Logs/com.maiestro.app` on macOS and `%LOCALAPPDATA%\mAIestro\logs`
+//! on Windows, with the monthly directory and the filename both derived from
+//! the current UTC date. The file rolls over at UTC midnight even while the long-running menu-bar
 //! process keeps going — which is why we use a custom writer rather than
 //! `tauri-plugin-log` (its path is fixed at startup and it only rotates by size).
 //!
@@ -21,9 +22,21 @@ use tracing_subscriber::fmt::time::UtcTime;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
-/// Root directory for log files: `~/Library/Logs/com.maiestro.app`.
+/// Root directory for log files: `~/Library/Logs/com.maiestro.app` on macOS,
+/// `%LOCALAPPDATA%\mAIestro\logs` on Windows (falling back under the home dir if
+/// the known folder can't be resolved).
 fn log_root() -> PathBuf {
-    crate::paths::home().join("Library/Logs/com.maiestro.app")
+    #[cfg(target_os = "windows")]
+    {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| crate::paths::home().join("AppData").join("Local"))
+            .join("mAIestro")
+            .join("logs")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        crate::paths::home().join("Library/Logs/com.maiestro.app")
+    }
 }
 
 /// A `MakeWriter` that appends to a per-day file and reopens the next day's file
@@ -232,22 +245,21 @@ pub fn logs_read() -> Result<String, String> {
     Ok(lines[from..].join("\n"))
 }
 
-/// Reveal today's log file in Finder (falling back to its directory, then the log
-/// root) so the user can open the full history or older days' files.
+/// Reveal today's log file in Finder / Explorer (falling back to its directory,
+/// then the log root) so the user can open the full history or older days' files.
 #[tauri::command]
 pub fn logs_reveal() -> Result<(), String> {
     crate::log_invoke!("logs_reveal");
     let file = today_log_path();
-    let mut cmd = std::process::Command::new("open");
-    if file.exists() {
-        cmd.arg("-R").arg(&file); // reveal-and-select the file
+    let mut cmd = if file.exists() {
+        crate::tools::os_reveal(&file) // reveal-and-select the file
     } else if let Some(dir) = file.parent().filter(|d| d.exists()) {
-        cmd.arg(dir);
+        crate::tools::os_open(dir.as_os_str())
     } else {
         let root = log_root();
         std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-        cmd.arg(&root);
-    }
+        crate::tools::os_open(root.as_os_str())
+    };
     crate::tools::spawn_reaped(&mut cmd).map_err(|e| e.to_string())?;
     Ok(())
 }
