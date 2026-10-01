@@ -14,7 +14,7 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 // The agent session pill: the session's agent mark (the Claude logo, the
-// OpenAI/GPT logo for Codex, the bell-shaped "A" for Antigravity) tints by live state (green=working, amber=needs you,
+// OpenAI/GPT logo for Codex, the bell-shaped "A" for Antigravity, a goggled pilot for Copilot) tints by live state (green=working, amber=needs you,
 // muted=ready/idle), with the status word beside it. Clicking jumps to where the
 // session lives — the worktree's VS Code window (there is no deep link to the
 // session itself). Always rendered: with no live status it reads "Idle".

@@ -34,7 +34,8 @@ pub struct PromptOverrides {
 /// The model for mAIestro Code's own drafting calls, one entry per agent (only
 /// the effective agent's entry is used). `None`/empty uses that entry's schema
 /// `default` — `haiku` for Claude, a cheap Gemini Flash id for Antigravity, and
-/// for Codex no `--model` at all (Codex's own configured default). See
+/// for Codex and Copilot no `--model` at all (Codex's own configured default,
+/// Copilot's automatic model routing — its models depend on the plan). See
 /// `crate::prompts::model`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptModels {
@@ -44,6 +45,8 @@ pub struct PromptModels {
     pub codex: Option<String>,
     #[serde(default)]
     pub antigravity: Option<String>,
+    #[serde(default)]
+    pub copilot: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -476,6 +479,7 @@ mod tests {
                 claude: Some("sonnet".into()),
                 codex: Some("gpt-5-codex".into()),
                 antigravity: Some("gemini-3.1-pro-low".into()),
+                copilot: Some("gpt-5-mini".into()),
             },
             hidden: Some(HideState { snooze_until: Some(1_717_372_800_000) }),
             prompts: PromptOverrides {

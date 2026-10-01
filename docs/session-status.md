@@ -78,3 +78,36 @@ Known gaps, documented and not emulated:
 - **`last_error` is rare.** `PostToolUse` reports `"error": ""` even for a shell command that exited non-zero (the tool itself ran), and a tool that errors outright (e.g. `view_file` on a missing file) fires no `PostToolUse` at all.
 - **No session name or color.** `agy` has neither a session-name flag nor `/color` (see `docs/theming.md`).
 - **Drafting doesn't report status.** mAIestro Code's headless `agy` drafting runs in its own folder, `~/.maiestro/antigravity-draft/`, never a worktree, so it loads none of a worktree's hooks.
+
+## Copilot sessions
+
+A repo whose agentic coding CLI is GitHub Copilot CLI (`copilot`, issue #203) uses the same status helper and records, fed by Copilot's repo hooks.
+
+**Where the hooks live.** Copilot reads repo hooks from `<worktree>/.github/hooks/*.json`, any filename, as `{"version": 1, "hooks": {"<event>": [{"type": "command", "bash": "…", "timeoutSec": N}]}}`. So mAIestro Code owns a whole file, `.github/hooks/maiestro-status.json` (`hooks::copilot_hooks`), and never merges into anyone else's. `write_session_hooks` writes it at spawn. Startup and every reopen re-point it at the running binary (`reconcile_session_hooks`), but only when the file is already there. Switching a session away from Copilot deletes it (`hooks::remove_copilot_hooks`), along with `.github/hooks/` and `.github/` if that left them empty. Each command bakes in the binary and `--workspace <id>`, like Claude's.
+
+**Kept out of git via `info/exclude`.** The filename is mAIestro-only, so it goes in the repo's local `info/exclude` next to `.claude/settings.local.json`. Unlike Antigravity's shared `.agents/hooks.json`, it never needs a tracked `.gitignore` line or a notice.
+
+**Folder trust.** Copilot loads repo hooks only in a trusted folder: in an untrusted one the file is silently ignored. An interactive `copilot` asks *"Do you trust the files in this folder?"* in every new worktree whether or not we add hooks, so mAIestro Code shows no dialog of its own, and the pill appears once the user says yes. Trust is recorded in `~/.copilot/config.json` → `trustedFolders`, which we never write, and we never set `COPILOT_ALLOW_ALL` (it would also auto-approve every tool).
+
+**Silent hooks are neutral.** Copilot reads a `preToolUse` or `permissionRequest` hook's output as a decision. Every command we install ends in `>/dev/null 2>&1 || true` (`hooks::silent_hook_command`, shared with Antigravity), so it neither approves nor denies a tool, even if the baked binary has been deleted. A unit test runs each command against a missing binary to prove it.
+
+| Copilot event | verb | state |
+|---|---|---|
+| `sessionStart` | `session_start` | `running`, unless the same Copilot session is already `busy`/`needs_you` (it can fire *after* `userPromptSubmitted`), which is then left alone |
+| `userPromptSubmitted` | `prompt` | `busy`, clearing a stale error |
+| `preToolUse` | `busy` | `busy`, naming the tool |
+| `permissionRequest` | `notification` | `needs_you`; the detail is ``Permission requested: `<toolName>` `` |
+| `postToolUse` | `tool_ok` | `busy` |
+| `postToolUseFailure` | `tool_failed` | `busy`; the payload's `error` string feeds the persistent-failure logic |
+| `errorOccurred` | `error` | `busy`, with a surfaced `last_error` (documented by Copilot, not yet seen in practice) |
+| `agentStop` | `idle` | `idle` |
+| `sessionEnd` | `ended` | `ended` |
+
+The payload is camelCase: the tool is `toolName`, the session id is `sessionId` (`status::payload_session_id`), and `cwd` is present. Copilot ignores event names it doesn't know, so an older CLI simply skips the ones it lacks.
+
+Known gaps, documented and not emulated:
+- **No pill before the folder is trusted.** Until the user answers Copilot's trust prompt, no hook runs.
+- **A denied tool fires no post-tool event**, so the pill reads *Working* until the turn's next event.
+- **`last_error` covers tool-level failures only.** A shell command that exits non-zero is still a successful `postToolUse` (`resultType: "success"`), as with Antigravity.
+- **No session color.** Copilot has no `/color` (see `docs/theming.md`).
+- **Drafting doesn't report status.** mAIestro Code's headless `copilot` drafting runs in its own untrusted folder, `~/.maiestro/copilot-draft/`, never a worktree, so it loads none of a worktree's hooks.

@@ -122,7 +122,7 @@ pub async fn repo_health_check(window: tauri::Window, repo: String) -> Result<He
     step!("Cloned repo exists", check_cloned_repo(&repo, settings.cloned_repo_dir.as_deref()).await);
     step!("Git available", check_cli("git", "Git available"));
     // The agent probe returns one row ("Claude logged in" / "Codex logged in" /
-    // "Antigravity logged in")
+    // "Antigravity logged in" / "Copilot logged in")
     // with the model check nested as a sub — logged-in and model-available are
     // distinct facts, and the parent stays green (login) even when the model
     // sub fails.
@@ -135,6 +135,8 @@ pub async fn repo_health_check(window: tauri::Window, repo: String) -> Result<He
         Agent::Codex => step!(login_label, check_codex(&repo, model.as_deref(), agent_cwd.as_deref()).await),
         // `agy models` needs no workspace, and the probe runs no model turn.
         Agent::Antigravity => step!(login_label, check_antigravity(&repo, model.as_deref()).await),
+        // Copilot runs in its own empty drafting folder, like its drafting calls.
+        Agent::Copilot => step!(login_label, check_copilot(&repo, model.as_deref()).await),
     }
     step!("GitHub token & permissions", check_github(&repo, settings.identity_id.as_deref()).await);
     step!("Session editor available", check_editor());
@@ -639,6 +641,152 @@ async fn check_antigravity(repo: &str, model: Option<&str>) -> HealthCheck {
     antigravity_checks(model, outcome, &bin.display().to_string())
 }
 
+/// The outcome of the Copilot probe — one tiny tool-less drafting-style call —
+/// kept apart from running it so [`copilot_checks`] is a pure, unit-tested
+/// classifier.
+enum CopilotOutcome {
+    /// `copilot` didn't resolve; the detail says why (a missing pin, or only VS
+    /// Code's Copilot Chat shim on PATH).
+    NotFound(String),
+    /// It exited: success flag, stdout (JSONL), stderr.
+    Exited { success: bool, stdout: String, stderr: String },
+    /// Killed after the timeout.
+    TimedOut,
+    /// Couldn't be run.
+    Error(String),
+}
+
+/// The detail when `copilot` resolves to nothing: a stale pin, VS Code's
+/// Copilot Chat shim as the only `copilot`, or nothing at all.
+fn copilot_not_found_detail() -> String {
+    if crate::tools::stale_override("copilot").is_none() && crate::tools::copilot_shim_on_path().is_some() {
+        "Only VS Code's Copilot Chat shim was found. Install GitHub Copilot CLI (`npm install -g @github/copilot`, \
+         or run `copilot` once in a terminal and accept its install prompt)"
+            .to_string()
+    } else {
+        tool_not_found_detail("copilot")
+    }
+}
+
+/// Classify the Copilot probe into the **Copilot logged in** row and its
+/// **model** sub-row. Copilot has no login-status command and no per-account
+/// model list, so one stdin prompt with `--available-tools none` (as drafting
+/// runs it) answers both:
+/// - `No authentication information found` → not logged in (fix: `/login` in
+///   `copilot`, or `gh auth login`, whose token Copilot also uses).
+/// - `from --model flag is not available` → logged in; the model row fails.
+/// - `env: node: No such file or directory` → an npm install without `node`.
+/// - a subscription/access error → no Copilot access.
+/// - a clean run whose stream passes [`crate::drafting::parse_copilot_jsonl`]
+///   → both pass; with no model set, the row names the one Copilot picked.
+///
+/// `copilot_command` is the fix shown when logged out (run `copilot`).
+fn copilot_checks(model: Option<&str>, outcome: CopilotOutcome, copilot_command: &str) -> HealthCheck {
+    let (login_id, login_label, model_id) = ("copilot_login", "Copilot logged in", "copilot_model");
+    let model_label = match model {
+        Some(m) => format!("Model `{m}` available"),
+        None => "Drafting model".to_string(),
+    };
+    let nest = |mut login: HealthCheck, status: HealthStatus, detail: &str| {
+        login.sub.push(HealthCheck::new(model_id, &model_label, status, detail));
+        login
+    };
+    let (stdout, stderr) = match outcome {
+        CopilotOutcome::NotFound(detail) => {
+            let login = HealthCheck::new(login_id, login_label, HealthStatus::Fail, detail);
+            return nest(login, HealthStatus::Skipped, "copilot not found");
+        }
+        CopilotOutcome::TimedOut => {
+            let login = HealthCheck::new(login_id, login_label, HealthStatus::Warn, "copilot timed out after 60s");
+            return nest(login, HealthStatus::Skipped, "copilot timed out");
+        }
+        CopilotOutcome::Error(e) => {
+            let login = HealthCheck::new(login_id, login_label, HealthStatus::Fail, format!("Couldn't run copilot: {e}"));
+            return nest(login, HealthStatus::Skipped, "copilot couldn't run");
+        }
+        CopilotOutcome::Exited { success: false, stderr, .. } => {
+            let message = crate::drafting::copilot_error_message(&stderr);
+            let lower = stderr.to_ascii_lowercase();
+            if lower.contains("from --model flag is not available") {
+                let login = HealthCheck::new(login_id, login_label, HealthStatus::Pass, "Logged in");
+                return nest(
+                    login,
+                    HealthStatus::Fail,
+                    &format!("{message} Which models work depends on your Copilot plan; clear the model to let Copilot choose."),
+                );
+            }
+            let login = if lower.contains("no authentication information found") {
+                HealthCheck::new(
+                    login_id,
+                    login_label,
+                    HealthStatus::Fail,
+                    "Not logged in — run `copilot` and use /login, or sign in to GitHub CLI with `gh auth login`",
+                )
+                .with_command(copilot_command.to_string())
+            } else if lower.contains("env: node: no such file or directory") {
+                HealthCheck::new(
+                    login_id,
+                    login_label,
+                    HealthStatus::Fail,
+                    "`copilot` was found, but `node` isn't on PATH — an npm install of Copilot CLI needs Node.js",
+                )
+            } else if lower.contains("subscription") || lower.contains("not enabled") || lower.contains("access denied") {
+                HealthCheck::new(login_id, login_label, HealthStatus::Fail, format!("No Copilot access: {message}"))
+            } else {
+                HealthCheck::new(login_id, login_label, HealthStatus::Fail, message)
+            };
+            return nest(login, HealthStatus::Skipped, "Copilot not usable");
+        }
+        CopilotOutcome::Exited { success: true, stdout, stderr } => (stdout, stderr),
+    };
+    let login = HealthCheck::new(login_id, login_label, HealthStatus::Pass, "Logged in");
+    if let Err(e) = crate::drafting::parse_copilot_jsonl(&stdout) {
+        let detail = if stdout.trim().is_empty() { format!("{e}: {}", snippet(&stderr)) } else { e };
+        return nest(login, HealthStatus::Warn, &detail);
+    }
+    match model {
+        Some(m) => nest(login, HealthStatus::Pass, &format!("`{m}` responded")),
+        None => {
+            let chosen = copilot_auto_model(&stdout)
+                .map(|m| format!(" (`{m}` this time)"))
+                .unwrap_or_default();
+            nest(login, HealthStatus::Info, &format!("No drafting model set — Copilot picks one automatically{chosen}"))
+        }
+    }
+}
+
+/// The model Copilot's automatic routing chose, from its
+/// `session.auto_mode_resolved` event.
+fn copilot_auto_model(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .find(|e| e["type"] == "session.auto_mode_resolved")
+        .and_then(|e| e["data"]["chosenModel"].as_str().map(str::to_string))
+}
+
+/// Probe Copilot with one tiny tool-less call (the drafting flags, in the
+/// drafting folder) and return the **Copilot logged in** check with a nested
+/// **model** sub-check ([`copilot_checks`]). Costs one premium request.
+async fn check_copilot(repo: &str, model: Option<&str>) -> HealthCheck {
+    let Some(bin) = crate::tools::find_tool("copilot") else {
+        return copilot_checks(model, CopilotOutcome::NotFound(copilot_not_found_detail()), "copilot");
+    };
+    let args = crate::drafting::copilot_draft_args(model);
+    log_command(repo, &format!("{} {} < 'Reply with exactly: ok'", bin.display(), args.join(" ")));
+    let run = crate::drafting::run_copilot(&args, "Reply with exactly: ok", std::time::Duration::from_secs(60)).await;
+    let outcome = match run {
+        Err(_) => CopilotOutcome::TimedOut,
+        Ok(Err(e)) => CopilotOutcome::Error(e.to_string()),
+        Ok(Ok(o)) => CopilotOutcome::Exited {
+            success: o.status.success(),
+            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+        },
+    };
+    copilot_checks(model, outcome, &bin.display().to_string())
+}
+
 /// The session editor. Today mAIestro Code always launches VS Code (`open_vscode`),
 /// preferring the `code` CLI and falling back to the app bundle — so mirror that:
 /// pass if the `code` CLI resolves, warn (with the fallback still viable) if not.
@@ -1008,6 +1156,12 @@ const MIN_TOOL_VERSIONS: &[ToolMinimum] = &[
         reason: "needed for the headless exit codes and JSON errors drafting relies on",
     },
     ToolMinimum {
+        tool: "copilot",
+        label: "GitHub Copilot CLI",
+        min: "1.0.90",
+        reason: "the version mAIestro Code's Copilot support was verified on (`--available-tools none`, stdin prompts, repo hooks)",
+    },
+    ToolMinimum {
         tool: "git",
         label: "Git",
         min: "2.22.0",
@@ -1071,8 +1225,8 @@ enum VersionOutcome {
 }
 
 /// A resolved-but-unusable-`brew` path never gets an upgrade command guessed —
-/// only these tools have an unambiguous one. `claude update`, `codex update` and
-/// `agy update` self-update regardless of install method; `git` only offers `brew upgrade git` when the
+/// only these tools have an unambiguous one. `claude update`, `codex update`,
+/// `agy update` and `copilot update` self-update regardless of install method; `git` only offers `brew upgrade git` when the
 /// resolved binary actually lives under a Homebrew prefix (Apple's Xcode-stub
 /// git and a system git can't be upgraded that way). VS Code updates itself
 /// from its own menu, so `code` never gets a command.
@@ -1081,6 +1235,7 @@ fn version_upgrade_command(tool: &str, path: &std::path::Path) -> Option<String>
         "claude" => Some("claude update".to_string()),
         "codex" => Some("codex update".to_string()),
         "agy" => Some("agy update".to_string()),
+        "copilot" => Some("copilot update".to_string()),
         "git" => {
             let p = path.to_string_lossy();
             (p.starts_with("/opt/homebrew/") || p.starts_with("/usr/local/")).then(|| "brew upgrade git".to_string())
@@ -1170,7 +1325,7 @@ async fn check_one_tool_version(repo: &str, min: &ToolMinimum) -> HealthCheck {
 /// `code` always do; an agent CLI only when it is the repo's agent.
 fn tool_applies(tool: &str, agent: Agent) -> bool {
     match tool {
-        "claude" | "codex" | "agy" => tool == agent.tool(),
+        "claude" | "codex" | "agy" | "copilot" => tool == agent.tool(),
         _ => true,
     }
 }
@@ -1431,6 +1586,66 @@ mod tests {
         assert_eq!(for_agent(Agent::Claude), vec!["claude", "git", "code"]);
         assert_eq!(for_agent(Agent::Codex), vec!["codex", "git", "code"]);
         assert_eq!(for_agent(Agent::Antigravity), vec!["agy", "git", "code"]);
+        assert_eq!(for_agent(Agent::Copilot), vec!["copilot", "git", "code"]);
+    }
+
+    fn copilot_exited(success: bool, stdout: &str, stderr: &str) -> CopilotOutcome {
+        CopilotOutcome::Exited { success, stdout: stdout.into(), stderr: stderr.into() }
+    }
+
+    /// A trimmed real `copilot --output-format json --available-tools none` run.
+    const COPILOT_OK: &str = concat!(
+        r#"{"type":"session.info","data":{"infoType":"configuration","message":"Disabled tools: bash, create, edit, view"}}"#, "\n",
+        r#"{"type":"session.auto_mode_resolved","data":{"chosenModel":"mai-code-1.1-flash","availableModels":["mai-code-1.1-flash"]}}"#, "\n",
+        r#"{"type":"assistant.message","data":{"content":"ok","phase":"final_answer"}}"#, "\n",
+        r#"{"type":"result","exitCode":0,"usage":{"premiumRequests":1}}"#, "\n",
+    );
+
+    #[test]
+    fn copilot_logged_in_with_and_without_a_model() {
+        let c = copilot_checks(None, copilot_exited(true, COPILOT_OK, ""), "copilot");
+        assert_eq!((c.id.as_str(), c.status, c.sub[0].status), ("copilot_login", HealthStatus::Pass, HealthStatus::Info));
+        assert!(c.sub[0].detail.contains("mai-code-1.1-flash"), "{}", c.sub[0].detail);
+        let c = copilot_checks(Some("gpt-5-mini"), copilot_exited(true, COPILOT_OK, ""), "copilot");
+        assert_eq!((c.status, c.sub[0].status), (HealthStatus::Pass, HealthStatus::Pass));
+        assert_eq!(c.sub[0].label, "Model `gpt-5-mini` available");
+        // A stream that doesn't confirm the tools were disabled: drafting would
+        // refuse it, so the model row warns.
+        let c = copilot_checks(None, copilot_exited(true, r#"{"type":"assistant.message","data":{"content":"ok","phase":"final_answer"}}"#, ""), "copilot");
+        assert_eq!((c.status, c.sub[0].status), (HealthStatus::Pass, HealthStatus::Warn));
+    }
+
+    #[test]
+    fn copilot_failures_are_classified() {
+        let c = copilot_checks(None, copilot_exited(false, "", "Error: No authentication information found.\n\nCopilot can be authenticated…"), "/opt/homebrew/bin/copilot");
+        assert_eq!((c.status, c.sub[0].status), (HealthStatus::Fail, HealthStatus::Skipped));
+        assert!(c.detail.contains("/login") && c.detail.contains("gh auth login"), "{}", c.detail);
+        assert_eq!(c.command.as_deref(), Some("/opt/homebrew/bin/copilot"));
+
+        let c = copilot_checks(Some("x"), copilot_exited(false, "", "Error: Model \"x\" from --model flag is not available.\n"), "copilot");
+        assert_eq!((c.status, c.sub[0].status), (HealthStatus::Pass, HealthStatus::Fail));
+        assert!(c.sub[0].detail.starts_with("Model \"x\" from --model flag is not available."), "{}", c.sub[0].detail);
+
+        let c = copilot_checks(None, copilot_exited(false, "", "env: node: No such file or directory\n"), "copilot");
+        assert_eq!(c.status, HealthStatus::Fail);
+        assert!(c.detail.contains("`node` isn't on PATH"), "{}", c.detail);
+
+        let c = copilot_checks(None, CopilotOutcome::TimedOut, "copilot");
+        assert_eq!((c.status, c.sub[0].status), (HealthStatus::Warn, HealthStatus::Skipped));
+        let c = copilot_checks(None, CopilotOutcome::NotFound("Only VS Code's Copilot Chat shim was found.".into()), "copilot");
+        assert_eq!((c.status, c.sub[0].status), (HealthStatus::Fail, HealthStatus::Skipped));
+        assert!(c.detail.contains("shim"));
+        let c = copilot_checks(None, CopilotOutcome::Error("denied".into()), "copilot");
+        assert_eq!(c.status, HealthStatus::Fail);
+    }
+
+    #[test]
+    fn copilot_updates_itself() {
+        assert_eq!(
+            version_upgrade_command("copilot", std::path::Path::new("/opt/homebrew/bin/copilot")),
+            Some("copilot update".to_string())
+        );
+        assert_eq!(parse_version("GitHub Copilot CLI 1.0.90.\nRun 'copilot update' to check for updates.\n"), Some(vec![1, 0, 90]));
     }
 
     fn agy_exited(success: bool, stdout: &str, stderr: &str) -> AgyModelsOutcome {

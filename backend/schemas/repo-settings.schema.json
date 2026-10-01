@@ -45,7 +45,7 @@
     },
     "agent": {
       "type": ["string", "null"],
-      "enum": ["claude", "codex", "antigravity", null],
+      "enum": ["claude", "codex", "antigravity", "copilot", null],
       "description": "The agentic coding CLI for this repo. Used for the session in each spawned worktree and for mAIestro Code's own drafting (issues, labels, PRs). null = use the global default. An existing worktree keeps the agentic coding CLI it was spawned with."
     },
     "prompt_models": {
@@ -67,6 +67,11 @@
           "type": ["string", "null"],
           "default": "gemini-3.8-flash-low",
           "description": "Any model id `agy models` lists (e.g. gemini-3.8-flash-low); empty uses the default (gemini-3.8-flash-low)."
+        },
+        "copilot": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Any value `copilot --model` accepts (e.g. claude-haiku-4.5, gpt-5-mini); which models work depends on your Copilot plan. Empty lets Copilot pick the model automatically."
         }
       }
     },

@@ -218,10 +218,10 @@ export const AgentRenderer = withJsonFormsControlProps(AgentControl);
 
 // ── Prompt model combobox ────────────────────────────────────────────────────
 // Which model runs the headless drafting prompts. The value is stored per agent
-// (`prompt_models.claude` / `.codex` / `.antigravity`) and this field edits the entry for the
+// (`prompt_models.claude` / `.codex` / `.antigravity` / `.copilot`) and this field edits the entry for the
 // repo's *effective* agent, so switching the Agent select swaps which entry
 // shows. Deliberately NOT a closed select: the value is passed verbatim to
-// `claude --model` / `codex exec --model` / `agy --model`, which accept any
+// `claude --model` / `codex exec --model` / `agy --model` / `copilot --model`, which accept any
 // alias or model id they know (`agy` has no aliases: ids carry an effort
 // suffix). A datalist offers the agent's models as suggestions while still
 // accepting a typed-in value: the list the CLI itself reports (`agent_models` —
@@ -230,18 +230,22 @@ export const AgentRenderer = withJsonFormsControlProps(AgentControl);
 // entry's schema default, surfaced as the placeholder.
 
 /** Built-in model hints per agent, used when the CLI can't list its models —
- *  always for Claude Code (no listing command), and for Codex/Antigravity when
- *  not installed or signed in. Hints only: any value is accepted. */
+ *  always for Claude Code and Copilot (no listing command — Copilot's models
+ *  depend on the plan), and for Codex/Antigravity when not installed or signed
+ *  in. Hints only: any value is accepted. */
 export const PROMPT_MODEL_SUGGESTIONS: Record<Agent, string[]> = {
   claude: ["haiku", "sonnet", "opus", "fable"],
   codex: ["gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
   antigravity: ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.1-pro-low"],
+  copilot: ["claude-haiku-4.5", "gpt-5-mini", "claude-sonnet-5", "gemini-3.8-flash"],
 };
 
 /** Placeholder for an empty drafting-model field on `agent`. */
 export function promptModelPlaceholder(agent: Agent, schemaDefault: string): string {
   if (schemaDefault) return schemaDefault;
-  return agent === "codex" ? "Codex's configured default" : "";
+  if (agent === "codex") return "Codex's configured default";
+  if (agent === "copilot") return "Chosen by Copilot";
+  return "";
 }
 
 /** The drafting-model suggestions for `agent`: the built-in hints at once,
@@ -644,6 +648,7 @@ export function extractFormDefaults(
       claude: str(modelProps.claude?.default),
       codex: str(modelProps.codex?.default),
       antigravity: str(modelProps.antigravity?.default),
+      copilot: str(modelProps.copilot?.default),
     },
     booleanDefaults,
     promptDefaults: {

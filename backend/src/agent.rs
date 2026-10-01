@@ -1,5 +1,5 @@
-//! The coding agent a repo uses (issues #162, #185): Claude Code, Codex CLI, or
-//! Antigravity CLI (`agy`).
+//! The coding agent a repo uses (issues #162, #185, #203): Claude Code, Codex
+//! CLI, Antigravity CLI (`agy`), or GitHub Copilot CLI (`copilot`).
 //!
 //! One repo means one agent. It drives both the session mAIestro Code launches
 //! into a worktree and mAIestro Code's own headless AI calls (drafting, the
@@ -17,11 +17,12 @@ pub enum Agent {
     Claude,
     Codex,
     Antigravity,
+    Copilot,
 }
 
 impl Agent {
     /// Every agent, for parsing and for tests that cover each one.
-    pub const ALL: [Agent; 3] = [Agent::Claude, Agent::Codex, Agent::Antigravity];
+    pub const ALL: [Agent; 4] = [Agent::Claude, Agent::Codex, Agent::Antigravity, Agent::Copilot];
 
     /// The value as it appears in settings files and session records. Not
     /// necessarily the binary name — resolve the CLI with [`Agent::tool`].
@@ -30,6 +31,7 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
             Agent::Antigravity => "antigravity",
+            Agent::Copilot => "copilot",
         }
     }
 
@@ -41,6 +43,7 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
             Agent::Antigravity => "agy",
+            Agent::Copilot => "copilot",
         }
     }
 
@@ -50,6 +53,7 @@ impl Agent {
             Agent::Claude => "Claude",
             Agent::Codex => "Codex",
             Agent::Antigravity => "Antigravity",
+            Agent::Copilot => "Copilot",
         }
     }
 
@@ -59,10 +63,12 @@ impl Agent {
     }
 
     /// The arguments that make this agent's CLI list the models it can run, or
-    /// `None` when it has no such command (Claude Code) — see [`crate::models`].
+    /// `None` when it has no such command (Claude Code, and Copilot, whose
+    /// models depend on the account and have no non-interactive list) — see
+    /// [`crate::models`].
     pub fn model_list_args(self) -> Option<&'static [&'static str]> {
         match self {
-            Agent::Claude => None,
+            Agent::Claude | Agent::Copilot => None,
             Agent::Codex => Some(&["debug", "models"]),
             Agent::Antigravity => Some(&["models"]),
         }
@@ -84,11 +90,13 @@ mod tests {
         assert_eq!(serde_json::to_value(Agent::Codex).unwrap(), serde_json::json!("codex"));
         assert_eq!(serde_json::from_value::<Agent>(serde_json::json!("claude")).unwrap(), Agent::Claude);
         assert_eq!(serde_json::to_value(Agent::Antigravity).unwrap(), serde_json::json!("antigravity"));
+        assert_eq!(serde_json::to_value(Agent::Copilot).unwrap(), serde_json::json!("copilot"));
         for a in Agent::ALL {
             assert_eq!(Agent::parse(a.as_str()), Some(a));
         }
         assert_eq!(Agent::parse("gemini"), None);
         assert_eq!(Agent::parse("agy"), None, "the binary name is not a settings value");
+        assert_eq!(Agent::parse("github-copilot"), None);
     }
 
     /// Antigravity is the one agent whose CLI (`agy`) differs from its setting.
@@ -97,5 +105,6 @@ mod tests {
         assert_eq!(Agent::Claude.tool(), "claude");
         assert_eq!(Agent::Codex.tool(), "codex");
         assert_eq!(Agent::Antigravity.tool(), "agy");
+        assert_eq!(Agent::Copilot.tool(), "copilot");
     }
 }

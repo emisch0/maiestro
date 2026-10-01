@@ -72,7 +72,7 @@ async fn query(agent: Agent) -> Option<Vec<String>> {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let ids = match agent {
         // No listing command, so `model_list_args` already returned `None`.
-        Agent::Claude => return None,
+        Agent::Claude | Agent::Copilot => return None,
         Agent::Codex => codex_model_slugs(&stdout),
         Agent::Antigravity => agy_model_ids(&stdout),
     };

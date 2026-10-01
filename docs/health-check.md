@@ -23,4 +23,14 @@ The check uses the repo's assigned `identity_id` to pick the token (`GitHub::for
 - **Logged out:** `agy models` exits 1 at once with "Please sign in…". That is a login Fail whose fix is running `agy` to sign in.
 - **Logged in:** it lists `id\tName` per model. The login Passes, and the **model available** sub-row checks the drafting model (`prompt_models.antigravity`) against that list. `agy` has no aliases, so an id without its effort suffix (e.g. `gemini-3.8-flash` for `gemini-3.8-flash-low`) fails with the available ids.
 
-The version floor is `agy` **1.2.10**, which fixed the headless exit codes and JSON error output that drafting relies on. The upgrade command is `agy update`. A machine with only one agentic coding CLI installed therefore gets a clean report for repos on that agentic coding CLI.
+The version floor is `agy` **1.2.10**, which fixed the headless exit codes and JSON error output that drafting relies on. The upgrade command is `agy update`.
+
+**Copilot (issue #203)** has neither a login-status command nor a per-account model list. The "Copilot logged in" row runs one tiny tool-less call exactly as drafting does: the prompt on stdin, `--available-tools none`, in `~/.maiestro/copilot-draft/` (`check_copilot`, classified by the pure `copilot_checks`). It costs one premium request:
+- **Not found:** `copilot` doesn't resolve. When VS Code's Copilot Chat shim is the only `copilot` on PATH, the detail says so and how to install the real CLI (`npm install -g @github/copilot`, or run `copilot` once in a terminal and accept its install prompt). The shim itself is never run.
+- **Logged out:** `Error: No authentication information found.` The fix is `/login` in `copilot`, or `gh auth login`, since Copilot also uses the `gh` token.
+- **Bad model:** `from --model flag is not available` → the login Passes and the model row Fails. Which models work depends on the Copilot plan.
+- **`node` missing:** `env: node: No such file or directory` → the npm install's Node loader can't start.
+- **No Copilot access:** a subscription/access error fails the login row with Copilot's message.
+- **Clean run:** the stream must pass drafting's fail-closed parser (the "Disabled tools:" confirmation, no tool execution). With no drafting model set, the model row is Info and names the model Copilot's automatic routing picked.
+
+The version floor is `copilot` **1.0.90**, the version the Copilot support was verified on. The upgrade command is `copilot update`. A machine with only one agentic coding CLI installed therefore gets a clean report for repos on that agentic coding CLI.

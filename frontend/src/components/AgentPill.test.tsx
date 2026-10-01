@@ -47,6 +47,18 @@ describe("AgentPill (#162)", () => {
     expect(markPath()).toMatch(/^M1\.9 20\.3/);
   });
 
+  it("shows the Copilot mark and names Copilot for a Copilot session (#203)", () => {
+    render(
+      <AgentPill
+        agent="copilot"
+        status={status({ state: "needs_you", detail: "Permission requested: `bash`" })}
+        onClick={() => {}}
+      />,
+    );
+    expect(screen.getByRole("button")).toHaveAttribute("title", "Copilot · Needs you — Permission requested: `bash`");
+    expect(markPath()).toMatch(/^M12 3\.5/);
+  });
+
   it("shows Idle before a status exists, once the session ended, and while creating", () => {
     const { rerender } = render(<AgentPill agent="codex" onClick={() => {}} />);
     expect(screen.getByRole("button")).toHaveAttribute("title", "Codex · Idle");

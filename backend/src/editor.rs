@@ -123,6 +123,13 @@ pub fn write_vscode_files(
 /// `/color`; an initial prompt (`-i`) would start a real model turn. Antigravity
 /// asks the user to trust each new worktree folder at startup — its own prompt.
 ///
+/// **Copilot:** the binary plus `--name <session title>`, as Claude gets. Its
+/// status hooks live in the worktree's `.github/hooks/maiestro-status.json`
+/// (`hooks.rs`), loaded once the user answers Copilot's own "Do you trust the
+/// files in this folder?" prompt. No initial prompt: `-i` would start a real
+/// model turn (a premium request), and Copilot has no `/color` anyway. No
+/// `--no-auto-update` either — updating the interactive CLI is the user's call.
+///
 /// Whatever the agent, the binary is the **resolved** agent path (`tools::resolve_tool`),
 /// not a bare name left to PATH (issue #134). The task runs in VS Code's
 /// integrated terminal, whose PATH is whatever the VS Code process inherited —
@@ -148,6 +155,7 @@ fn session_argv(agent: Agent, color: &str, session_title: &str) -> (String, Vec<
             .flat_map(|o| [flag("-c"), value(o)])
             .collect(),
         Agent::Antigravity => Vec::new(),
+        Agent::Copilot => vec![flag("--name"), value(session_title.to_string())],
     };
     (bin, args)
 }
@@ -718,6 +726,24 @@ mod tests {
         let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("agy").to_string_lossy());
         assert_eq!(task_command_line(task), expected);
         assert_eq!(task["label"], "Start Antigravity");
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/settings.json")).unwrap()).unwrap();
+        assert_eq!(settings["workbench.colorCustomizations"]["titleBar.activeBackground"], "#c46686");
+    }
+
+    /// A Copilot worktree's task runs the resolved `copilot` with the session
+    /// title as `--name` — no initial prompt (it would spend a premium request)
+    /// and no `/color` — as "Start Copilot", with the VS Code bars still themed.
+    #[test]
+    fn copilot_task_runs_the_resolved_copilot_with_a_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write_vscode_files(dir.path(), "work-203-x", "#c46686", "⭐ #203 — It's Copilot", Agent::Copilot).unwrap();
+        let tasks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
+        let task = &tasks["tasks"][0];
+        let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("copilot").to_string_lossy());
+        assert_eq!(task["command"].as_str().unwrap(), format!(r"{expected} --name '⭐ #203 — It'\''s Copilot'"));
+        assert_eq!(task["label"], "Start Copilot");
         let settings: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/settings.json")).unwrap()).unwrap();
         assert_eq!(settings["workbench.colorCustomizations"]["titleBar.activeBackground"], "#c46686");
