@@ -738,11 +738,9 @@ mod tests {
     fn copilot_task_runs_the_resolved_copilot_with_a_name() {
         let dir = tempfile::tempdir().unwrap();
         write_vscode_files(dir.path(), "work-203-x", "#c46686", "⭐ #203 — It's Copilot", Agent::Copilot).unwrap();
-        let tasks: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/tasks.json")).unwrap()).unwrap();
-        let task = &tasks["tasks"][0];
+        let task = &read_task(dir.path());
         let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("copilot").to_string_lossy());
-        assert_eq!(task["command"].as_str().unwrap(), format!(r"{expected} --name '⭐ #203 — It'\''s Copilot'"));
+        assert_eq!(task_command_line(task), format!(r"{expected} --name '⭐ #203 — It'\''s Copilot'"));
         assert_eq!(task["label"], "Start Copilot");
         let settings: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/settings.json")).unwrap()).unwrap();

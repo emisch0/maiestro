@@ -203,7 +203,7 @@ pub fn copilot_shim_on_path() -> Option<PathBuf> {
 
 fn copilot_shim_on(path: &str) -> Option<PathBuf> {
     std::env::split_paths(path)
-        .map(|d| d.join("copilot"))
+        .flat_map(|d| exe_candidates(d.join("copilot")))
         .find(|p| p.is_file() && is_copilot_shim(p))
 }
 
@@ -561,11 +561,16 @@ mod tests {
         assert!(f.iter().all(|p| !is_copilot_shim(p)));
     }
 
+    /// The file a runnable `copilot` is on this platform (`copilot.exe` on Windows).
+    fn copilot_file() -> &'static str {
+        if cfg!(target_os = "windows") { "copilot.exe" } else { "copilot" }
+    }
+
     /// A fake `copilot` at `dir/rel`, returning the directory holding it.
     fn fake_copilot(root: &std::path::Path, rel: &str) -> PathBuf {
         let dir = root.join(rel);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("copilot"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join(copilot_file()), "#!/bin/sh\n").unwrap();
         dir
     }
 
@@ -581,12 +586,12 @@ mod tests {
         );
         let real = fake_copilot(root.path(), "npm/bin");
         let both = std::env::join_paths([&shim, &real]).unwrap().into_string().unwrap();
-        assert_eq!(which_on(&both, "copilot"), Some(real.join("copilot")));
-        assert_eq!(copilot_shim_on(&both), Some(shim.join("copilot")));
+        assert_eq!(which_on(&both, "copilot"), Some(real.join(copilot_file())));
+        assert_eq!(copilot_shim_on(&both), Some(shim.join(copilot_file())));
 
         let only_shim = shim.to_string_lossy().into_owned();
         assert_eq!(which_on(&only_shim, "copilot"), None, "the shim alone is not found");
-        assert_eq!(copilot_shim_on(&only_shim), Some(shim.join("copilot")));
+        assert_eq!(copilot_shim_on(&only_shim), Some(shim.join(copilot_file())));
         assert_eq!(copilot_shim_on(&real.to_string_lossy()), None);
     }
 
