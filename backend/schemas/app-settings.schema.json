@@ -30,7 +30,7 @@
     },
     "agent": {
       "type": ["string", "null"],
-      "enum": ["claude", "codex", "antigravity", null],
+      "enum": ["claude", "codex", "antigravity", "copilot", null],
       "default": "claude",
       "description": "The agentic coding CLI repos use unless they choose their own. It runs the session in each spawned worktree and mAIestro Code's own AI drafting (issues, labels, PRs). Only the agentic coding CLI in use needs to be installed."
     },
@@ -50,6 +50,10 @@
         "agy": {
           "type": ["string", "null"],
           "description": "The Antigravity CLI. Used for AI drafting of issues, labels, and PRs, and to launch Antigravity in a spawned worktree's VS Code terminal, for repos whose agentic coding CLI is Antigravity CLI. Leave empty to auto-detect."
+        },
+        "copilot": {
+          "type": ["string", "null"],
+          "description": "The GitHub Copilot CLI. Used for AI drafting of issues, labels, and PRs, and to launch Copilot in a spawned worktree's VS Code terminal, for repos whose agentic coding CLI is GitHub Copilot CLI. Auto-detection skips VS Code's Copilot Chat `copilot` shim; a path set here is used as is. Leave empty to auto-detect."
         },
         "git": {
           "type": ["string", "null"],

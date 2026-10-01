@@ -1,6 +1,6 @@
 //! Per-session live status: **busy / needs-you / idle**.
 //!
-//! mAIestro Code launches the repo's agent (`claude`, `codex` or `agy`) into VS Code and
+//! mAIestro Code launches the repo's agent (`claude`, `codex`, `agy` or `copilot`) into VS Code and
 //! no longer owns its stdio (see CLAUDE.md → "mAIestro Code launches sessions; it
 //! does not host them"), so it can't read working/waiting state from the stream.
 //! Instead, each spawned worktree gets agent hooks (written by `hooks.rs`) that
@@ -98,20 +98,48 @@ fn is_safe_workspace_id(ws: &str) -> bool {
 // ── Hook CLI (`maiestro hook <state> --workspace <ws-id>`) ──────────────────────
 
 /// The tool a hook payload is about: Claude and Codex send `tool_name`,
-/// Antigravity a camelCase `toolCall.name`.
+/// Antigravity a camelCase `toolCall.name`, Copilot a camelCase `toolName`.
 fn tool_name(payload: &serde_json::Value) -> Option<String> {
     payload["tool_name"]
         .as_str()
         .or_else(|| payload["toolCall"]["name"].as_str())
+        .or_else(|| payload["toolName"].as_str())
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string)
 }
 
-/// A non-empty `error` string from an Antigravity `PostToolUse`/`Stop` payload
-/// (both always carry the field, as `""` when nothing went wrong).
+/// A non-empty `error` from a payload: a string on Antigravity's
+/// `PostToolUse`/`Stop` (both always carry the field, as `""` when nothing went
+/// wrong) and Copilot's `postToolUseFailure`, or an object's `message` (as
+/// Copilot's `errorOccurred` documents it).
 fn payload_error(payload: &serde_json::Value) -> Option<&str> {
-    payload["error"].as_str().map(str::trim).filter(|e| !e.is_empty())
+    payload["error"]
+        .as_str()
+        .or_else(|| payload["error"]["message"].as_str())
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+}
+
+/// The agent's own session id: Claude and Codex send `session_id`, Antigravity
+/// `conversationId`, Copilot `sessionId`.
+fn payload_session_id(payload: &serde_json::Value) -> Option<&str> {
+    payload["session_id"]
+        .as_str()
+        .or_else(|| payload["conversationId"].as_str())
+        .or_else(|| payload["sessionId"].as_str())
+}
+
+/// Whether a Copilot `sessionStart` arrived after its session's turn already
+/// began (Copilot can fire it *after* `userPromptSubmitted`), so recording it
+/// would overwrite a working state. Only the same Copilot session counts: a new
+/// session after one that died mid-turn still resets the record.
+fn session_start_is_late(prior: Option<&StatusRecord>, payload: &serde_json::Value) -> bool {
+    prior.is_some_and(|r| {
+        matches!(r.state.as_str(), "busy" | "needs_you")
+            && r.session_id.is_some()
+            && r.session_id.as_deref() == payload_session_id(payload)
+    })
 }
 
 /// Turn the verbs whose meaning depends on the payload into the ones below.
@@ -125,7 +153,9 @@ fn payload_error(payload: &serde_json::Value) -> Option<&str> {
 ///   else `tool_ok`.
 /// - `stop` (`Stop`): `idle` (its `error` is surfaced by `run_hook_cli`).
 ///
-/// Every other verb passes through unchanged.
+/// Copilot's `sessionStart` passes `session_start`, which is `running` (when it
+/// isn't late — see [`session_start_is_late`]). Every other verb passes through
+/// unchanged.
 fn normalize_verb<'a>(arg: &'a str, payload: &serde_json::Value) -> &'a str {
     match arg {
         "invocation" if payload["invocationNum"].as_u64().unwrap_or(0) == 0 => "prompt",
@@ -133,6 +163,7 @@ fn normalize_verb<'a>(arg: &'a str, payload: &serde_json::Value) -> &'a str {
         "tool_done" if payload_error(payload).is_some() => "tool_failed",
         "tool_done" => "tool_ok",
         "stop" => "idle",
+        "session_start" => "running",
         other => other,
     }
 }
@@ -175,6 +206,9 @@ fn resolve_state(arg: &str, payload: &serde_json::Value) -> (String, Option<Stri
         }
         "idle" => ("idle".into(), None),
         "ended" => ("ended".into(), None),
+        // Copilot's `errorOccurred`: still inside the turn (an `agentStop` or
+        // `sessionEnd` follows if it gave up); the error rides on `last_error`.
+        "error" => ("busy".into(), None),
         // Unknown verb: record it verbatim rather than guessing.
         other => (other.into(), None),
     }
@@ -263,13 +297,18 @@ pub fn run_hook_cli(args: &[String]) {
         return;
     }
 
+    let prior_record = read_record(&workspace);
+    if raw_arg == "session_start" && session_start_is_late(prior_record.as_ref(), &payload) {
+        return;
+    }
+
     let (state, detail) = resolve_state(state_arg, &payload);
     let ts = chrono::Utc::now().to_rfc3339();
 
     // `last_error` lifecycle (see `next_last_error`). On a failure, hand the raw
     // tool+message to the decision fn (it computes the count and surfacing) and
     // then log the result — surfacing is gated, logging is not.
-    let prior = read_record(&workspace).and_then(|r| r.last_error);
+    let prior = prior_record.and_then(|r| r.last_error);
     let failure = (state_arg == "tool_failed").then(|| (tool_name(&payload), extract_error_message(&payload)));
     let mut last_error = next_last_error(state_arg, prior, failure, &ts);
     // An Antigravity turn that stopped *because of* an error: surface it.
@@ -278,6 +317,12 @@ pub fn run_hook_cli(args: &[String]) {
             last_error = Some(stop_error(error, &ts));
             crate::logging::append_line(&format!("session={workspace} agent stopped with an error: {error}"));
         }
+    }
+    // A Copilot `errorOccurred`: surface it, whatever it carried.
+    if raw_arg == "error" {
+        let error = payload_error(&payload).unwrap_or("The agent reported an error");
+        last_error = Some(stop_error(error, &ts));
+        crate::logging::append_line(&format!("session={workspace} agent reported an error: {error}"));
     }
     if state_arg == "tool_failed" {
         if let Some(err) = &last_error {
@@ -293,8 +338,8 @@ pub fn run_hook_cli(args: &[String]) {
     let record = StatusRecord {
         workspace: workspace.clone(),
         state,
-        // Antigravity: `conversationId`, and `workspacePaths` instead of `cwd`.
-        session_id: payload["session_id"].as_str().or_else(|| payload["conversationId"].as_str()).map(str::to_string),
+        // Antigravity: `workspacePaths` instead of `cwd`.
+        session_id: payload_session_id(&payload).map(str::to_string),
         cwd: payload["cwd"].as_str().or_else(|| payload["workspacePaths"][0].as_str()).map(str::to_string),
         detail,
         last_error,
@@ -304,8 +349,9 @@ pub fn run_hook_cli(args: &[String]) {
     let _ = write_record_atomic(&record);
 }
 
-/// The `last_error` for an Antigravity `Stop` that carried an `error`: surfaced
-/// at once, since the agent has already stopped.
+/// The `last_error` for an Antigravity `Stop` that carried an `error`, or a
+/// Copilot `errorOccurred`: surfaced at once, since the agent has already
+/// stopped or hit something it couldn't work past.
 fn stop_error(error: &str, ts: &str) -> ToolError {
     ToolError { tool: None, message: redact_secrets(error), ts: ts.to_string(), count: 1, surfaced: true }
 }
@@ -332,7 +378,7 @@ fn workspace_for_cwd(cwd: &str, sessions: &[(String, String)]) -> Option<String>
 /// order and fall back to a generic message rather than dropping the failure.
 fn extract_error_message(payload: &serde_json::Value) -> String {
     let candidates = [
-        payload["error"].as_str(),
+        payload_error(payload),
         payload["tool_response"]["error"].as_str(),
         payload["tool_response"]["stderr"].as_str(),
         payload["message"].as_str(),
@@ -920,6 +966,63 @@ mod tests {
         assert_eq!(resolve_state("notification", &ask), ("needs_you".into(), Some("Red or blue?".into())));
         let perm = json!({ "toolCall": { "name": "ask_permission", "args": {} } });
         assert_eq!(resolve_state("notification", &perm), ("needs_you".into(), Some("Permission requested: `ask_permission`".into())));
+    }
+
+    /// Copilot's camelCase payloads: `toolName` names the tool (a permission
+    /// request reads as needs-you naming it), a failure's `error` string is the
+    /// message, `sessionStart` is running, and `sessionId` is the session id.
+    #[test]
+    fn resolve_state_reads_copilot_payloads() {
+        use serde_json::json;
+        let perm = json!({ "sessionId": "s1", "timestamp": 1, "cwd": "/w", "hookName": "permissionRequest", "toolName": "bash", "toolInput": { "command": "rm x" }, "permissionSuggestions": [] });
+        assert_eq!(resolve_state("notification", &perm), ("needs_you".into(), Some("Permission requested: `bash`".into())));
+        let pre = json!({ "sessionId": "s1", "toolName": "view", "toolArgs": { "path": "a.txt" } });
+        assert_eq!(resolve_state("busy", &pre), ("busy".into(), Some("view".into())));
+        let failed = json!({ "sessionId": "s1", "toolName": "view", "toolArgs": {}, "error": "Path does not exist" });
+        assert_eq!(resolve_state("tool_failed", &failed), ("busy".into(), Some("view".into())));
+        assert_eq!(extract_error_message(&failed), "Path does not exist");
+        assert_eq!(extract_error_message(&json!({ "error": { "message": "rate limited", "name": "Error" } })), "rate limited");
+        assert_eq!(normalize_verb("session_start", &json!({ "source": "new" })), "running");
+        assert_eq!(payload_session_id(&pre), Some("s1"));
+        assert_eq!(resolve_state("error", &json!({})), ("busy".into(), None));
+    }
+
+    /// A `sessionStart` that lands after its own session's turn began is
+    /// dropped; one from a new session (or onto an idle record) is not.
+    #[test]
+    fn copilot_late_session_start_keeps_the_working_state() {
+        let _home = TempHome::new();
+        let mut seed = record("203-late", "busy");
+        seed.session_id = Some("s1".into());
+        write_record_atomic(&seed).unwrap();
+        let start = serde_json::json!({ "sessionId": "s1", "source": "new" });
+        assert!(session_start_is_late(Some(&seed), &start));
+        assert!(!session_start_is_late(Some(&seed), &serde_json::json!({ "sessionId": "s2" })), "a new session");
+        let mut idle = seed.clone();
+        idle.state = "idle".into();
+        assert!(!session_start_is_late(Some(&idle), &start));
+        assert!(!session_start_is_late(None, &start));
+
+        // Without a payload the helper can't tell it's late, so it records it.
+        run_hook_cli(&["session_start".into(), "--workspace".into(), "203-late".into()]);
+        assert_eq!(read_record("203-late").unwrap().state, "running");
+    }
+
+    /// Copilot's `errorOccurred` surfaces a `last_error` at once, which the
+    /// following `agentStop` (idle) carries and a new prompt clears.
+    #[test]
+    fn copilot_error_occurred_is_surfaced() {
+        let _home = TempHome::new();
+        write_record_atomic(&record("203-err", "busy")).unwrap();
+        run_hook_cli(&["error".into(), "--workspace".into(), "203-err".into()]);
+        let after = read_record("203-err").unwrap();
+        let err = after.last_error.expect("error recorded");
+        assert!(err.surfaced);
+        assert_eq!(err.message, "The agent reported an error");
+        run_hook_cli(&["idle".into(), "--workspace".into(), "203-err".into()]);
+        assert!(read_record("203-err").unwrap().last_error.is_some_and(|e| e.surfaced));
+        run_hook_cli(&["prompt".into(), "--workspace".into(), "203-err".into()]);
+        assert!(read_record("203-err").unwrap().last_error.is_none());
     }
 
     /// A Stop that carried an error surfaces it right away, redacted.

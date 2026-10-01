@@ -15,15 +15,16 @@ export interface PromptOverrides {
 }
 
 /** The coding agent a repo runs (sessions and mAIestro Code's own drafting). */
-export type Agent = "claude" | "codex" | "antigravity";
+export type Agent = "claude" | "codex" | "antigravity" | "copilot";
 
 /** The drafting model per agent; null/empty = that entry's schema default
  *  (`haiku` for Claude; Codex's own configured model for Codex; a Gemini Flash
- *  id for Antigravity). */
+ *  id for Antigravity; Copilot's automatic model choice for Copilot). */
 export interface PromptModels {
   claude: string | null;
   codex: string | null;
   antigravity?: string | null;
+  copilot?: string | null;
 }
 
 export interface RepoSettings {
@@ -173,7 +174,7 @@ export interface PrChecks {
 
 /** The live agent session state, from the `maiestro hook` helper. `creating` is
  *  mAIestro Code's own pre-agent state; the rest map from Claude Code / Codex /
- *  Antigravity hook events. */
+ *  Antigravity / Copilot hook events. */
 export type SessionState = "creating" | "running" | "busy" | "needs_you" | "idle" | "ended";
 
 /** Live per-session status, written by the `maiestro hook` helper and watched
@@ -193,7 +194,8 @@ export interface StatusRecord {
 }
 
 /** A failed tool call from a `PostToolUseFailure` hook (Claude) or an errored
- *  `PostToolUse`/`Stop` (Antigravity, rarely). Logged on every failure but only
+ *  `PostToolUse`/`Stop` (Antigravity, rarely), or a `postToolUseFailure` /
+ *  `errorOccurred` (Copilot). Logged on every failure but only
  *  shown in the popover once `surfaced` is true (issue #48). Never for Codex,
  *  which has no failed-tool hook. */
 export interface ToolError {
@@ -225,6 +227,7 @@ export interface ToolPaths {
   claude?: string | null;
   codex?: string | null;
   agy?: string | null;
+  copilot?: string | null;
   git?: string | null;
   code?: string | null;
 }

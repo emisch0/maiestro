@@ -66,6 +66,10 @@ pub struct ToolPaths {
     /// Antigravity repos). `None`/empty = auto-resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agy: Option<String>,
+    /// Path to the GitHub Copilot `copilot` CLI (AI drafting and sessions for
+    /// Copilot repos). `None`/empty = auto-resolve (skipping VS Code's shim).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copilot: Option<String>,
     /// Path to `git` (worktree add, branch checks). `None`/empty = auto-resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<String>,
@@ -134,7 +138,7 @@ pub struct AppSettings {
 }
 
 /// The user's explicit path override for a directly-invoked tool
-/// (`claude`/`codex`/`agy`/`git`/`code`), if set and non-empty. Read by `crate::tools`. An
+/// (`claude`/`codex`/`agy`/`copilot`/`git`/`code`), if set and non-empty. Read by `crate::tools`. An
 /// unknown tool name or an empty/whitespace value yields `None` (auto-resolve).
 pub fn tool_path_override(name: &str) -> Option<String> {
     let tp = load().tool_paths?;
@@ -142,6 +146,7 @@ pub fn tool_path_override(name: &str) -> Option<String> {
         "claude" => tp.claude,
         "codex" => tp.codex,
         "agy" => tp.agy,
+        "copilot" => tp.copilot,
         "git" => tp.git,
         "code" => tp.code,
         _ => None,
@@ -547,6 +552,7 @@ mod tests {
                 claude: Some("/opt/homebrew/bin/claude".into()),
                 codex: Some("/opt/homebrew/bin/codex".into()),
                 agy: Some("/home/u/.local/bin/agy".into()),
+                copilot: Some("/opt/homebrew/bin/copilot".into()),
                 git: Some("/opt/homebrew/bin/git".into()),
                 code: Some("/usr/local/bin/code".into()),
             }),
@@ -662,7 +668,7 @@ mod tests {
     /// An empty/whitespace override reads as "auto-resolve" (None).
     #[test]
     fn blank_override_is_none() {
-        let tp = ToolPaths { claude: Some("  ".into()), codex: None, agy: None, git: Some("".into()), code: None };
+        let tp = ToolPaths { claude: Some("  ".into()), codex: None, agy: None, copilot: None, git: Some("".into()), code: None };
         // Exercise the same filter `tool_path_override` applies.
         assert!(tp.claude.as_deref().filter(|s| !s.trim().is_empty()).is_none());
         assert!(tp.git.as_deref().filter(|s| !s.trim().is_empty()).is_none());

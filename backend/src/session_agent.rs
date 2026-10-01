@@ -57,7 +57,7 @@ fn switched(mut s: Session, agent: Agent, window_open: bool) -> Session {
 }
 
 /// Switch a session to `agent`: install the new agent's status hooks (and drop
-/// our Claude or Antigravity hooks when leaving that agent), record the switch, and regenerate the
+/// our Claude, Antigravity or Copilot hooks when leaving that agent), record the switch, and regenerate the
 /// `.vscode` files from the record so the folder-open task launches the new
 /// agent. Never re-themes the worktree. A no-op for the agent it already runs.
 #[tauri::command]
@@ -77,6 +77,9 @@ pub async fn session_set_agent(session_id: String, agent: Agent) -> Result<SetAg
             }
             Agent::Antigravity => {
                 crate::hooks::remove_antigravity_hooks(&work_dir);
+            }
+            Agent::Copilot => {
+                crate::hooks::remove_copilot_hooks(&work_dir);
             }
             // Codex's hooks ride on its launch command; nothing is in the worktree.
             Agent::Codex => {}
@@ -241,5 +244,16 @@ mod tests {
         session_set_agent(s.id.clone(), Agent::Claude).await.unwrap();
         assert!(!wt.path().join(".agents/hooks.json").exists());
         assert_eq!(read("tasks.json")["tasks"][0]["label"], "Start Claude");
+
+        // To Copilot (#203): its hooks land in a file of their own, with no
+        // `.gitignore` notice, and leaving it again deletes that file.
+        let copilot_hooks = wt.path().join(".github/hooks/maiestro-status.json");
+        session_set_agent(s.id.clone(), Agent::Copilot).await.unwrap();
+        let body = std::fs::read_to_string(&copilot_hooks).unwrap();
+        assert!(body.contains("--workspace '186-x'"), "{body}");
+        assert_eq!(read("tasks.json")["tasks"][0]["label"], "Start Copilot");
+        session_set_agent(s.id.clone(), Agent::Codex).await.unwrap();
+        assert!(!copilot_hooks.exists());
+        assert_eq!(read("tasks.json")["tasks"][0]["label"], "Start Codex");
     }
 }

@@ -1,11 +1,11 @@
 //! AI drafting: turn a free-text idea into a GitHub issue (title + body + short
 //! label), and compress an existing issue into a short session label — all via
 //! headless calls to the repo's agent ([`agent_text`]: `claude -p`,
-//! `codex exec`, or headless `agy`).
+//! `codex exec`, headless `agy`, or headless `copilot`).
 //!
 //! These calls run with no tools (no file/shell/edit/fetch access) — Claude and
-//! Codex in the repo for context, Antigravity in an empty mAIestro-owned folder
-//! (see [`antigravity_text`]) — so prompt injection from the input or repo files
+//! Codex in the repo for context, Antigravity and Copilot in an empty
+//! mAIestro-owned folder (see [`antigravity_text`], [`copilot_text`]) — so prompt injection from the input or repo files
 //! is contained to, at worst, a bad title the user reviews — never code execution.
 //! `AgentActivity` correlates a run with the UI action that started it so its
 //! busy glow can switch to the rainbow (AI) variant. Extracted from `spawn.rs`
@@ -107,6 +107,7 @@ pub async fn agent_text(
         Agent::Claude => claude_text(dir, prompt, model.unwrap_or_default(), what).await,
         Agent::Codex => codex_text(dir, prompt, model, what).await,
         Agent::Antigravity => antigravity_text(prompt, model, what).await,
+        Agent::Copilot => copilot_text(prompt, model, what).await,
     }
 }
 
@@ -230,8 +231,21 @@ pub(crate) async fn run_codex_exec(
     prompt: &str,
     timeout: std::time::Duration,
 ) -> Result<Result<std::process::Output, std::io::Error>, tokio::time::error::Elapsed> {
+    run_with_stdin("codex", dir, args, prompt, timeout).await
+}
+
+/// Run the directly-invoked `tool` with `args` in `dir`, feeding `prompt` on
+/// stdin and closing it, and collect its output. Killed if `timeout` fires, so a
+/// dropped run never keeps burning quota in the background.
+async fn run_with_stdin(
+    tool: &str,
+    dir: Option<&Path>,
+    args: &[String],
+    prompt: &str,
+    timeout: std::time::Duration,
+) -> Result<Result<std::process::Output, std::io::Error>, tokio::time::error::Elapsed> {
     use tokio::io::AsyncWriteExt;
-    let mut cmd = crate::tools::tokio_command("codex");
+    let mut cmd = crate::tools::tokio_command(tool);
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
@@ -245,7 +259,7 @@ pub(crate) async fn run_codex_exec(
         let mut child = cmd.spawn()?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await?;
-            // Dropping stdin closes it, so Codex sees EOF and starts the turn.
+            // Dropping stdin closes it, so the agent sees EOF and starts the turn.
         }
         child.wait_with_output().await
     })
@@ -462,6 +476,147 @@ async fn antigravity_text(prompt: &str, model: Option<&str>, what: &str) -> Resu
             format!("agy reported an error while {what}: {e}")
         }
     })
+}
+
+// ── GitHub Copilot (`copilot`) ──────────────────────────────────────────────────
+
+/// The folder every Copilot drafting call runs in: empty, and never trusted, so
+/// Copilot loads no repo hooks, instructions or MCP config from it. Running here
+/// rather than in the repo also leaves nothing in the working folder to read
+/// even if a future CLI let a tool through. We never write `~/.copilot/`.
+pub(crate) fn copilot_draft_dir() -> std::path::PathBuf {
+    crate::paths::maiestro_dir("copilot-draft")
+}
+
+/// The `copilot` arguments for a one-shot, tool-less drafting turn whose prompt
+/// arrives on stdin (no `-p`: `-p -` sends a literal `-`), so a large PR diff
+/// never hits argv limits. Pure so the flag set is unit-tested.
+///
+/// - `--available-tools none`: zero tools. A *bare* `--available-tools` restricts
+///   nothing (reads in the working folder stay auto-approved), so the `none`
+///   value matters; [`parse_copilot_jsonl`] checks it took effect.
+/// - `--disable-builtin-mcps --no-custom-instructions`: no GitHub MCP server and
+///   no AGENTS.md-style instructions.
+/// - `--no-auto-update`: a drafting call never updates the CLI under the user.
+/// - `--model` only when `prompt_models.copilot` is set; otherwise Copilot's own
+///   automatic routing picks a model the user's plan offers.
+pub(crate) fn copilot_draft_args(model: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--output-format",
+        "json",
+        "--available-tools",
+        "none",
+        "--disable-builtin-mcps",
+        "--no-custom-instructions",
+        "--no-auto-update",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    if let Some(m) = model.filter(|m| !m.trim().is_empty()) {
+        args.push("--model".into());
+        args.push(m.trim().to_string());
+    }
+    args
+}
+
+/// The `session.info` message Copilot emits when `--available-tools none` has
+/// disabled its tools.
+const COPILOT_TOOLS_DISABLED: &str = "Disabled tools:";
+
+/// Pull the reply out of a headless `copilot --output-format json` run (JSONL):
+/// the last `assistant.message` whose `phase` is `final_answer`. Fails closed —
+/// returning an error rather than a reply — when the stream lacks the
+/// `session.info` "Disabled tools:" event (a CLI whose `none` no longer means
+/// zero tools) or shows any `tool.execution_start`. Pure for unit tests.
+pub(crate) fn parse_copilot_jsonl(stdout: &str) -> Result<String, String> {
+    let events: Vec<serde_json::Value> =
+        stdout.lines().filter_map(|l| serde_json::from_str(l.trim()).ok()).collect();
+    if events.is_empty() {
+        return Err(format!("copilot printed no events: {}", snippet(stdout)));
+    }
+    let tools_disabled = events.iter().any(|e| {
+        e["type"] == "session.info"
+            && e["data"]["message"].as_str().is_some_and(|m| m.starts_with(COPILOT_TOOLS_DISABLED))
+    });
+    if !tools_disabled {
+        return Err("copilot didn't confirm its tools were disabled, so its reply was discarded".into());
+    }
+    if let Some(tool) = events.iter().find(|e| e["type"] == "tool.execution_start") {
+        let name = tool["data"]["toolName"].as_str().unwrap_or("a tool");
+        return Err(format!("copilot ran {name} during a tool-less draft, so its reply was discarded"));
+    }
+    let reply = events
+        .iter()
+        .rfind(|e| e["type"] == "assistant.message" && e["data"]["phase"] == "final_answer")
+        .and_then(|e| e["data"]["content"].as_str())
+        .unwrap_or("")
+        .trim();
+    if reply.is_empty() {
+        return Err("copilot returned an empty reply".into());
+    }
+    Ok(reply.to_string())
+}
+
+/// The drafting error when `copilot` resolves to nothing — including when VS
+/// Code's Copilot Chat shim is the only `copilot` (running it would wait on its
+/// "Install GitHub Copilot CLI? [y/N]" prompt).
+pub(crate) fn copilot_not_found() -> String {
+    if crate::tools::copilot_shim_on_path().is_some() {
+        "GitHub Copilot CLI isn't installed — only VS Code's Copilot Chat shim was found. Install it with          `npm install -g @github/copilot`, or run `copilot` once in a terminal and accept its install prompt"
+            .into()
+    } else {
+        "GitHub Copilot CLI isn't installed (`copilot` not found) — install it with `npm install -g @github/copilot`".into()
+    }
+}
+
+/// Run headless `copilot` in [`copilot_draft_dir`] with `args`, feeding `prompt`
+/// on stdin. Shared by the drafting backend and the health probe. Refuses to run
+/// when `copilot` resolves to nothing, so the VS Code shim is never invoked.
+pub(crate) async fn run_copilot(
+    args: &[String],
+    prompt: &str,
+    timeout: std::time::Duration,
+) -> Result<Result<std::process::Output, std::io::Error>, tokio::time::error::Elapsed> {
+    if crate::tools::find_tool("copilot").is_none() {
+        return Ok(Err(std::io::Error::new(std::io::ErrorKind::NotFound, copilot_not_found())));
+    }
+    let dir = copilot_draft_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return Ok(Err(e));
+    }
+    run_with_stdin("copilot", Some(&dir), args, prompt, timeout).await
+}
+
+/// Copilot backend: headless `copilot` in [`copilot_draft_dir`] (never the repo)
+/// with zero tools and the prompt on stdin (see [`copilot_draft_args`]), and the
+/// reply from the JSONL stream ([`parse_copilot_jsonl`]).
+async fn copilot_text(prompt: &str, model: Option<&str>, what: &str) -> Result<String, String> {
+    let output = run_copilot(&copilot_draft_args(model), prompt, AGENT_TIMEOUT)
+        .await
+        .map_err(|_| format!("copilot timed out while {what}"))?
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => e.to_string(),
+            _ => format!("could not run copilot (is it installed and on PATH?): {e}"),
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("copilot exited with an error: {}", copilot_error_message(&stderr)));
+    }
+    parse_copilot_jsonl(&stdout).map_err(|e| format!("{e} (while {what})"))
+}
+
+/// The most useful line of a failed `copilot` run's stderr: the first `Error:`
+/// line (e.g. `Error: No authentication information found.`), else the whole
+/// stderr snippet.
+pub(crate) fn copilot_error_message(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("Error:"))
+        .map(snippet)
+        .unwrap_or_else(|| snippet(stderr))
 }
 
 /// Ask Claude, running in the cloned repo for context, to turn the user's
@@ -683,6 +838,70 @@ mod tests {
         assert!(parse_agy_result(timed_out).unwrap_err().contains("empty reply"));
         assert!(parse_agy_result("").is_err());
         assert!(parse_agy_result("error: boom").is_err());
+    }
+
+    /// The Copilot drafting call has zero tools (`--available-tools none`, not a
+    /// bare `--available-tools`), no MCP servers or custom instructions, never
+    /// auto-updates, reads the prompt from stdin (no `-p`), runs in a
+    /// mAIestro-owned folder, and passes `--model` only when one is set.
+    #[test]
+    fn copilot_draft_args_are_tool_less_and_model_optional() {
+        let args = copilot_draft_args(None);
+        assert!(args.windows(2).any(|w| w == ["--available-tools", "none"]), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--output-format", "json"]), "{args:?}");
+        for flag in ["--disable-builtin-mcps", "--no-custom-instructions", "--no-auto-update"] {
+            assert!(args.iter().any(|a| a == flag), "{flag} missing: {args:?}");
+        }
+        assert!(!args.iter().any(|a| a == "-p" || a == "--prompt" || a.contains("allow-all")), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--model"), "no model → Copilot's automatic routing");
+        let args = copilot_draft_args(Some(" gpt-5-mini "));
+        let i = args.iter().position(|a| a == "--model").expect("--model passed");
+        assert_eq!(args[i + 1], "gpt-5-mini");
+        assert!(!copilot_draft_args(Some("  ")).iter().any(|a| a == "--model"));
+        assert!(copilot_draft_dir().ends_with("copilot-draft"), "a mAIestro-owned folder, not the repo");
+    }
+
+    /// Events from a real `copilot --output-format json --available-tools none`
+    /// run (1.0.90), trimmed to the fields we read.
+    const COPILOT_DISABLED: &str = r#"{"type":"session.info","data":{"infoType":"configuration","message":"Disabled tools: bash, create, edit, fetch_copilot_cli_documentation, glob, grep, list_agents, list_bash, read_agent, read_bash, session_store_sql, skill, sql, stop_bash, task, view, web_fetch, write_agent"},"ephemeral":true}"#;
+    const COPILOT_UNKNOWN: &str = r#"{"type":"session.info","data":{"infoType":"configuration","message":"Unknown tool name in the tool allowlist: "none""},"ephemeral":true}"#;
+    const COPILOT_DELTA: &str = r#"{"type":"assistant.message_delta","data":{"messageId":"m","deltaContent":"pong"},"ephemeral":true}"#;
+    const COPILOT_FINAL: &str = r#"{"type":"assistant.message","data":{"messageId":"m","model":"mai-code-1.1-flash","content":" pong ","toolRequests":[],"turnId":"0","phase":"final_answer"}}"#;
+    const COPILOT_RESULT: &str = r#"{"type":"result","exitCode":0,"usage":{"premiumRequests":1}}"#;
+
+    #[test]
+    fn parse_copilot_jsonl_reads_the_final_answer() {
+        let ok = [COPILOT_DISABLED, COPILOT_UNKNOWN, COPILOT_DELTA, COPILOT_FINAL, COPILOT_RESULT].join("\n");
+        assert_eq!(parse_copilot_jsonl(&ok).unwrap(), "pong");
+        // A non-final assistant message (e.g. commentary) is not the reply.
+        let commentary = COPILOT_FINAL.replace("final_answer", "commentary");
+        let only_commentary = [COPILOT_DISABLED, &commentary, COPILOT_RESULT].join("\n");
+        assert!(parse_copilot_jsonl(&only_commentary).unwrap_err().contains("empty reply"));
+        assert!(parse_copilot_jsonl("").is_err());
+        assert!(parse_copilot_jsonl("Error: boom").is_err());
+    }
+
+    /// Fails closed: a stream without the "Disabled tools:" confirmation, or
+    /// with any tool execution, yields no reply even when one is present.
+    #[test]
+    fn parse_copilot_jsonl_fails_closed() {
+        let unconfirmed = [COPILOT_UNKNOWN, COPILOT_FINAL, COPILOT_RESULT].join("\n");
+        assert!(parse_copilot_jsonl(&unconfirmed).unwrap_err().contains("disabled"));
+        let tool = r#"{"type":"tool.execution_start","data":{"toolCallId":"t","toolName":"view","arguments":{"path":"a.txt"}}}"#;
+        let ran_a_tool = [COPILOT_DISABLED, tool, COPILOT_FINAL, COPILOT_RESULT].join("\n");
+        assert!(parse_copilot_jsonl(&ran_a_tool).unwrap_err().contains("ran view"));
+    }
+
+    #[test]
+    fn copilot_error_message_reads_the_error_line() {
+        assert_eq!(copilot_error_message("Error: No authentication information found.
+help…"), "No authentication information found.");
+        assert_eq!(
+            copilot_error_message("Error: Model \"x\" from --model flag is not available.\n"),
+            "Model \"x\" from --model flag is not available."
+        );
+        assert_eq!(copilot_error_message("boom"), "boom");
+        assert_eq!(copilot_error_message(""), "<empty>");
     }
 
     /// A bare label parses; quote/backtick/fence wrapping and trailing

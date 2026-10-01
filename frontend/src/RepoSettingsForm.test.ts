@@ -21,6 +21,7 @@ const SCHEMA = {
         claude: { type: ["string", "null"], default: "haiku" },
         codex: { type: ["string", "null"], default: null },
         antigravity: { type: ["string", "null"], default: "gemini-3.8-flash-low" },
+        copilot: { type: ["string", "null"], default: null },
       },
     },
     cloned_repo_dir: { type: ["string", "null"] },
@@ -43,7 +44,7 @@ describe("extractFormDefaults", () => {
     expect(d.worktreePrefixDefault).toBe("~/src/work-");
     // Per agent: Claude's alias default, no default at all for Codex, and a
     // Gemini Flash id for Antigravity.
-    expect(d.promptModelDefaults).toEqual({ claude: "haiku", codex: "", antigravity: "gemini-3.8-flash-low" });
+    expect(d.promptModelDefaults).toEqual({ claude: "haiku", codex: "", antigravity: "gemini-3.8-flash-low", copilot: "" });
     expect(d.promptDefaults).toEqual({
       draft_issue: "Draft an issue.",
       short_label: "Short label.",
@@ -65,7 +66,7 @@ describe("extractFormDefaults", () => {
   it("falls back to empty strings when defaults are missing", () => {
     const d = extractFormDefaults({ properties: {} });
     expect(d.worktreePrefixDefault).toBe("");
-    expect(d.promptModelDefaults).toEqual({ claude: "", codex: "", antigravity: "" });
+    expect(d.promptModelDefaults).toEqual({ claude: "", codex: "", antigravity: "", copilot: "" });
     expect(d.booleanDefaults).toEqual({});
     expect(d.promptDefaults).toEqual({ draft_issue: "", short_label: "", draft_pr: "" });
   });
@@ -133,5 +134,6 @@ describe("promptModelPlaceholder", () => {
     expect(promptModelPlaceholder("claude", "haiku")).toBe("haiku");
     expect(promptModelPlaceholder("codex", "")).toBe("Codex's configured default");
     expect(promptModelPlaceholder("codex", "gpt-5-codex")).toBe("gpt-5-codex");
+    expect(promptModelPlaceholder("copilot", "")).toBe("Chosen by Copilot");
   });
 });

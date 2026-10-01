@@ -44,7 +44,7 @@ A macOS menu-bar app that quickly shows active AI coding sessions. Features incl
 ### MacOS
 
 You need macOS, `git`, a GitHub account, and **one** agentic coding CLI —
-Claude Code (the default), Codex CLI, or Antigravity CLI — installed and
+Claude Code (the default), Codex CLI, Antigravity CLI, or GitHub Copilot CLI — installed and
 logged in.
 
 #### 1. Install mAIestro Code
@@ -97,6 +97,23 @@ Download the latest `.dmg` from the [Releases page](https://github.com/yanokamay
 > agy --version   # 1.2.10 or newer
 > agy             # sign in on first run
 > ```
+
+</details>
+
+<details>
+<summary>GitHub Copilot</summary>
+
+> Needs a GitHub Copilot subscription. Install the CLI (the npm package needs
+> Node.js), then sign in:
+>
+> ```bash
+> npm install -g @github/copilot   # or: brew install copilot-cli
+> copilot --version   # 1.0.90 or newer
+> copilot             # /login on first run — or sign in to `gh`, whose token Copilot also uses
+> ```
+>
+> VS Code's Copilot Chat extension puts its own `copilot` command on your PATH
+> that only offers to install the real CLI; mAIestro Code ignores it.
 
 </details>
 
@@ -206,10 +223,11 @@ copy-pasteable fix.
 >   really points at this `owner/name`.
 > - **Git available** and **Session editor available** — the `git` and VS Code
 >   `code` CLIs resolve (pin them under **General → Tool paths** if not).
-> - **Claude logged in** (or **Codex logged in** / **Antigravity logged in**, for
->   a repo on that agentic coding CLI), with a **model available** sub-check — a
->   real probe of the repo's drafting model (for Antigravity, a check against
->   `agy models`), so a login problem and a bad model name are reported
+> - **Claude logged in** (or **Codex logged in** / **Antigravity logged in** /
+>   **Copilot logged in**, for a repo on that agentic coding CLI), with a
+>   **model available** sub-check — a real probe of the repo's drafting model
+>   (for Antigravity, a check against `agy models`; for Copilot, one tiny
+>   tool-less call, which costs a premium request), so a login problem and a bad model name are reported
 >   separately. Only the repo's own agentic coding CLI is checked, so a machine
 >   with just one agentic coding CLI installed gets a clean report.
 > - **GitHub token & permissions** — the token is valid, the repo is readable,
@@ -323,13 +341,19 @@ agent that then works in it is steered by files the repository controls:
   session and the repo's `AGENTS.md` and `.codex/` configuration, and for an
   Antigravity session and the repo's `.agents/` configuration. mAIestro Code adds
   its own status hooks to a worktree's `.agents/hooks.json`, and they never
-  approve or deny a tool.
+  approve or deny a tool. The same holds for a GitHub Copilot session and the
+  repo's `.github/` instructions and hooks; mAIestro Code adds its status hooks
+  as `.github/hooks/maiestro-status.json` (kept out of git), which Copilot loads
+  only after you trust the folder, and they never approve or deny a tool either.
 - **mAIestro Code's own drafting calls run with all tools disabled.** The
   issue, label, and PR-description drafts run `claude -p … --tools ""` (or, for
   Codex, `codex exec --sandbox read-only` with the shell and other tools
   disabled) in the repo. For Antigravity, headless `agy` runs in an empty
   mAIestro Code folder (`~/.maiestro/antigravity-draft/`) whose hook denies
-  every tool. Either way, prompt injection from your idea text, an issue body, a diff, or the
+  every tool. For Copilot, headless `copilot` runs with
+  `--available-tools none` in an empty, untrusted mAIestro Code folder
+  (`~/.maiestro/copilot-draft/`), and a reply is discarded unless Copilot
+  confirms its tools were disabled. Either way, prompt injection from your idea text, an issue body, a diff, or the
   repo's `CLAUDE.md` can at worst produce a bad draft — never read files, run
   commands, or fetch URLs.
 
@@ -363,6 +387,11 @@ mAIestro Code runs entirely on your Mac and has no servers of its own.
   file-level summary when the diff is large), plus whatever repo context
   `claude` loads itself, such as `CLAUDE.md`. The interactive session is plain
   Claude Code, governed by Anthropic's terms for your account.
+- **OpenAI, Google, or GitHub Copilot** instead, for a repo whose agentic
+  coding CLI is Codex CLI, Antigravity CLI, or GitHub Copilot CLI: the same
+  drafting inputs go to that CLI under your own login, and the session is
+  governed by that provider's terms. Copilot drafting and its Check Health
+  probe each spend premium requests on your plan.
 - **Remote control.** Sessions are launched with Claude Code's
   `--remote-control` flag so you can reach them from your Claude account on
   other devices. See the

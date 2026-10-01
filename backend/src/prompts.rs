@@ -42,13 +42,15 @@ pub fn draft_pr(p: &PromptOverrides) -> String {
 /// The effective drafting model for this repo's headless calls on `agent`: the
 /// repo's `prompt_models.<agent>` override, or that entry's schema default when
 /// unset/empty. `None` means "pass no `--model`" — the Codex default, which
-/// defers to the model configured in Codex itself. Governs only mAIestro Code's
+/// defers to the model configured in Codex itself, and the Copilot default,
+/// which lets Copilot's automatic routing pick a model the plan offers. Governs only mAIestro Code's
 /// own drafting prompts, never the launched worktree session.
 pub fn model(models: &PromptModels, agent: Agent) -> Option<String> {
     let configured = match agent {
         Agent::Claude => &models.claude,
         Agent::Codex => &models.codex,
         Agent::Antigravity => &models.antigravity,
+        Agent::Copilot => &models.copilot,
     };
     let ptr = format!("/properties/prompt_models/properties/{}/default", agent.as_str());
     Some(pick(configured, &ptr)).filter(|m| !m.is_empty())
@@ -67,19 +69,23 @@ mod tests {
         assert_eq!(model(&unset, Agent::Claude).as_deref(), Some("haiku"));
         assert_eq!(model(&unset, Agent::Codex), None);
         assert_eq!(model(&unset, Agent::Antigravity).as_deref(), Some("gemini-3.8-flash-low"));
+        assert_eq!(model(&unset, Agent::Copilot), None, "Copilot's models depend on the plan");
 
         let set = PromptModels {
             claude: Some("sonnet".into()),
             codex: Some(" gpt-5-codex ".into()),
             antigravity: Some("gemini-3.1-pro-low".into()),
+            copilot: Some("gpt-5-mini".into()),
         };
         assert_eq!(model(&set, Agent::Claude).as_deref(), Some("sonnet"));
         assert_eq!(model(&set, Agent::Codex).as_deref(), Some("gpt-5-codex"));
         assert_eq!(model(&set, Agent::Antigravity).as_deref(), Some("gemini-3.1-pro-low"));
+        assert_eq!(model(&set, Agent::Copilot).as_deref(), Some("gpt-5-mini"));
 
-        let blank = PromptModels { claude: Some("  ".into()), codex: Some("".into()), antigravity: Some(" ".into()) };
+        let blank = PromptModels { claude: Some("  ".into()), codex: Some("".into()), antigravity: Some(" ".into()), copilot: Some(" ".into()) };
         assert_eq!(model(&blank, Agent::Claude).as_deref(), Some("haiku"));
         assert_eq!(model(&blank, Agent::Codex), None);
         assert_eq!(model(&blank, Agent::Antigravity).as_deref(), Some("gemini-3.8-flash-low"));
+        assert_eq!(model(&blank, Agent::Copilot), None);
     }
 }

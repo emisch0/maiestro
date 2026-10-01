@@ -18,5 +18,7 @@ describe("AgentSwitchDialog (#186)", () => {
     expect(onConfirm).toHaveBeenCalledWith("codex");
     fireEvent.click(screen.getByRole("button", { name: /Antigravity CLI/ }));
     expect(onConfirm).toHaveBeenCalledWith("antigravity");
+    fireEvent.click(screen.getByRole("button", { name: /GitHub Copilot CLI/ }));
+    expect(onConfirm).toHaveBeenCalledWith("copilot");
   });
 });

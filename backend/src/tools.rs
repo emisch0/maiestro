@@ -1,5 +1,5 @@
 //! Resolving the external CLIs mAIestro Code invokes **directly** — the agent CLIs
-//! `claude`, `codex` and `agy` (Antigravity), `git`, and the VS Code `code` CLI — robustly, even when the app is launched from the
+//! `claude`, `codex`, `agy` (Antigravity) and `copilot` (GitHub Copilot), `git`, and the VS Code `code` CLI — robustly, even when the app is launched from the
 //! packaged bundle (`/Applications/mAIestro Code.app/…`).
 //!
 //! The problem: at login, macOS Launch Services starts the app with a **minimal
@@ -167,11 +167,44 @@ fn exe_candidates(path: PathBuf) -> Vec<PathBuf> {
 }
 
 /// First existing `bin` found in the given PATH (see [`exe_candidates`] for
-/// Windows extensions).
+/// Windows extensions), skipping any candidate that is a stand-in rather than
+/// the tool itself (see [`is_auto_resolvable`]).
 fn which_on(path: &str, bin: &str) -> Option<PathBuf> {
     std::env::split_paths(path)
         .flat_map(|d| exe_candidates(d.join(bin)))
-        .find(|p| p.is_file())
+        .find(|p| p.is_file() && is_auto_resolvable(p))
+}
+
+/// The path fragment of the `copilot` shim VS Code's Copilot Chat extension puts
+/// on PATH (`…/globalStorage/github.copilot-chat/copilotCli/copilot`). With the
+/// real CLI installed it passes calls through; without it, it asks "Install
+/// GitHub Copilot CLI? [y/N]" and waits, which would hang a headless call.
+const COPILOT_SHIM_MARKER: &str = "github.copilot-chat/copilotCli/";
+
+/// Whether `p` is VS Code's Copilot Chat `copilot` shim rather than the real CLI.
+pub fn is_copilot_shim(p: &std::path::Path) -> bool {
+    p.to_string_lossy().replace('\\', "/").contains(COPILOT_SHIM_MARKER)
+}
+
+/// Whether auto-resolution may pick `p`. It never picks VS Code's `copilot`
+/// shim, so with only the shim installed `copilot` counts as not found and we
+/// never trigger its interactive installer. A `tool_paths` pin bypasses this:
+/// it stays authoritative even when it points at the shim.
+fn is_auto_resolvable(p: &std::path::Path) -> bool {
+    !is_copilot_shim(p)
+}
+
+/// The VS Code Copilot Chat shim on the enriched PATH, if there is one. Lets the
+/// health check say "only VS Code's shim was found" when `copilot` resolves to
+/// nothing.
+pub fn copilot_shim_on_path() -> Option<PathBuf> {
+    copilot_shim_on(&enriched_path())
+}
+
+fn copilot_shim_on(path: &str) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .flat_map(|d| exe_candidates(d.join("copilot")))
+        .find(|p| p.is_file() && is_copilot_shim(p))
 }
 
 use crate::paths::{expand_tilde, home};
@@ -202,6 +235,17 @@ fn fallbacks(name: &str) -> Vec<PathBuf> {
             // The `antigravity-cli` Homebrew cask.
             PathBuf::from("/opt/homebrew/bin/agy"),
             PathBuf::from("/usr/local/bin/agy"),
+        ],
+        "copilot" => vec![
+            // `brew install copilot-cli`, and `npm install -g @github/copilot`
+            // when npm's prefix is Homebrew (the npm entry point is a Node
+            // script, run with the enriched PATH so it finds `node`).
+            PathBuf::from("/opt/homebrew/bin/copilot"),
+            PathBuf::from("/usr/local/bin/copilot"),
+            // The `gh.io/copilot-install` script.
+            home().join(".local/bin/copilot"),
+            // A user-level npm prefix.
+            home().join(".npm-global/bin/copilot"),
         ],
         "code" => vec![
             PathBuf::from("/opt/homebrew/bin/code"),
@@ -234,7 +278,7 @@ pub fn find_tool(name: &str) -> Option<PathBuf> {
     }
     // 3. Then known install locations. On Windows `~/.local/bin/claude` matches
     //    the native installer's `claude.exe`.
-    fallbacks(name).into_iter().flat_map(exe_candidates).find(|p| p.is_file())
+    fallbacks(name).into_iter().flat_map(exe_candidates).find(|p| p.is_file() && is_auto_resolvable(p))
 }
 
 /// The configured `tool_paths` override for `name` when it's set but does *not*
@@ -364,7 +408,7 @@ pub fn shell_quote(s: &str) -> String {
 /// The directly-invoked tools whose resolution the Settings UI surfaces.
 /// Every agent is listed so any can be pinned; nothing *resolves* an agent's
 /// binary for real work unless a repo actually uses that agent.
-const TOOLS: &[&str] = &["claude", "codex", "agy", "git", "code"];
+const TOOLS: &[&str] = &["claude", "codex", "agy", "copilot", "git", "code"];
 
 /// One tool's resolution result, for the Settings "Tool paths" status line.
 #[derive(serde::Serialize)]
@@ -508,8 +552,52 @@ mod tests {
     }
 
     #[test]
+    fn copilot_fallbacks_probe_homebrew_npm_and_the_install_script() {
+        let f = fallbacks("copilot");
+        assert!(f.contains(&PathBuf::from("/opt/homebrew/bin/copilot")));
+        assert!(f.contains(&PathBuf::from("/usr/local/bin/copilot")));
+        assert!(f.contains(&home().join(".local/bin/copilot")));
+        assert!(f.contains(&home().join(".npm-global/bin/copilot")));
+        assert!(f.iter().all(|p| !is_copilot_shim(p)));
+    }
+
+    /// The file a runnable `copilot` is on this platform (`copilot.exe` on Windows).
+    fn copilot_file() -> &'static str {
+        if cfg!(target_os = "windows") { "copilot.exe" } else { "copilot" }
+    }
+
+    /// A fake `copilot` at `dir/rel`, returning the directory holding it.
+    fn fake_copilot(root: &std::path::Path, rel: &str) -> PathBuf {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(copilot_file()), "#!/bin/sh\n").unwrap();
+        dir
+    }
+
+    /// Auto-resolution skips VS Code's Copilot Chat shim: with the real CLI
+    /// later on PATH it finds the real one, and with only the shim it finds
+    /// nothing (so we never trigger the shim's interactive installer).
+    #[test]
+    fn which_on_skips_the_vscode_copilot_shim() {
+        let root = tempfile::tempdir().unwrap();
+        let shim = fake_copilot(
+            root.path(),
+            "Library/Application Support/Code/User/globalStorage/github.copilot-chat/copilotCli",
+        );
+        let real = fake_copilot(root.path(), "npm/bin");
+        let both = std::env::join_paths([&shim, &real]).unwrap().into_string().unwrap();
+        assert_eq!(which_on(&both, "copilot"), Some(real.join(copilot_file())));
+        assert_eq!(copilot_shim_on(&both), Some(shim.join(copilot_file())));
+
+        let only_shim = shim.to_string_lossy().into_owned();
+        assert_eq!(which_on(&only_shim, "copilot"), None, "the shim alone is not found");
+        assert_eq!(copilot_shim_on(&only_shim), Some(shim.join(copilot_file())));
+        assert_eq!(copilot_shim_on(&real.to_string_lossy()), None);
+    }
+
+    #[test]
     fn tools_list_includes_every_agent() {
-        for agent in [crate::agent::Agent::Claude, crate::agent::Agent::Codex, crate::agent::Agent::Antigravity] {
+        for agent in crate::agent::Agent::ALL {
             assert!(TOOLS.contains(&agent.tool()), "{agent}");
         }
     }
