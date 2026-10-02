@@ -34,7 +34,8 @@
 //! Claude, a `PreToolUse` hook's stdout is a *decision* — `{}`, an empty
 //! decision, or a failing command all **deny** the tool — so every command we
 //! install discards its output and always exits 0 (see [`antigravity_hook_command`]),
-//! and `PreToolUse` is registered only for the tools that ask the user something.
+//! and `PreToolUse` is registered only for the tools that ask the user something
+//! and the ones that can raise Antigravity's own permission prompt.
 //!
 //! **Copilot** (issue #203) reads repo hooks from `.github/hooks/*.json`, any
 //! filename, so we own a whole file, `.github/hooks/maiestro-status.json`
@@ -348,9 +349,16 @@ fn antigravity_hook_file(work_dir: &Path) -> PathBuf {
 const ANTIGRAVITY_GROUP: &str = "maiestro-status";
 
 /// The tools through which an Antigravity agent asks the user something — the
-/// only "needs you" signal it exposes (its native permission prompts fire no
-/// hook). Also the only tools our `PreToolUse` hook is registered for.
+/// only explicit "needs you" signal it exposes.
 const ANTIGRAVITY_ASK_TOOLS: &str = "ask_question|ask_permission|ask_custom_permission";
+
+/// The tools that can raise Antigravity's own permission prompt ("Run this
+/// command?", "Allow creation of this file?", "Accept this file edit?"). That
+/// prompt fires no hook, and `PreToolUse` fires *before* it, so the helper
+/// records a deadline instead (issue #208): a gated tool still unanswered by
+/// then is taken to be waiting on the user. With [`ANTIGRAVITY_ASK_TOOLS`], the
+/// only tools our `PreToolUse` hook is registered for.
+const ANTIGRAVITY_GATED_TOOLS: &str = "run_command|write_to_file|replace_file_content|multi_replace_file_content";
 
 /// One Antigravity or Copilot hook command: run the helper with `verb` for
 /// `ws_id`, then discard its output and exit 0 no matter what. For `PreToolUse`,
@@ -372,7 +380,9 @@ fn silent_hook_command(bin: &Path, ws_id: &str, verb: &str) -> String {
 ///
 /// - `PreInvocation` → `invocation`: working. It fires before every model call;
 ///   the first of a turn (`invocationNum` 0) acts as a new prompt.
-/// - `PreToolUse` on [`ANTIGRAVITY_ASK_TOOLS`] only → `notification`: needs you.
+/// - `PreToolUse` on [`ANTIGRAVITY_ASK_TOOLS`] → `notification`: needs you.
+/// - `PreToolUse` on [`ANTIGRAVITY_GATED_TOOLS`] → `gated`: working, with a
+///   deadline after which it reads as needs you (see `status::pending_prompt`).
 /// - `PostToolUse` (every tool) → `tool_done`: `tool_ok`, or `tool_failed` when
 ///   the payload carries an `error`.
 /// - `Stop` → `stop`: idle (surfacing the stop's `error`, if any).
@@ -384,7 +394,10 @@ fn antigravity_hook_group(bin: &Path, ws_id: &str) -> serde_json::Value {
     };
     serde_json::json!({
         "PreInvocation": [handler("invocation")],
-        "PreToolUse": [{ "matcher": ANTIGRAVITY_ASK_TOOLS, "hooks": [handler("notification")] }],
+        "PreToolUse": [
+            { "matcher": ANTIGRAVITY_ASK_TOOLS, "hooks": [handler("notification")] },
+            { "matcher": ANTIGRAVITY_GATED_TOOLS, "hooks": [handler("gated")] },
+        ],
         "PostToolUse": [{ "matcher": "*", "hooks": [handler("tool_done")] }],
         "Stop": [handler("stop")],
     })
@@ -1038,7 +1051,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(commands.len(), 4, "{commands:?}");
+        assert_eq!(commands.len(), 5, "{commands:?}");
         for (event, cmd) in &commands {
             assert!(cmd.ends_with(">/dev/null 2>&1 || true"), "{event}: {cmd}");
             let out = std::process::Command::new("sh")
@@ -1142,14 +1155,19 @@ mod tests {
         assert!(exclude.lines().any(|l| l == ".github/hooks/maiestro-status.json"), "{exclude}");
     }
 
-    /// PreToolUse fires only for the tools that ask the user something; the
-    /// rest of the event map is the documented one.
+    /// PreToolUse fires only for the tools that ask the user something and the
+    /// ones that can raise a permission prompt; the rest of the event map is the
+    /// documented one.
     #[test]
     fn antigravity_hook_group_maps_the_events() {
         let group = antigravity_hook_group(Path::new("/bin/maiestro"), "185-x");
         let pre = &group["PreToolUse"][0];
         assert_eq!(pre["matcher"], "ask_question|ask_permission|ask_custom_permission");
         assert!(pre["hooks"][0]["command"].as_str().unwrap().contains(" hook notification --workspace '185-x'"));
+        let gated = &group["PreToolUse"][1];
+        assert_eq!(gated["matcher"], "run_command|write_to_file|replace_file_content|multi_replace_file_content");
+        assert!(gated["hooks"][0]["command"].as_str().unwrap().contains(" hook gated --workspace '185-x'"));
+        assert_eq!(group["PreToolUse"].as_array().unwrap().len(), 2);
         assert_eq!(group["PostToolUse"][0]["matcher"], "*");
         assert!(group["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap().contains(" hook tool_done "));
         assert!(group["PreInvocation"][0]["command"].as_str().unwrap().contains(" hook invocation "));
