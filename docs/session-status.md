@@ -60,21 +60,24 @@ A repo whose agentic coding CLI is Antigravity (`agy`, issue #185) uses the same
 - a non-zero exit **blocks** it with a hook-failed error
 - only **empty stdout with exit 0** leaves the tool to its normal permission flow (`"ask"` would force a prompt, and `"allow"` would auto-approve)
 
-So every command we install ends in `>/dev/null 2>&1 || true` (`hooks::antigravity_hook_command`). It is silent and succeeds even if the baked binary has been deleted, and a unit test runs each command against a missing binary to prove it. `PreToolUse` is also registered **only** for the tools that ask the user something, which keeps any hook problem away from ordinary tools. `Stop` reads `"decision":"continue"` as "keep going" and anything else as "stop", so silence is neutral there too.
+So every command we install ends in `>/dev/null 2>&1 || true` (`hooks::silent_hook_command`). It is silent and succeeds even if the baked binary has been deleted, and a unit test runs each command against a missing binary to prove it. `PreToolUse` is also registered **only** for the tools that ask the user something and the tools that can raise agy's own permission prompt, which keeps any hook problem away from ordinary tools. `Stop` reads `"decision":"continue"` as "keep going" and anything else as "stop", so silence is neutral there too.
 
 | Antigravity event | verb | state |
 |---|---|---|
 | `PreInvocation` (before every model call) | `invocation` | `prompt` for the first call of a turn (`invocationNum` 0: a new turn clears a stale error), else `busy` |
 | `PreToolUse`, matcher `ask_question\|ask_permission\|ask_custom_permission` | `notification` | `needs_you`; the detail is the question text, or ``Permission requested: `<tool>` `` |
+| `PreToolUse`, matcher `run_command\|write_to_file\|replace_file_content\|multi_replace_file_content` | `gated` | `busy`, plus a `prompt_after` deadline; `needs_you` once it passes with no other hook (see below) |
 | `PostToolUse`, matcher `*` | `tool_done` | `tool_failed` when the payload's `error` is non-empty, else `tool_ok` |
 | `Stop` | `stop` | `idle`; a non-empty `error` becomes a surfaced `last_error` |
+
+**agy's own permission prompts (issue #208).** "Run this command?", "Allow creation of this file?" and "Accept this file edit?" fire no hook, and the tool's `PreToolUse` fires *before* the prompt, with nothing in the payload to say one is coming. So for the tools that can prompt, the `gated` hook records `busy` plus a `prompt_after` deadline on the status record (`status::pending_prompt`). For `run_command` the deadline is the payload's `WaitMsBeforeAsync` (default 5 s, capped at 60 s) plus 2 s. For a file write or edit it is 3 s. When agy *doesn't* prompt, another hook always lands before then. A short command ends with `PostToolUse`. A long one is moved to the background after `WaitMsBeforeAsync`, and agy calls the model again (`PreInvocation`); its `PostToolUse` only comes when it finally exits. A file write or edit finishes at once. The helper never carries `prompt_after` forward, so any later hook clears it. When the record is still unchanged at the deadline, the backend promotes it to `needs_you`, with the pending command (secrets masked, shortened) or ``Permission requested: `<tool>` `` as the detail (`status::promote_overdue`). The watcher sets a timer for that, and `sessions_status_list` also promotes, and saves, an overdue record the timer missed (e.g. the app wasn't running). Approving the prompt lets the tool finish, and its next hook returns the pill to *Working*. Declining it fires nothing, so the pill stays on *Needs you*, which is right: agy then asks what to do instead.
 
 The payload-dependent verbs are resolved in `status::normalize_verb`. The payload is camelCase: the tool is `toolCall.name` (not `tool_name`), the session id is `conversationId`, and `workspacePaths[0]` stands in for `cwd`.
 
 Known gaps, documented and not emulated:
 - **No session start or end.** A session shows no pill until its first prompt, and "ended" is never reported (teardown still clears the row).
-- **Native permission prompts fire no hook.** `PreToolUse(run_command)` fires *before* the "Run this command?" prompt, with nothing to say a prompt is coming. "Needs you" appears only for the explicit asking tools.
-- **Esc, or declining a permission prompt, fires nothing.** No `Stop` follows, so the pill stays *Working* until the next turn.
+- **"Needs you" for agy's own permission prompts is inferred, and late.** It appears only after the deadline above (as much as `WaitMsBeforeAsync` + 2 s after the prompt shows), and only for the gated tools. After approval, the pill keeps reading *Needs you* while the approved tool runs, until its next hook (the same gap Claude has).
+- **Esc fires nothing.** Interrupting a turn fires no `Stop`, so the pill keeps its last state (usually *Working*) until the next turn.
 - **`last_error` is rare.** `PostToolUse` reports `"error": ""` even for a shell command that exited non-zero (the tool itself ran), and a tool that errors outright (e.g. `view_file` on a missing file) fires no `PostToolUse` at all.
 - **No session name or color.** `agy` has neither a session-name flag nor `/color` (see `docs/theming.md`).
 - **Drafting doesn't report status.** mAIestro Code's headless `agy` drafting runs in its own folder, `~/.maiestro/antigravity-draft/`, never a worktree, so it loads none of a worktree's hooks.

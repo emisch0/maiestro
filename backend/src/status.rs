@@ -40,8 +40,23 @@ pub struct StatusRecord {
     /// visible long enough to be read. See `run_hook_cli`'s lifecycle rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<ToolError>,
+    /// An Antigravity tool that may be waiting on agy's own permission prompt,
+    /// which fires no hook (issue #208). Set by a `gated` hook; if no later hook
+    /// replaces the record by `deadline`, the backend promotes it to `needs_you`
+    /// ([`promote_overdue`]). Never carried forward, so any later hook clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_after: Option<PendingPrompt>,
     /// RFC-3339 timestamp of the transition.
     pub ts: String,
+}
+
+/// A possible pending permission prompt — see [`StatusRecord::prompt_after`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingPrompt {
+    /// RFC-3339 time after which the session reads as waiting on the user.
+    pub deadline: String,
+    /// The `needs_you` detail to show then (e.g. the command awaiting approval).
+    pub detail: String,
 }
 
 /// One failed tool call. Logged on every failure, but only shown in the popover
@@ -70,6 +85,22 @@ pub struct ToolError {
 /// Number of consecutive same-tool failures at which a still-pending error is
 /// promoted to prominent display (the second strike). Not user-configurable.
 const RETRY_SURFACE_THRESHOLD: u32 = 2;
+
+/// How long past `WaitMsBeforeAsync` an Antigravity `run_command` may go without
+/// another hook before it reads as waiting on its permission prompt. Without a
+/// prompt, the next hook lands by then: `PostToolUse` if the command finished,
+/// or the next `PreInvocation` once agy moves it to the background.
+const COMMAND_PROMPT_GRACE_MS: u64 = 2_000;
+
+/// `WaitMsBeforeAsync` when a `run_command` payload lacks it, and the cap on it,
+/// so a huge value can't hold back "needs you" for minutes.
+const DEFAULT_COMMAND_WAIT_MS: u64 = 5_000;
+const MAX_COMMAND_WAIT_MS: u64 = 60_000;
+
+/// How long an Antigravity file write/edit may go without another hook before
+/// it reads as waiting on its permission prompt. Unprompted, these finish (and
+/// fire `PostToolUse`) at once.
+const EDIT_PROMPT_GRACE_MS: u64 = 3_000;
 
 fn status_dir() -> PathBuf {
     crate::paths::maiestro_dir("status")
@@ -152,6 +183,8 @@ fn session_start_is_late(prior: Option<&StatusRecord>, payload: &serde_json::Val
 /// - `tool_done` (`PostToolUse`): `tool_failed` when it carries an `error`,
 ///   else `tool_ok`.
 /// - `stop` (`Stop`): `idle` (its `error` is surfaced by `run_hook_cli`).
+/// - `gated` (`PreToolUse` on a tool that may prompt) passes through: `busy`,
+///   plus a [`pending_prompt`] deadline set by `run_hook_cli`.
 ///
 /// Copilot's `sessionStart` passes `session_start`, which is `running` (when it
 /// isn't late — see [`session_start_is_late`]). Every other verb passes through
@@ -180,6 +213,9 @@ fn resolve_state(arg: &str, payload: &serde_json::Value) -> (String, Option<Stri
         "prompt" => ("busy".into(), None),
         // PreToolUse carries the tool name; UserPromptSubmit does not.
         "busy" => ("busy".into(), tool_name(payload)),
+        // Antigravity's PreToolUse on a tool that may raise its own permission
+        // prompt: working for now; `run_hook_cli` adds the `prompt_after` deadline.
+        "gated" => ("busy".into(), tool_name(payload)),
         // A failed tool call. Claude keeps working after it, so the *state* stays
         // `busy`; the failure itself rides on `last_error` (set in run_hook_cli).
         "tool_failed" => ("busy".into(), tool_name(payload)),
@@ -303,7 +339,9 @@ pub fn run_hook_cli(args: &[String]) {
     }
 
     let (state, detail) = resolve_state(state_arg, &payload);
-    let ts = chrono::Utc::now().to_rfc3339();
+    let now = chrono::Utc::now();
+    let ts = now.to_rfc3339();
+    let prompt_after = (state_arg == "gated").then(|| pending_prompt(&payload, now));
 
     // `last_error` lifecycle (see `next_last_error`). On a failure, hand the raw
     // tool+message to the decision fn (it computes the count and surfacing) and
@@ -343,10 +381,72 @@ pub fn run_hook_cli(args: &[String]) {
         cwd: payload["cwd"].as_str().or_else(|| payload["workspacePaths"][0].as_str()).map(str::to_string),
         detail,
         last_error,
+        prompt_after,
         ts,
     };
 
     let _ = write_record_atomic(&record);
+}
+
+/// The deadline and detail for an Antigravity `gated` hook (issue #208). agy's
+/// own permission prompt fires no hook, and its `PreToolUse` fires *before* the
+/// prompt, with nothing in the payload to say one is coming. So we wait: a
+/// `run_command` gets its `WaitMsBeforeAsync` (after which agy backgrounds an
+/// unprompted command and calls the model again) plus a grace; a file write or
+/// edit, which is instant when unprompted, gets a short grace.
+fn pending_prompt(payload: &serde_json::Value, now: chrono::DateTime<chrono::Utc>) -> PendingPrompt {
+    let tool = tool_name(payload).unwrap_or_else(|| "tool".into());
+    let args = &payload["toolCall"]["args"];
+    let command = args["CommandLine"].as_str().map(str::trim).filter(|c| !c.is_empty());
+    let (wait_ms, detail) = if tool == "run_command" {
+        let wait = args["WaitMsBeforeAsync"].as_u64().unwrap_or(DEFAULT_COMMAND_WAIT_MS).min(MAX_COMMAND_WAIT_MS);
+        let detail = match command {
+            Some(cmd) => format!("Run this command? `{}`", shorten(&redact_secrets(cmd), 120)),
+            None => "Run this command?".to_string(),
+        };
+        (wait + COMMAND_PROMPT_GRACE_MS, detail)
+    } else {
+        (EDIT_PROMPT_GRACE_MS, format!("Permission requested: `{tool}`"))
+    };
+    let deadline = now + chrono::Duration::milliseconds(wait_ms as i64);
+    PendingPrompt { deadline: deadline.to_rfc3339(), detail }
+}
+
+/// `s` cut to at most `max` characters, with an ellipsis when cut.
+fn shorten(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// `record` promoted to `needs_you` if its [`PendingPrompt`] deadline has passed
+/// by `now`, else `None`. A deadline that doesn't parse is treated as passed, so
+/// a damaged record can't stay pending forever. Pure, so the rule is testable.
+fn promote_overdue(record: &StatusRecord, now: chrono::DateTime<chrono::Utc>) -> Option<StatusRecord> {
+    let pending = record.prompt_after.as_ref()?;
+    let due = chrono::DateTime::parse_from_rfc3339(&pending.deadline).map_or(true, |d| now >= d);
+    due.then(|| StatusRecord {
+        state: "needs_you".into(),
+        detail: Some(pending.detail.clone()),
+        prompt_after: None,
+        ts: now.to_rfc3339(),
+        ..record.clone()
+    })
+}
+
+/// Promote `ws`'s record to `needs_you` if it is still the one written at `ts`
+/// (no later hook replaced it) and its deadline has passed. The watcher calls
+/// this when a `prompt_after` deadline comes due; the rewrite re-emits through
+/// the watcher. The read-then-write can, in a very narrow window, overwrite a
+/// hook landing at the same instant, which the next hook then corrects.
+fn promote_if_unchanged(ws: &str, ts: &str) {
+    let Some(record) = read_record(ws).filter(|r| r.ts == ts) else { return };
+    if let Some(promoted) = promote_overdue(&record, chrono::Utc::now()) {
+        let _ = write_record_atomic(&promoted);
+    }
 }
 
 /// The `last_error` for an Antigravity `Stop` that carried an `error`, or a
@@ -492,6 +592,7 @@ pub fn write_creating(ws: &str) {
         cwd: None,
         detail: None,
         last_error: None,
+        prompt_after: None,
         ts: chrono::Utc::now().to_rfc3339(),
     });
 }
@@ -526,16 +627,29 @@ pub fn write_spawn_error(ws: &str, message: &str) {
             count: 1,
             surfaced: true,
         }),
+        prompt_after: None,
         ts,
     });
 }
 
 /// Snapshot of every tracked session's status — read by the popover on open so
 /// it shows correct state even if it missed live events while hidden/reloaded.
+/// A pending-prompt deadline that passed unwatched (e.g. the app wasn't running)
+/// is promoted here, and persisted, so the row still reads `needs_you`.
 #[tauri::command]
 pub fn sessions_status_list() -> Vec<StatusRecord> {
     crate::log_invoke_debug!("sessions_status_list");
+    let now = chrono::Utc::now();
     load_all()
+        .into_iter()
+        .map(|record| match promote_overdue(&record, now) {
+            Some(promoted) => {
+                let _ = write_record_atomic(&promoted);
+                promoted
+            }
+            None => record,
+        })
+        .collect()
 }
 
 /// Clear a session's `last_error` (the dismissible failed-tool block in the
@@ -643,6 +757,9 @@ pub fn start_watcher(app: tauri::AppHandle) -> notify::Result<notify::Recommende
             match std::fs::read_to_string(path) {
                 Ok(data) => {
                     if let Ok(record) = serde_json::from_str::<StatusRecord>(&data) {
+                        if let Some(pending) = &record.prompt_after {
+                            schedule_promotion(&record.workspace, &record.ts, &pending.deadline);
+                        }
                         let _ = app.emit("session-status", &record);
                     }
                 }
@@ -654,6 +771,7 @@ pub fn start_watcher(app: tauri::AppHandle) -> notify::Result<notify::Recommende
                         cwd: None,
                         detail: None,
                         last_error: None,
+                        prompt_after: None,
                         ts: chrono::Utc::now().to_rfc3339(),
                     };
                     let _ = app.emit("session-status", &record);
@@ -664,6 +782,21 @@ pub fn start_watcher(app: tauri::AppHandle) -> notify::Result<notify::Recommende
 
     watcher.watch(&dir, RecursiveMode::NonRecursive)?;
     Ok(watcher)
+}
+
+/// When a `prompt_after` deadline comes due, promote the record if no later hook
+/// replaced it ([`promote_if_unchanged`]). FSEvents may report one write more
+/// than once; the extra timers find the record already changed and do nothing.
+fn schedule_promotion(ws: &str, ts: &str, deadline: &str) {
+    let delay = chrono::DateTime::parse_from_rfc3339(deadline)
+        .ok()
+        .and_then(|d| (d.with_timezone(&chrono::Utc) - chrono::Utc::now()).to_std().ok())
+        .unwrap_or_default();
+    let (ws, ts) = (ws.to_string(), ts.to_string());
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(delay).await;
+        promote_if_unchanged(&ws, &ts);
+    });
 }
 
 #[cfg(test)]
@@ -844,6 +977,7 @@ mod tests {
             cwd: None,
             detail: None,
             last_error: None,
+            prompt_after: None,
             ts: "t".into(),
         }
     }
@@ -938,6 +1072,96 @@ mod tests {
         assert!(cleared.last_error.is_none(), "new turn clears the error");
     }
 
+    fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&chrono::Utc)
+    }
+
+    /// A gated `run_command` waits its `WaitMsBeforeAsync` plus the grace (default
+    /// when missing, capped when huge) and names the command; a file write or
+    /// edit gets the short grace and names the tool.
+    #[test]
+    fn pending_prompt_deadlines_and_details() {
+        use serde_json::json;
+        let now = at("2026-10-02T12:00:00Z");
+        let cmd = |args: serde_json::Value| json!({ "toolCall": { "name": "run_command", "args": args } });
+
+        let p = pending_prompt(&cmd(json!({ "CommandLine": "curl -s https://example.com", "WaitMsBeforeAsync": 1000 })), now);
+        assert_eq!(at(&p.deadline), at("2026-10-02T12:00:03Z"));
+        assert_eq!(p.detail, "Run this command? `curl -s https://example.com`");
+
+        let p = pending_prompt(&cmd(json!({ "CommandLine": "ls" })), now);
+        assert_eq!(at(&p.deadline), at("2026-10-02T12:00:07Z"), "default wait");
+        let p = pending_prompt(&cmd(json!({ "CommandLine": "ls", "WaitMsBeforeAsync": 600000 })), now);
+        assert_eq!(at(&p.deadline), at("2026-10-02T12:01:02Z"), "capped wait");
+        assert_eq!(pending_prompt(&cmd(json!({})), now).detail, "Run this command?");
+
+        // Credentials are masked and a long command is shortened.
+        let p = pending_prompt(&cmd(json!({ "CommandLine": "git push https://me:tok@github.com/o/r" })), now);
+        assert_eq!(p.detail, "Run this command? `git push https://***@github.com/o/r`");
+        let long = "x".repeat(300);
+        let p = pending_prompt(&cmd(json!({ "CommandLine": long })), now);
+        assert_eq!(p.detail, format!("Run this command? `{}…`", "x".repeat(119)));
+
+        let edit = json!({ "toolCall": { "name": "write_to_file", "args": { "TargetFile": "/w/a.txt" } } });
+        let p = pending_prompt(&edit, now);
+        assert_eq!(at(&p.deadline), at("2026-10-02T12:00:03Z"));
+        assert_eq!(p.detail, "Permission requested: `write_to_file`");
+    }
+
+    /// Only a record with a passed (or unreadable) deadline is promoted, to
+    /// `needs_you` with the pending detail and the deadline cleared.
+    #[test]
+    fn promote_overdue_rule() {
+        let now = at("2026-10-02T12:00:05Z");
+        let mut r = record("208-x", "busy");
+        assert!(promote_overdue(&r, now).is_none(), "nothing pending");
+
+        r.prompt_after = Some(PendingPrompt { deadline: "2026-10-02T12:00:06Z".into(), detail: "Run this command? `ls`".into() });
+        assert!(promote_overdue(&r, now).is_none(), "not due yet");
+
+        r.prompt_after.as_mut().unwrap().deadline = "2026-10-02T12:00:05Z".into();
+        let p = promote_overdue(&r, now).expect("due");
+        assert_eq!(p.state, "needs_you");
+        assert_eq!(p.detail.as_deref(), Some("Run this command? `ls`"));
+        assert!(p.prompt_after.is_none());
+        assert_eq!(p.workspace, "208-x");
+
+        r.prompt_after.as_mut().unwrap().deadline = "garbage".into();
+        assert!(promote_overdue(&r, now).is_some(), "an unreadable deadline counts as passed");
+    }
+
+    /// End to end on disk: a `gated` hook records a deadline, the next hook
+    /// clears it, a stale promotion is a no-op, and an overdue record is
+    /// promoted (and persisted) when the popover lists statuses.
+    #[test]
+    fn gated_hook_lifecycle_on_disk() {
+        let _home = TempHome::new();
+        run_hook_cli(&["gated".into(), "--workspace".into(), "208-x".into()]);
+        let gated = read_record("208-x").expect("record after gated");
+        assert_eq!(gated.state, "busy");
+        assert!(gated.prompt_after.is_some(), "gated sets a deadline");
+
+        run_hook_cli(&["tool_done".into(), "--workspace".into(), "208-x".into()]);
+        let after = read_record("208-x").expect("record after tool_done");
+        assert!(after.prompt_after.is_none(), "a later hook clears the deadline");
+
+        // A timer armed for the gated record finds it replaced and does nothing.
+        promote_if_unchanged("208-x", &gated.ts);
+        assert_eq!(read_record("208-x").unwrap().state, "busy");
+
+        let mut overdue = record("208-x", "busy");
+        overdue.prompt_after = Some(PendingPrompt { deadline: "2020-01-01T00:00:00Z".into(), detail: "Run this command? `ls`".into() });
+        write_record_atomic(&overdue).unwrap();
+        let listed = sessions_status_list();
+        assert_eq!(listed[0].state, "needs_you");
+        assert_eq!(read_record("208-x").unwrap().state, "needs_you", "promotion is persisted");
+
+        // promote_if_unchanged promotes a record still carrying its due deadline.
+        write_record_atomic(&overdue).unwrap();
+        promote_if_unchanged("208-x", "t");
+        assert_eq!(read_record("208-x").unwrap().state, "needs_you");
+    }
+
     /// Antigravity's payload-dependent verbs: the first model call of a turn is a
     /// fresh prompt and later ones are busy; a PostToolUse is ok unless it
     /// carries an error; Stop is idle. Other verbs pass through.
@@ -951,6 +1175,7 @@ mod tests {
         assert_eq!(normalize_verb("tool_done", &json!({ "error": "exit status 1" })), "tool_failed");
         assert_eq!(normalize_verb("stop", &json!({ "error": "" })), "idle");
         assert_eq!(normalize_verb("busy", &json!({})), "busy");
+        assert_eq!(normalize_verb("gated", &json!({})), "gated");
     }
 
     /// Antigravity's camelCase payload: the tool name comes from `toolCall.name`,
@@ -964,6 +1189,8 @@ mod tests {
         assert_eq!(extract_error_message(&post), "exit status 1");
         let ask = json!({ "toolCall": { "name": "ask_question", "args": { "questions": [{ "question": "Red or blue?", "options": ["Red", "Blue"] }] } } });
         assert_eq!(resolve_state("notification", &ask), ("needs_you".into(), Some("Red or blue?".into())));
+        let gated = json!({ "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } } });
+        assert_eq!(resolve_state("gated", &gated), ("busy".into(), Some("run_command".into())));
         let perm = json!({ "toolCall": { "name": "ask_permission", "args": {} } });
         assert_eq!(resolve_state("notification", &perm), ("needs_you".into(), Some("Permission requested: `ask_permission`".into())));
     }
