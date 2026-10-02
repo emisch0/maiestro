@@ -1,6 +1,6 @@
 # Provider quotas
 
-The popover shows a **quota strip** along its bottom edge, right-aligned: one chip per agent account behind the work items currently on screen, with a vertical rule between chips. Each chip has a small meter per rate-limit window, e.g. Claude `5h 42% · 7d 18%`, Codex `30d 5%`, Copilot `premium 75%` or `plan 7%`. The tooltip carries the plan, each window's reset time and how old the reading is. A meter's color is a forecast rather than a fixed threshold (`quotaLevel` in `QuotaStrip.tsx`):
+The popover shows a **quota strip** along its bottom edge, right-aligned: one chip per agent account behind the repos and work items currently on screen, with a vertical rule between chips. Each chip has a small meter per rate-limit window, e.g. Claude `5h 42% · 7d 18%`, Codex `30d 5%`, Copilot `premium 75%` or `plan 7%`. The chip's tooltip carries the plan, each window's reset time and how old the reading is. Hovering a chip shows it after about a second (`HOVER_DELAY_MS`); clicking shows it at once and keeps it open until a second click, a click elsewhere, Escape or the popover hiding. It is our own tooltip rather than a native `title`, since a webview can't open a native one on demand, and a single tooltip serves both, so the two never stack. It opens centered just above the cursor (where it was when the tooltip appeared), kept inside the window, and updates while open. A meter's color is a forecast rather than a fixed threshold (`quotaLevel` in `QuotaStrip.tsx`):
 
 - Under 50 % used, it is green.
 - At 100 % or more, it is red: the window is exhausted.
@@ -14,7 +14,7 @@ The backend lives in `backend/src/quota.rs`; the strip in `frontend/src/componen
 ## Rules
 
 - **Per account, not per session.** Every launched session runs under the user's ambient agent login, so an agent appears once however many sessions use it. Copilot is read with each repo identity's own GitHub token, so it shows one chip per distinct GitHub login.
-- **Visible items only.** The popover passes the agent and repo of each visible work item (`provider_quotas_list(targets)`), following the same hidden/snoozed filtering as the list. An agent is read only when a target uses it, so a Claude-only machine never runs `codex` and never calls GitHub for Copilot.
+- **Visible repos and items.** The popover passes `provider_quotas_list(targets)` an agent + repo pair for each visible work item (its recorded agent) and for each visible repo (its effective agent: its own `agent`, else the global default from `app_agent_get`), following the same hidden/snoozed filtering as the list. So a repo shows its agent's chip even before it has any work items. An agent is read only when a target uses it, so a machine whose repos all resolve to Claude never runs `codex` and never calls GitHub for Copilot.
 - **Read-only and soft-fail.** An agent with no source, or whose read fails, has no chip. Failures log at `warn`; nothing errors in the UI or blocks a spawn.
 - **Antigravity is not read.** Its only source is an internal quota endpoint that is known to report wrong numbers, and `agy /usage` is interactive only.
 
@@ -58,7 +58,7 @@ Every running Codex session already logs its rate limits, so reading the newest 
 
 ## Refresh
 
-The popover fetches on mount, on `popover-shown`, whenever the set of visible agent/repo pairs changes, and every 60 s while it is open. Claude readings also arrive live through `provider-quota`.
+The popover fetches on mount, on `popover-shown`, whenever the set of visible agent/repo pairs changes (including pinning a repo's agent from its menu), and every 60 s while it is open. Claude readings also arrive live through `provider-quota`.
 
 ## Gaps
 

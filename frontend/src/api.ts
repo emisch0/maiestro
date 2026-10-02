@@ -403,6 +403,14 @@ export const api = {
   setRepoVisibility: (repo: string, hidden: HideState | null) =>
     invoke<void>("repo_set_visibility", { repo, hidden }),
 
+  /** Pin a repo's agent (the popover's repo-menu switcher, #214). */
+  repoSetAgent: (repo: string, agent: Agent) =>
+    invoke<void>("repo_set_agent", { repo, agent }),
+
+  /** The resolved global default agent, for repos whose own `agent` is `null`. */
+  appAgentGet: () =>
+    invoke<Agent>("app_agent_get"),
+
   /** Untrack a repo (delete its settings file). Worktrees and sessions are kept. */
   removeRepo: (repo: string) =>
     invoke<void>("repo_remove", { repo }),

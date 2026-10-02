@@ -276,6 +276,19 @@ export function Settings() {
       .catch((e) => setRepoLoadError(String(e)));
   }, [selectedRepo]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // The popover's repo menu can pin a repo's agent while this window is open
+  // (#214). Re-read that repo, re-seeding the autosave baseline, so the form
+  // shows the new agent and can't autosave the stale one back over it.
+  useTauriListen<string>("repo-settings-changed", (repo) => {
+    if (repo !== selectedRepo) return;
+    api.getRepoSettings(repo)
+      .then((s) => {
+        repoAutosave.seed(s);
+        setLoadedRepo((cur) => (cur?.repo === repo ? { repo, settings: s } : cur));
+      })
+      .catch((e) => setRepoLoadError(String(e)));
+  });
+
   // Extra data the custom renderers (identity select, env-files Scan) read via
   // JsonForms' `config`. Memoized so the form isn't needlessly re-keyed.
   // The global agent a repo with no `agent` of its own falls back to; the repo

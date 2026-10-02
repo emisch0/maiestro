@@ -11,6 +11,7 @@ import {
   ZONES,
 } from "./lib/lifecycle";
 import { effectiveHidden, formatSnoozeRemaining, HideTarget } from "./lib/snooze";
+import { AGENT_NAMES } from "./lib/agents";
 import { filterIssues } from "./lib/issues";
 import { useTauriListen } from "./hooks/useTauriListen";
 import { ResizeGrips } from "./components/ResizeGrips";
@@ -22,6 +23,7 @@ import { HideCommandButton, SnoozeLabel } from "./components/HideControls";
 import { RemoveConfirm } from "./components/RemoveConfirm";
 import { HideSnoozeDialog } from "./components/HideSnoozeDialog";
 import { AgentSwitchDialog } from "./components/AgentSwitchDialog";
+import { RepoAgentDialog } from "./components/RepoAgentDialog";
 import { CodexHooksDialog } from "./components/CodexHooksDialog";
 import { AgentPrompt, SessionRow, TeardownPrompt, PrCreateState, PrMergeState } from "./components/SessionRow";
 import { PickerOverlay, Picker, Preview, Expand } from "./components/PickerOverlay";
@@ -109,6 +111,13 @@ export function MainView() {
   const [removeConfirm, setRemoveConfirm] = useState<string | null>(null);
   // Per-repo removal failure message, keyed by repo full_name.
   const [removeErr, setRemoveErr] = useState<Record<string, string>>({});
+  // The repo whose "Agentic Coding CLI…" picker is open (#214), and a failed
+  // pin per repo.
+  const [repoAgentTarget, setRepoAgentTarget] = useState<string | null>(null);
+  const [repoAgentErr, setRepoAgentErr] = useState<Record<string, string>>({});
+  // The resolved global default agent, for repos whose own `agent` is `null`.
+  // `null` until the first read lands; such repos are left out until then.
+  const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
 
   const refreshSessions = useCallback(() => {
     api.sessionsList().then((list) => {
@@ -156,21 +165,33 @@ export function MainView() {
     api.appSettingsProblem().then(setSettingsProblem).catch(() => {});
   }, []);
 
-  // Subscription quota per agent account (#205), for the agents of the work
-  // items on screen. `quotaTargets` is a stable string of the visible items'
+  // Subscription quota per agent account (#205), for the agents the repos and
+  // work items on screen use (#214): each visible item's recorded agent, and
+  // each visible repo's effective agent (its own, else the global default),
+  // even with no items yet. `quotaTargets` is a stable string of those
   // agent+repo pairs, so a re-render doesn't refetch; hiding, removing or
-  // switching an item changes it.
+  // switching a repo or item changes it.
   const [quotas, setQuotas] = useState<ProviderQuota[]>([]);
   const quotaTargets = useMemo(() => {
     const now = Date.now();
     const pairs = new Set<string>();
+    const tracked = new Set(repos);
+    for (const repo of repos) {
+      const settings = repoSettings[repo];
+      // Settings not loaded yet: don't guess the repo's agent.
+      if (!settings || (!showHidden && effectiveHidden(settings.hidden, now))) continue;
+      const agent = settings.agent ?? defaultAgent;
+      if (agent) pairs.add(`${agent}|${repo}`);
+    }
     for (const s of sessions) {
+      // Sessions of an untracked repo don't render, so they don't count.
+      if (!tracked.has(s.repo)) continue;
       const repoHidden = effectiveHidden(repoSettings[s.repo]?.hidden ?? null, now);
       if (!showHidden && (repoHidden || effectiveHidden(s.hidden, now))) continue;
       pairs.add(`${s.agent}|${s.repo}`);
     }
     return [...pairs].sort().join("\n");
-  }, [sessions, repoSettings, showHidden]);
+  }, [repos, sessions, repoSettings, showHidden, defaultAgent]);
   const quotaTargetsRef = useRef(quotaTargets);
   quotaTargetsRef.current = quotaTargets;
   const refreshQuotas = useCallback(() => {
@@ -213,6 +234,7 @@ export function MainView() {
           .catch(() => {});
       }
     }).catch(() => {});
+    api.appAgentGet().then(setDefaultAgent).catch(() => {});
     refreshSessions();
     refreshStatuses();
     refreshUpdate();
@@ -640,6 +662,21 @@ export function MainView() {
 
   // Untrack a repo (delete its settings file). Worktrees and session records
   // stay on disk; the repo and its work items just drop out of the dashboard.
+  // Pin a repo's agent from its menu (#214). Updating the local settings
+  // re-targets the quota strip at once; a failure (e.g. an unreadable settings
+  // file) shows under the repo.
+  async function setRepoAgent(repo: string, agent: Agent) {
+    setRepoAgentTarget(null);
+    setRepoMenuOpen(null);
+    setRepoAgentErr((e) => { const { [repo]: _, ...rest } = e; return rest; });
+    try {
+      await api.repoSetAgent(repo, agent);
+      setRepoSettings((prev) => (prev[repo] ? { ...prev, [repo]: { ...prev[repo], agent } } : prev));
+    } catch (e) {
+      setRepoAgentErr((m) => ({ ...m, [repo]: String(e) }));
+    }
+  }
+
   async function removeRepo(repo: string) {
     setRemoveConfirm(null);
     setRemoveErr((e) => { const { [repo]: _, ...rest } = e; return rest; });
@@ -793,6 +830,7 @@ export function MainView() {
               ? formatSnoozeRemaining(repoHide.snooze_until, now)
               : "";
             const repoMenu = repoMenuOpen === repo;
+            const repoAgent = repoSettings[repo] ? repoSettings[repo].agent ?? defaultAgent : null;
             const visibleSessions = showHidden
               ? repoSessions
               : repoSessions.filter((s) => !effectiveHidden(s.hidden, now));
@@ -836,6 +874,14 @@ export function MainView() {
                   </button>
                 </div>
                 <div className={`command-strip ${repoMenu ? "command-strip--open" : ""}`}>
+                  <button
+                    className="command-btn"
+                    disabled={!repoAgent}
+                    onClick={() => setRepoAgentTarget(repo)}
+                    title={repoAgent ? `Choose this repo's agentic coding CLI (now ${AGENT_NAMES[repoAgent]})` : undefined}
+                  >
+                    Agentic Coding CLI…
+                  </button>
                   <HideCommandButton
                     hidden={repoHidden}
                     onHide={() => { setRepoMenuOpen(null); setHideTarget({ kind: "repo", repo }); }}
@@ -851,6 +897,13 @@ export function MainView() {
                     body="Worktrees, cloned repos, and any work in them are kept on disk."
                     onRemove={() => removeRepo(repo)}
                     onCancel={() => setRemoveConfirm(null)}
+                  />
+                )}
+                {repoAgentErr[repo] && (
+                  <DismissibleError
+                    lead="Couldn't change the agentic coding CLI"
+                    message={repoAgentErr[repo]}
+                    onDismiss={() => setRepoAgentErr((e) => { const { [repo]: _, ...rest } = e; return rest; })}
                   />
                 )}
                 {removeErr[repo] && (
@@ -990,6 +1043,19 @@ export function MainView() {
           onClose={() => setAgentTarget(null)}
         />
       )}
+      {repoAgentTarget && (() => {
+        const settings = repoSettings[repoAgentTarget];
+        const current = settings?.agent ?? defaultAgent;
+        return current && (
+          <RepoAgentDialog
+            repo={repoAgentTarget}
+            current={current}
+            pinned={settings?.agent != null}
+            onConfirm={(agent) => setRepoAgent(repoAgentTarget, agent)}
+            onClose={() => setRepoAgentTarget(null)}
+          />
+        );
+      })()}
       {hideTarget && (
         <HideSnoozeDialog
           title={hideTarget.kind === "repo" ? hideTarget.repo : hideTarget.session.session_title}
