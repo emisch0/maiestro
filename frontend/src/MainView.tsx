@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, Agent, AvailableUpdate, SettingsProblem, DraftPreviewOutcome, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
+import { api, Agent, AvailableUpdate, ProviderQuota, SettingsProblem, DraftPreviewOutcome, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
 import {
   ActiveSessions,
   furtherPhase,
@@ -16,6 +16,7 @@ import { useTauriListen } from "./hooks/useTauriListen";
 import { ResizeGrips } from "./components/ResizeGrips";
 import { DismissibleError } from "./components/DismissibleError";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { QuotaStrip, quotaKey } from "./components/QuotaStrip";
 import { SettingsProblemBanner } from "./components/SettingsProblemBanner";
 import { HideCommandButton, SnoozeLabel } from "./components/HideControls";
 import { RemoveConfirm } from "./components/RemoveConfirm";
@@ -155,6 +156,52 @@ export function MainView() {
     api.appSettingsProblem().then(setSettingsProblem).catch(() => {});
   }, []);
 
+  // Subscription quota per agent account (#205), for the agents of the work
+  // items on screen. `quotaTargets` is a stable string of the visible items'
+  // agent+repo pairs, so a re-render doesn't refetch; hiding, removing or
+  // switching an item changes it.
+  const [quotas, setQuotas] = useState<ProviderQuota[]>([]);
+  const quotaTargets = useMemo(() => {
+    const now = Date.now();
+    const pairs = new Set<string>();
+    for (const s of sessions) {
+      const repoHidden = effectiveHidden(repoSettings[s.repo]?.hidden ?? null, now);
+      if (!showHidden && (repoHidden || effectiveHidden(s.hidden, now))) continue;
+      pairs.add(`${s.agent}|${s.repo}`);
+    }
+    return [...pairs].sort().join("\n");
+  }, [sessions, repoSettings, showHidden]);
+  const quotaTargetsRef = useRef(quotaTargets);
+  quotaTargetsRef.current = quotaTargets;
+  const refreshQuotas = useCallback(() => {
+    const key = quotaTargetsRef.current;
+    const targets = key ? key.split("\n").map((p) => {
+      const [agent, repo] = p.split("|");
+      return { agent: agent as Agent, repo };
+    }) : [];
+    if (targets.length === 0) { setQuotas([]); return; }
+    api.providerQuotasList(targets).then((list) => {
+      // Drop a reply that a newer set of visible items has overtaken.
+      if (quotaTargetsRef.current === key) setQuotas(list);
+    }).catch(() => {});
+  }, []);
+  useEffect(() => { refreshQuotas(); }, [quotaTargets, refreshQuotas]);
+  // Re-read every minute while the popover is open (the backend caches the
+  // Codex and Copilot reads, so this stays cheap).
+  useEffect(() => {
+    if (!popoverOpen) return;
+    const id = setInterval(refreshQuotas, 60_000);
+    return () => clearInterval(id);
+  }, [popoverOpen, refreshQuotas]);
+  // Claude's quota arrives live as its sessions redraw their status lines.
+  useTauriListen<ProviderQuota>("provider-quota", (q) => {
+    if (!quotaTargetsRef.current.split("\n").some((p) => p.startsWith(`${q.agent}|`))) return;
+    setQuotas((prev) => {
+      const rest = prev.filter((p) => quotaKey(p) !== quotaKey(q));
+      return [...rest, q].sort((a, b) => quotaKey(a).localeCompare(quotaKey(b)));
+    });
+  });
+
   const refreshAll = useCallback(() => {
     api.listRepos().then((list) => {
       setRepos(list);
@@ -170,7 +217,8 @@ export function MainView() {
     refreshStatuses();
     refreshUpdate();
     refreshSettingsProblem();
-  }, [refreshSessions, refreshStatuses, refreshUpdate, refreshSettingsProblem]);
+    refreshQuotas();
+  }, [refreshSessions, refreshStatuses, refreshUpdate, refreshSettingsProblem, refreshQuotas]);
 
   useEffect(() => {
     refreshAll();
@@ -883,6 +931,7 @@ export function MainView() {
           })
         )}
       </div>
+      <QuotaStrip quotas={quotas} now={now} />
 
       {picker && (() => {
         // Issues in this repo that already have a session, keyed by issue number,

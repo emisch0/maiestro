@@ -2864,3 +2864,68 @@ body {
   line-height: 1.5;
   color: var(--text);
 }
+
+/* Subscription-quota strip along the popover's bottom edge (#205),
+   right-aligned: one chip per agent account, each window a label, a thin
+   meter and a percentage, with a divider between chips. Wraps rather than
+   scrolls at the popover's minimum width. */
+.quota-strip {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px 0;
+  flex-shrink: 0;
+  padding: 6px 12px 6px 20px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.quota-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.quota-chip + .quota-chip {
+  margin-left: 12px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+}
+
+.quota-chip-mark {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--text);
+}
+
+.quota-window {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-meter {
+  position: relative;
+  width: 28px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-hover);
+  overflow: hidden;
+}
+
+.quota-meter-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 2px;
+  background: var(--green);
+}
+
+.quota-window--warn .quota-meter-fill { background: var(--accent); }
+.quota-window--warn .quota-window-value { color: var(--accent); }
+.quota-window--high .quota-meter-fill { background: var(--red); }
+.quota-window--high .quota-window-value { color: var(--red); }

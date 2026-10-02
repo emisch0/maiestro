@@ -21,6 +21,7 @@ mod plugin;
 mod plugins;
 mod pr;
 mod prompts;
+mod quota;
 mod repo_context;
 mod repo_settings;
 mod schema;
@@ -429,6 +430,13 @@ fn main() {
         status::run_hook_cli(&args[2..]);
         return;
     }
+    // Likewise `maiestro statusline --workspace <ws-id>`, a Claude worktree's
+    // status line: records the session's quota, then runs the user's own status
+    // line (quota.rs, issue #205).
+    if args.get(1).map(String::as_str) == Some("statusline") {
+        quota::run_statusline_cli();
+        return;
+    }
 
     logging::init();
     tracing::info!("mAIestro Code starting");
@@ -517,6 +525,7 @@ fn main() {
             about::app_version,
             update_check::update_check_status,
             update_check::update_dismiss,
+            quota::provider_quotas_list,
         ])
         .setup(|app| {
             // Menu-bar-only: no dock icon on macOS.
@@ -559,6 +568,14 @@ fn main() {
                     app.manage(Mutex::new(watcher));
                 }
                 Err(e) => tracing::error!(error = %e, "status watcher failed to start"),
+            }
+            // Live Claude quota: the status-line helper records it under
+            // ~/.maiestro/quota/; forward each reading as `provider-quota` (#205).
+            match quota::start_watcher(app.handle().clone()) {
+                Ok(watcher) => {
+                    app.manage(watcher);
+                }
+                Err(e) => tracing::warn!(error = %e, "quota watcher failed to start"),
             }
 
             // Background "newer release available?" poll (issue #182): seeds

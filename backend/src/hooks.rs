@@ -109,6 +109,7 @@ fn write_claude_hooks(work_dir: &Path, ws_id: &str, bin: &Path) -> Result<(), St
         .filter(|v: &serde_json::Value| v.is_object())
         .unwrap_or_else(|| serde_json::json!({}));
     let root = merge_hooks(root, bin, ws_id);
+    let root = merge_statusline(root, bin, ws_id, || user_statusline_padding(work_dir));
 
     std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap() + "\n").map_err(|e| e.to_string())
 }
@@ -211,8 +212,11 @@ fn merge_hooks(mut root: serde_json::Value, bin: &Path, ws_id: &str) -> serde_js
 ///   this only re-points the wrapper at the running binary ([`ensure_hook_wrapper`]).
 /// - Claude: no-op if the worktree or its `.claude/settings.local.json` is gone,
 ///   or if the file carries none of our hooks (we never inject into a worktree
-///   that didn't already have them). Writes only when the resulting JSON
-///   actually changed, so it doesn't churn the file on every launch.
+///   that didn't already have them). Where our hooks are, it also adds our
+///   quota status line if the file has no `statusLine` yet (so worktrees
+///   spawned before issue #205 pick it up) — the one thing reconcile adds
+///   rather than re-points. Writes only when the resulting JSON actually
+///   changed, so it doesn't churn the file on every launch.
 /// - Antigravity: the same rules for our group in `.agents/hooks.json`, plus
 ///   re-adding its `.gitignore` line if it went missing (which records a notice
 ///   on the session).
@@ -261,11 +265,65 @@ fn reconcile_claude_hooks(work_dir: &Path, ws_id: &str, bin: &Path) -> bool {
     if !root.is_object() || !has_maiestro_hooks(&root, ws_id) {
         return false;
     }
-    let updated = serde_json::to_string_pretty(&merge_hooks(root, bin, ws_id)).unwrap() + "\n";
+    let root = merge_hooks(root, bin, ws_id);
+    let root = merge_statusline(root, bin, ws_id, || user_statusline_padding(work_dir));
+    let updated = serde_json::to_string_pretty(&root).unwrap() + "\n";
     if updated == existing {
         return false;
     }
     std::fs::write(&path, updated).is_ok()
+}
+
+// ── Claude: the quota-reading status line ───────────────────────────────────────
+
+/// The status-line command for `ws_id`: this binary's hidden `statusline`
+/// subcommand, which records the session's `rate_limits` as the Claude quota
+/// and then runs the status line the user would otherwise see (see
+/// `crate::quota::run_statusline_cli`).
+fn statusline_command(bin: &Path, ws_id: &str) -> String {
+    format!("{} statusline --workspace {}", shell_quote(&bin.to_string_lossy()), shell_quote(ws_id))
+}
+
+/// True when a `statusLine` setting is ours for `ws_id` — matched like the
+/// hooks, by the trailing `--workspace '<ws-id>'`.
+fn is_our_statusline(status_line: &serde_json::Value, ws_id: &str) -> bool {
+    status_line["command"]
+        .as_str()
+        .is_some_and(|c| c.contains(" statusline ") && c.contains(&format!("--workspace {}", shell_quote(ws_id))))
+}
+
+/// Set our `statusLine` in a parsed `settings.local.json` root, pointing at
+/// `bin` — unless the file already has a `statusLine` that isn't ours, which is
+/// the user's and is never replaced (that worktree then shows no Claude quota).
+/// Re-pointing ours keeps its other fields; a new one copies the `padding` of
+/// the status line it chains to (`padding`, called only then).
+fn merge_statusline(
+    mut root: serde_json::Value,
+    bin: &Path,
+    ws_id: &str,
+    padding: impl FnOnce() -> Option<serde_json::Value>,
+) -> serde_json::Value {
+    let existing = root.get("statusLine").cloned();
+    let mut entry = match existing {
+        Some(sl) if is_our_statusline(&sl, ws_id) => sl,
+        Some(_) => return root,
+        None => {
+            let mut sl = serde_json::json!({ "type": "command" });
+            if let Some(p) = padding() {
+                sl["padding"] = p;
+            }
+            sl
+        }
+    };
+    entry["command"] = serde_json::Value::String(statusline_command(bin, ws_id));
+    root["statusLine"] = entry;
+    root
+}
+
+/// The `padding` of the user's own status line for this worktree (project
+/// settings, then user settings), if they set one.
+fn user_statusline_padding(work_dir: &Path) -> Option<serde_json::Value> {
+    crate::quota::user_statusline(work_dir).and_then(|sl| sl.get("padding").cloned())
 }
 
 /// Remove mAIestro Code's Claude status hooks for `ws_id` from the worktree's
@@ -312,6 +370,9 @@ fn strip_hooks(mut root: serde_json::Value, ws_id: &str) -> serde_json::Value {
         }
     }
     let obj = root.as_object_mut().unwrap();
+    if obj.get("statusLine").is_some_and(|sl| is_our_statusline(sl, ws_id)) {
+        obj.remove("statusLine");
+    }
     if kept.is_empty() {
         obj.remove("hooks");
     } else {
@@ -762,13 +823,27 @@ pub async fn codex_hooks_need_review() -> bool {
     }
 }
 
-/// One `initialize` + `hooks/list` round trip with `codex app-server` over stdio
-/// JSON-RPC, with our hooks passed as the same `-c` overrides a session gets.
+/// One `initialize` + `hooks/list` round trip with `codex app-server`, with our
+/// hooks passed as the same `-c` overrides a session gets.
 async fn query_codex_hooks() -> Result<serde_json::Value, String> {
+    let cwd = crate::paths::home().to_string_lossy().into_owned();
+    codex_app_server_request("hooks/list", serde_json::json!({ "cwds": [cwd] }), &codex_hook_overrides()).await
+}
+
+/// One `initialize` + `<method>` round trip with `codex app-server` over stdio
+/// JSON-RPC, each of `overrides` passed as a `-c` flag. Returns the whole reply
+/// (`{ id, result }`); a JSON-RPC `error` is an `Err`. Shared by the hook-trust
+/// check and the quota read (`crate::quota`). No timeout of its own — callers
+/// bound it.
+pub(crate) async fn codex_app_server_request(
+    method: &str,
+    params: serde_json::Value,
+    overrides: &[String],
+) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut cmd = crate::tools::tokio_command("codex");
     cmd.arg("app-server");
-    for ov in codex_hook_overrides() {
+    for ov in overrides {
         cmd.arg("-c").arg(ov);
     }
     let mut child = cmd
@@ -780,12 +855,11 @@ async fn query_codex_hooks() -> Result<serde_json::Value, String> {
         .map_err(|e| format!("could not run codex: {e}"))?;
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
     let mut lines = BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
-    let cwd = crate::paths::home().to_string_lossy().into_owned();
     for msg in [
         serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": { "clientInfo": { "name": "maiestro", "version": env!("CARGO_PKG_VERSION") } } }),
         serde_json::json!({ "jsonrpc": "2.0", "method": "initialized" }),
-        serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "hooks/list", "params": { "cwds": [cwd] } }),
+        serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params }),
     ] {
         stdin.write_all(format!("{msg}\n").as_bytes()).await.map_err(|e| e.to_string())?;
     }
@@ -794,7 +868,7 @@ async fn query_codex_hooks() -> Result<serde_json::Value, String> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
         if v["id"] == 2 {
             if let Some(err) = v.get("error") {
-                return Err(format!("hooks/list failed: {err}"));
+                return Err(format!("{method} failed: {err}"));
             }
             return Ok(v);
         }
@@ -983,6 +1057,59 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("/old/maiestro") && text.contains("mAIestro Code.app"), "{text}");
         assert!(!reconcile_claude_hooks(dir.path(), ws, new_bin), "no churn when current");
+    }
+
+    /// Our status line is installed with the user's padding, re-pointed (keeping
+    /// its fields) on a binary change, and never replaces a foreign one.
+    #[test]
+    fn merge_statusline_installs_repoints_and_yields() {
+        let ws = "205-quota";
+        let old = Path::new("/old/maiestro");
+        let new = Path::new("/Applications/mAIestro Code.app/Contents/MacOS/maiestro");
+
+        let root = merge_statusline(serde_json::json!({}), old, ws, || Some(serde_json::json!(2)));
+        assert_eq!(root["statusLine"]["type"], "command");
+        assert_eq!(root["statusLine"]["padding"], 2);
+        assert_eq!(root["statusLine"]["command"], "'/old/maiestro' statusline --workspace '205-quota'");
+
+        let root = merge_statusline(root, new, ws, || panic!("padding is only read for a new entry"));
+        assert_eq!(root["statusLine"]["padding"], 2);
+        assert!(root["statusLine"]["command"].as_str().unwrap().starts_with("'/Applications/mAIestro Code.app"));
+
+        let theirs = serde_json::json!({ "statusLine": { "type": "command", "command": "~/bin/sl" } });
+        assert_eq!(merge_statusline(theirs.clone(), new, ws, || None), theirs);
+        // Another workspace's status line isn't ours to re-point either.
+        let other = merge_statusline(serde_json::json!({}), old, "99-other", || None);
+        assert_eq!(merge_statusline(other.clone(), new, ws, || None), other);
+    }
+
+    /// Reconcile adds our status line to a worktree that has our hooks but
+    /// predates it, and switching away from Claude removes it with the hooks.
+    #[test]
+    fn reconcile_adds_and_remove_strips_the_status_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = "205-older";
+        let path = claude_hook_file(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bin = Path::new("/x/maiestro");
+        let root = merge_hooks(serde_json::json!({}), bin, ws);
+        std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap() + "\n").unwrap();
+
+        assert!(reconcile_claude_hooks(dir.path(), ws, bin));
+        let root: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(is_our_statusline(&root["statusLine"], ws), "{root}");
+
+        assert!(remove_claude_hooks(dir.path(), ws));
+        assert!(!path.exists(), "only ours was in it");
+
+        // A foreign status line survives both.
+        let mut root = merge_hooks(serde_json::json!({}), bin, ws);
+        root["statusLine"] = serde_json::json!({ "type": "command", "command": "mine" });
+        std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap() + "\n").unwrap();
+        reconcile_claude_hooks(dir.path(), ws, bin);
+        assert!(remove_claude_hooks(dir.path(), ws));
+        let left: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(left["statusLine"]["command"], "mine");
     }
 
     /// Switching away from Claude (#186) strips only our hooks for this

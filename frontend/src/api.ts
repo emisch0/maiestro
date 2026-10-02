@@ -122,6 +122,28 @@ export type RestartOutcome =
   | { status: "restarted" }
   | { status: "blocked_by_editor"; message: string; accessibility: boolean };
 
+/** One rate-limit window of an agent account's subscription quota (#205). */
+export interface QuotaWindow {
+  /** `5h`, `7d`, `30d`, or for Copilot the quota name (`premium`, `plan`). */
+  label: string;
+  /** 0–100; above 100 once the limit is overrun. */
+  used_percent: number;
+  /** Unix seconds, when known. */
+  resets_at: number | null;
+  /** The window's full length in seconds, when known (for the forecast). */
+  window_secs: number | null;
+}
+
+/** An agent account's quota: per agent (and, for Copilot, per GitHub login). */
+export interface ProviderQuota {
+  agent: Agent;
+  account: string | null;
+  plan: string | null;
+  windows: QuotaWindow[];
+  /** Unix seconds the reading was taken. */
+  observed_at: number;
+}
+
 export interface Session {
   id: string;
   repo: string;
@@ -550,4 +572,9 @@ export const api = {
   /** Remember that the banner for `version` was dismissed; it returns for a newer one. */
   updateDismiss: (version: string) =>
     invoke<void>("update_dismiss", { version }),
+
+  /** The quota of each agent account behind these visible work items (#205).
+   *  Agents with no source, or whose read failed, are simply absent. */
+  providerQuotasList: (targets: { agent: Agent; repo: string }[]) =>
+    invoke<ProviderQuota[]>("provider_quotas_list", { targets }),
 };

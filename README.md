@@ -377,6 +377,13 @@ mAIestro Code runs entirely on your Mac and has no servers of its own.
   app fetches the latest release of `yanokamay-org/maiestro` to tell you when
   a newer version is out. The request carries no token, no account or machine
   identifier. Details in [`docs/update-check.md`](docs/update-check.md).
+- **GitHub Copilot quota**: while a Copilot work item is on screen, the
+  popover reads that repo identity's Copilot usage from GitHub's
+  undocumented `api.github.com/copilot_internal/user`, at most once a minute,
+  with the same Keychain token. Claude and Codex quota is read locally (from
+  the session's status line and Codex's own session logs, or a local `codex
+  app-server`), with no request of mAIestro Code's own. Details in
+  [`docs/provider-quotas.md`](docs/provider-quotas.md).
 - **The spawn comment** posted on the issue names the branch, the session
   label, and your **local worktree path**, which includes your macOS
   username. The per-repo `comment_on_spawn` setting turns it off; assignment
