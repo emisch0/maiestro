@@ -34,6 +34,10 @@ A macOS menu-bar app that quickly shows active AI coding sessions. Features incl
   workspace, watch its checks, and merge it — then tear the worktree down.
 - **Multiple git repo support.** Work on multiple repos at the same time.
 - **Visibility and snooze controls.** Just focus on your active work. If there is a repo or work item you want to pause, just hide or snooze it for a couple of days.
+- **Subscription quota at a glance.** A strip at the bottom of the popover
+  shows how much of your Claude, Codex and GitHub Copilot plan limits you've
+  used (e.g. Claude `5h 42% · 7d 18%`), colored by whether you're on pace to
+  run out before the limit resets.
 - **Color coded sessions.** Each session is assigned a color and emojis for remote control sessions, so it is easy to find across multiple windows.
 - **Per-identity GitHub access.** GitHub tokens are stored in the macOS
   Keychain per identity; each repo is tracked under the identity you choose.
@@ -270,6 +274,23 @@ An annotated tour of the popover (illustrative diagram, not a screenshot):
    While an operation runs, the row shows a busy pill — *Creating…*,
    *Creating PR…*, *Merging…*, *Tearing down…*.
 
+**Quota strip.** Along the bottom of the popover, right-aligned, is one chip
+per agent account used by the work items on screen. Each limit window gets a
+small meter: `5h` and `7d` for Claude, the plan's windows for Codex (e.g.
+`30d`), and `premium` (or `plan` on Copilot Free) for GitHub Copilot. Hover
+a chip for the plan, the reset times, the pace, and how old the reading is.
+
+- **Green**: under 50% used, or on pace to last until the limit resets. For
+  example, 60% used with one hour of a 5-hour window left is still green.
+- **Amber**: on pace to run out shortly before the reset.
+- **Red**: on pace to run out well before the reset, or already used up.
+- **`—`**: the window has reset since the last reading.
+
+Claude's numbers update live as your sessions run; Codex and Copilot refresh
+every minute while the popover is open. An agent with no reading (an API-key
+login, a failed read, or Antigravity, which has no reliable source) simply
+has no chip. Details in [`docs/provider-quotas.md`](docs/provider-quotas.md).
+
 Clicking **Start Work** opens the issue picker:
 
 <p align="center">
@@ -299,6 +320,7 @@ with dotfile tooling. The Settings window is the GUI over the same files.
 | `repos/<owner>-<name>.json` | Per-repo settings (see below) |
 | `settings.json` | App-wide settings: theme (`light`/`dark`/`system`), CLI tool-path overrides, terminal font, launch-at-login, popover size, update-check state |
 | `sessions/` / `status/` | Workspace records and live session status (managed by the app) |
+| `quota/` | The latest Claude subscription-quota reading (managed by the app) |
 
 Per-repo settings cover the local clone path (`cloned_repo_dir`), where
 worktrees are created (`worktree_prefix`), `.env` files to copy into each new
@@ -441,7 +463,7 @@ loop, tests, and the release pipeline are in
 
 The recorded design decisions live in [`CLAUDE.md`](CLAUDE.md), and the
 per-feature reference (settings, health check, session status, theming, tool
-resolution) in [`docs/`](docs/) — those are the source of truth; the short
+resolution, provider quotas) in [`docs/`](docs/) — those are the source of truth; the short
 version:
 
 - **mAIestro Code launches sessions, it doesn't host them.** Starting work opens a
@@ -450,6 +472,11 @@ version:
 - **Session status comes from Claude Code hooks.** Spawning writes hooks into
   the worktree's `.claude/settings.local.json` that call the mAIestro Code binary,
   which writes status files the app watches.
+- **Quota is read, never spent or borrowed.** Claude's comes from the
+  session's own status line, which mAIestro Code chains so your status line
+  still shows; Codex's from its local session logs or `codex app-server`;
+  Copilot's from GitHub with the repo identity's token. mAIestro Code never
+  reads an agent's own login token.
 - **GitHub via the REST API, never `gh`.** The app talks to GitHub directly
   with per-identity tokens read from the Keychain at call time.
 - **Secrets in the Keychain, references in JSON.** `~/.maiestro/` holds only
