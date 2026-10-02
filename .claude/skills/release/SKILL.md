@@ -57,11 +57,10 @@ re-invoking this skill after a failure resumes rather than restarts.
    `bump` moves `tauri.conf.json`, `package.json`, `Cargo.toml`, and
    `Cargo.lock` together and asserts they agree.
 
-6. **Merge the release PR once CI is green.** The ruleset requires both checks
-   (**Backend Mac (test + clippy)** and **Frontend (typecheck + tests)**) and zero
-   approvals, so the PR merges itself once they pass — until then `gh pr merge`
-   fails with *"the base branch policy prohibits the merge"*. Wait, merge, and
-   bring the primary checkout back to `main`:
+6. **Merge the release PR once CI is green.** The ruleset requires **all** CI
+   checks to pass and zero approvals, so the PR merges itself once they do —
+   until then `gh pr merge` fails with *"the base branch policy prohibits the
+   merge"*. Wait, merge, and bring the primary checkout back to `main`:
    ```
    gh pr checks <pr-number> --watch
    gh pr merge <pr-number> --merge
