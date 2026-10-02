@@ -32,6 +32,10 @@ A macOS menu-bar app that quickly shows active AI coding sessions. Features incl
   and body before anything is created.
 - **PRs from the dashboard.** Create an AI-drafted pull request for a
   workspace, watch its checks, and merge it — then tear the worktree down.
+- **Multiple AI vendors.** Each repo picks its agentic coding CLI: Anthropic
+  Claude Code, OpenAI Codex CLI, Google Antigravity CLI, or GitHub Copilot
+  CLI. Repos using different vendors sit side by side in the same dashboard,
+  and an existing workspace can be switched to another agent.
 - **Multiple git repo support.** Work on multiple repos at the same time.
 - **Visibility and snooze controls.** Just focus on your active work. If there is a repo or work item you want to pause, just hide or snooze it for a couple of days.
 - **Subscription quota at a glance.** A strip at the bottom of the popover
