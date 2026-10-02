@@ -31,22 +31,56 @@ pub struct PromptOverrides {
     pub draft_pr: Option<String>,
 }
 
-/// The model for mAIestro Code's own drafting calls, one entry per agent (only
-/// the effective agent's entry is used). `None`/empty uses that entry's schema
-/// `default` — `haiku` for Claude, a cheap Gemini Flash id for Antigravity, and
-/// for Codex and Copilot no `--model` at all (Codex's own configured default,
-/// Copilot's automatic model routing — its models depend on the plan). See
-/// `crate::prompts::model`.
+/// Settings that apply to one agent, keyed by agent (only the repo's effective
+/// agent's entry is used). Every agent has a drafting `prompt_model`; Claude
+/// also has `remote_control`. Replaces the older flat `prompt_models` map,
+/// migrated in `parse_and_validate`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PromptModels {
+pub struct AgentSettings {
     #[serde(default)]
-    pub claude: Option<String>,
+    pub claude: ClaudeSettings,
     #[serde(default)]
-    pub codex: Option<String>,
+    pub codex: AgentCommonSettings,
     #[serde(default)]
-    pub antigravity: Option<String>,
+    pub antigravity: AgentCommonSettings,
     #[serde(default)]
-    pub copilot: Option<String>,
+    pub copilot: AgentCommonSettings,
+}
+
+impl AgentSettings {
+    /// The drafting model configured for `agent` (unresolved — see
+    /// `crate::prompts::model` for the schema-default fallback).
+    pub fn prompt_model(&self, agent: Agent) -> &Option<String> {
+        match agent {
+            Agent::Claude => &self.claude.prompt_model,
+            Agent::Codex => &self.codex.prompt_model,
+            Agent::Antigravity => &self.antigravity.prompt_model,
+            Agent::Copilot => &self.copilot.prompt_model,
+        }
+    }
+}
+
+/// Claude Code's per-repo settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClaudeSettings {
+    /// The model for mAIestro Code's own drafting calls. `None`/empty uses the
+    /// schema `default` (`haiku`). See `crate::prompts::model`.
+    #[serde(default)]
+    pub prompt_model: Option<String>,
+    /// Launch the session with `--remote-control`. `None` uses the schema
+    /// default (on) — see [`claude_remote_control`].
+    #[serde(default)]
+    pub remote_control: Option<bool>,
+}
+
+/// The per-repo settings of an agent that has only a drafting model. `None`/empty
+/// uses that agent's schema `default` — a cheap Gemini Flash id for Antigravity,
+/// and for Codex and Copilot no `--model` at all (Codex's own configured
+/// default, Copilot's automatic model routing — its models depend on the plan).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentCommonSettings {
+    #[serde(default)]
+    pub prompt_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,12 +122,12 @@ pub struct RepoSettings {
     /// then the app schema default — see [`effective_agent`].
     #[serde(default)]
     pub agent: Option<Agent>,
-    /// Which model runs mAIestro Code's own programmatic prompts (draft_issue,
-    /// short_label, draft_pr), per agent. Applies only to these drafting calls,
-    /// never to the launched worktree session. Replaces the older single
-    /// `prompt_model` (a `claude --model` alias), migrated in `parse_and_validate`.
+    /// Per-agent settings: each agent's drafting model (mAIestro Code's own
+    /// draft_issue/short_label/draft_pr prompts, never the launched session) and
+    /// Claude's `remote_control` launch flag. Replaces the older `prompt_models`
+    /// and, before it, the single `prompt_model`, migrated in `parse_and_validate`.
     #[serde(default)]
-    pub prompt_models: PromptModels,
+    pub agent_settings: AgentSettings,
     /// Repo-level hide/snooze state. `None` = visible. A hidden repo hides its
     /// work items too. Per-work-item state lives on the session record, not here.
     #[serde(default)]
@@ -105,7 +139,7 @@ pub struct RepoSettings {
 }
 
 impl RepoSettings {
-    fn default_for(repo: &str) -> Self {
+    pub(crate) fn default_for(repo: &str) -> Self {
         let name = repo.split('/').next_back().unwrap_or(repo);
         let cloned = crate::paths::home().join("src").join(name);
         Self {
@@ -118,7 +152,7 @@ impl RepoSettings {
             delete_remote_on_teardown: None,
             comment_on_spawn: None,
             agent: None,
-            prompt_models: PromptModels::default(),
+            agent_settings: AgentSettings::default(),
             hidden: None,
             prompts: PromptOverrides::default(),
         }
@@ -171,6 +205,15 @@ pub fn effective_agent(settings: &RepoSettings) -> Agent {
     settings.agent.unwrap_or_else(crate::app_settings::agent)
 }
 
+/// Whether the Claude session launches with `--remote-control`: the repo's
+/// `agent_settings.claude.remote_control`, else its schema default (on).
+pub fn claude_remote_control(settings: &RepoSettings) -> bool {
+    bool_or_default(
+        settings.agent_settings.claude.remote_control,
+        "/properties/agent_settings/properties/claude/properties/remote_control/default",
+    )
+}
+
 /// Validate a settings JSON value against the embedded schema. Returns a message
 /// naming the failing field(s) on error.
 fn validate_against_schema(value: &serde_json::Value) -> Result<(), String> {
@@ -213,6 +256,7 @@ fn parse_and_validate(data: &str, label: &str) -> Result<RepoSettings, String> {
     let mut value: serde_json::Value = serde_json::from_str(data)
         .map_err(|e| format!("{label} is not valid JSON: {e}"))?;
     migrate_prompt_model(&mut value);
+    migrate_prompt_models(&mut value);
     validate_against_schema(&value).map_err(|msg| format!("{label} failed validation — {msg}"))?;
     serde_json::from_value(value).map_err(|e| format!("{label} does not match RepoSettings: {e}"))
 }
@@ -220,7 +264,8 @@ fn parse_and_validate(data: &str, label: &str) -> Result<RepoSettings, String> {
 /// Carry a pre-#162 `prompt_model` (a `claude --model` alias) over to
 /// `prompt_models.claude`, so a custom drafting model isn't lost when the field
 /// was split per agent. An explicit `prompt_models.claude` wins. The old key is
-/// dropped from the value, so the next save writes only the new shape.
+/// dropped from the value; [`migrate_prompt_models`] then carries the result on
+/// to `agent_settings`.
 fn migrate_prompt_model(value: &mut serde_json::Value) {
     let Some(obj) = value.as_object_mut() else { return };
     let Some(old) = obj.remove("prompt_model") else { return };
@@ -231,6 +276,32 @@ fn migrate_prompt_model(value: &mut serde_json::Value) {
     }
     if models["claude"].as_str().is_none_or(|s| s.trim().is_empty()) {
         models["claude"] = serde_json::Value::String(old.to_string());
+    }
+}
+
+/// Carry a pre-#209 `prompt_models.<agent>` over to
+/// `agent_settings.<agent>.prompt_model`, so custom drafting models survive the
+/// move into per-agent settings. Runs after [`migrate_prompt_model`], so an even
+/// older `prompt_model` reaches the new shape too. An explicit new-shape value
+/// wins, and blank or non-string entries are dropped. The old key is removed
+/// from the value, so the next save writes only the new shape.
+fn migrate_prompt_models(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else { return };
+    let Some(old) = obj.remove("prompt_models") else { return };
+    let Some(old) = old.as_object() else { return };
+    for (agent, model) in old {
+        let Some(model) = model.as_str().map(str::trim).filter(|s| !s.is_empty()) else { continue };
+        let settings = obj.entry("agent_settings").or_insert(serde_json::Value::Null);
+        if !settings.is_object() {
+            *settings = serde_json::json!({});
+        }
+        let entry = &mut settings[agent.as_str()];
+        if !entry.is_object() {
+            *entry = serde_json::json!({});
+        }
+        if entry["prompt_model"].as_str().is_none_or(|s| s.trim().is_empty()) {
+            entry["prompt_model"] = serde_json::Value::String(model.to_string());
+        }
     }
 }
 
@@ -394,30 +465,33 @@ mod tests {
         assert!(v.get("properties").is_some(), "schema must declare properties");
     }
 
-    /// `prompt_models.claude`'s help text names its default ("…the default
-    /// (haiku)") so the Settings form doesn't make the user go look it up. That is
-    /// a second copy of the value, so pin it: changing the `default` without
+    /// Each `prompt_model`'s help text that names its default ("…the default
+    /// (haiku)") so the Settings form doesn't make the user go look it up holds a
+    /// second copy of the value, so pin it: changing the `default` without
     /// rewording the `description` fails here rather than shipping a form that lies.
     #[test]
     fn prompt_model_help_names_its_default() {
         let schema = schema_value();
-        let prop = &schema["properties"]["prompt_models"]["properties"]["claude"];
-        let default = prop["default"].as_str().expect("prompt_models.claude declares a default");
-        let description = prop["description"].as_str().expect("prompt_models.claude is described");
-        assert!(
-            description.contains(&format!("({default})")),
-            "prompt_models.claude's description must name its default `{default}`, but reads: {description}"
-        );
+        for agent in ["claude", "antigravity"] {
+            let prop = &schema["properties"]["agent_settings"]["properties"][agent]["properties"]["prompt_model"];
+            let default = prop["default"].as_str().expect("prompt_model declares a default");
+            let description = prop["description"].as_str().expect("prompt_model is described");
+            assert!(
+                description.contains(&format!("({default})")),
+                "{agent}.prompt_model's description must name its default `{default}`, but reads: {description}"
+            );
+        }
     }
 
-    /// A pre-#162 file's custom `prompt_model` is read once as
-    /// `prompt_models.claude`; an explicit new-shape value wins; a blank one is
-    /// just dropped. Every other field is untouched.
+    /// A pre-#162 file's custom `prompt_model` reaches
+    /// `agent_settings.claude.prompt_model` through both migrations; an explicit
+    /// newer-shape value wins; a blank one is just dropped. Every other field is
+    /// untouched.
     #[test]
     fn legacy_prompt_model_migrates_to_claude_entry() {
         let s = parse_and_validate(&json!({ "repo": "a/b", "prompt_model": "sonnet" }).to_string(), "t").unwrap();
-        assert_eq!(s.prompt_models.claude.as_deref(), Some("sonnet"));
-        assert!(s.prompt_models.codex.is_none());
+        assert_eq!(s.agent_settings.claude.prompt_model.as_deref(), Some("sonnet"));
+        assert!(s.agent_settings.codex.prompt_model.is_none());
         assert_eq!(s.repo, "a/b");
 
         let s = parse_and_validate(
@@ -425,15 +499,64 @@ mod tests {
             "t",
         )
         .unwrap();
-        assert_eq!(s.prompt_models.claude.as_deref(), Some("opus"));
+        assert_eq!(s.agent_settings.claude.prompt_model.as_deref(), Some("opus"));
 
         let s = parse_and_validate(&json!({ "prompt_model": "" }).to_string(), "t").unwrap();
-        assert!(s.prompt_models.claude.is_none());
+        assert!(s.agent_settings.claude.prompt_model.is_none());
 
         // The migrated shape is what gets written back.
         let v = serde_json::to_value(parse_and_validate(&json!({ "prompt_model": "sonnet" }).to_string(), "t").unwrap()).unwrap();
         assert!(v.get("prompt_model").is_none());
-        assert_eq!(v["prompt_models"]["claude"], "sonnet");
+        assert!(v.get("prompt_models").is_none());
+        assert_eq!(v["agent_settings"]["claude"]["prompt_model"], "sonnet");
+    }
+
+    /// A pre-#209 `prompt_models` map moves under `agent_settings.<agent>`
+    /// entry by entry; an explicit `agent_settings` value wins, other
+    /// `agent_settings` fields survive, and blank or null entries are dropped.
+    #[test]
+    fn prompt_models_migrate_to_agent_settings() {
+        let s = parse_and_validate(
+            &json!({ "prompt_models": { "claude": "sonnet", "codex": "gpt-5-codex", "antigravity": " ", "copilot": null } })
+                .to_string(),
+            "t",
+        )
+        .unwrap();
+        assert_eq!(s.agent_settings.claude.prompt_model.as_deref(), Some("sonnet"));
+        assert_eq!(s.agent_settings.codex.prompt_model.as_deref(), Some("gpt-5-codex"));
+        assert!(s.agent_settings.antigravity.prompt_model.is_none());
+        assert!(s.agent_settings.copilot.prompt_model.is_none());
+
+        let s = parse_and_validate(
+            &json!({
+                "prompt_models": { "claude": "sonnet", "codex": "gpt-5-codex" },
+                "agent_settings": { "claude": { "prompt_model": "opus", "remote_control": false } }
+            })
+            .to_string(),
+            "t",
+        )
+        .unwrap();
+        assert_eq!(s.agent_settings.claude.prompt_model.as_deref(), Some("opus"));
+        assert_eq!(s.agent_settings.claude.remote_control, Some(false));
+        assert_eq!(s.agent_settings.codex.prompt_model.as_deref(), Some("gpt-5-codex"));
+
+        // A null `prompt_models` (the old schema allowed it) is just dropped.
+        let s = parse_and_validate(&json!({ "prompt_models": null }).to_string(), "t").unwrap();
+        assert!(s.agent_settings.claude.prompt_model.is_none());
+
+        let v = serde_json::to_value(s).unwrap();
+        assert!(v.get("prompt_models").is_none());
+    }
+
+    /// Remote control is on unless the repo turns it off.
+    #[test]
+    fn claude_remote_control_defaults_on() {
+        let mut s = RepoSettings::default_for("a/b");
+        assert!(claude_remote_control(&s), "schema default");
+        s.agent_settings.claude.remote_control = Some(false);
+        assert!(!claude_remote_control(&s));
+        let s = parse_and_validate(&json!({ "agent_settings": { "claude": { "remote_control": null } } }).to_string(), "t").unwrap();
+        assert!(claude_remote_control(&s), "null uses the default");
     }
 
     /// The repo's own agent wins over the global one; unset falls through.
@@ -475,11 +598,11 @@ mod tests {
             delete_remote_on_teardown: Some(false),
             comment_on_spawn: Some(false),
             agent: Some(Agent::Antigravity),
-            prompt_models: PromptModels {
-                claude: Some("sonnet".into()),
-                codex: Some("gpt-5-codex".into()),
-                antigravity: Some("gemini-3.1-pro-low".into()),
-                copilot: Some("gpt-5-mini".into()),
+            agent_settings: AgentSettings {
+                claude: ClaudeSettings { prompt_model: Some("sonnet".into()), remote_control: Some(false) },
+                codex: AgentCommonSettings { prompt_model: Some("gpt-5-codex".into()) },
+                antigravity: AgentCommonSettings { prompt_model: Some("gemini-3.1-pro-low".into()) },
+                copilot: AgentCommonSettings { prompt_model: Some("gpt-5-mini".into()) },
             },
             hidden: Some(HideState { snooze_until: Some(1_717_372_800_000) }),
             prompts: PromptOverrides {

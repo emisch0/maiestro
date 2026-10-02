@@ -498,7 +498,7 @@ pub(crate) fn copilot_draft_dir() -> std::path::PathBuf {
 /// - `--disable-builtin-mcps --no-custom-instructions`: no GitHub MCP server and
 ///   no AGENTS.md-style instructions.
 /// - `--no-auto-update`: a drafting call never updates the CLI under the user.
-/// - `--model` only when `prompt_models.copilot` is set; otherwise Copilot's own
+/// - `--model` only when `agent_settings.copilot.prompt_model` is set; otherwise Copilot's own
 ///   automatic routing picks a model the user's plan offers.
 pub(crate) fn copilot_draft_args(model: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = [
@@ -696,7 +696,7 @@ pub async fn suggest_short_title(repo: String, issue_number: u64) -> Result<Stri
     let (issue_title, _issue_url, issue_body) = crate::spawn::issue_facts(&gh, &repo, issue_number).await?;
     let instruction = crate::prompts::short_label(&settings.prompts);
     let agent = crate::repo_settings::effective_agent(&settings);
-    let model = crate::prompts::model(&settings.prompt_models, agent);
+    let model = crate::prompts::model(&settings.agent_settings, agent);
     suggest_short_label(&cloned_repo, &issue_title, &issue_body, &instruction, agent, model.as_deref()).await
 }
 
@@ -737,7 +737,7 @@ pub async fn resolve_draft(
     } else {
         let instruction = crate::prompts::draft_issue(&settings.prompts);
         let agent = crate::repo_settings::effective_agent(&settings);
-        let model = crate::prompts::model(&settings.prompt_models, agent);
+        let model = crate::prompts::model(&settings.agent_settings, agent);
         match draft_issue(&cloned_repo, idea, &instruction, agent, model.as_deref(), activity).await {
             Ok((title, body, short_title)) => DraftStep::Ready { title, body, short_title },
             // Couldn't draft: let the user confirm before creating anything.

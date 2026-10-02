@@ -93,7 +93,7 @@ pub async fn repo_health_check(window: tauri::Window, repo: String) -> Result<He
     let agent = repo_settings::effective_agent(&settings);
     // The model mAIestro Code's own drafting calls would use — the agent probe
     // runs against it so it doubles as a "is this model available?" check.
-    let model = crate::prompts::model(&settings.prompt_models, agent);
+    let model = crate::prompts::model(&settings.agent_settings, agent);
     // Run the probe inside the cloned repo when it exists (agent auth is global,
     // so cwd only needs to be a real directory); otherwise let it inherit ours.
     let agent_cwd = settings
@@ -466,7 +466,7 @@ fn classify_claude_envelope(env: &serde_json::Value, model: &str, login_command:
 /// - `codex login status` exits non-zero → login Fail with `codex login` as the
 ///   fix; model Skipped. This runs *first* because a logged-out `codex exec`
 ///   retries for a while before failing.
-/// - Logged in, no drafting model configured (`prompt_models.codex` is `null`) →
+/// - Logged in, no drafting model configured (`agent_settings.codex.prompt_model` is `null`) →
 ///   the model row is Info: drafting uses Codex's own configured model, which
 ///   the login probe already vouches for.
 /// - Logged in with a model → a tiny tool-less `codex exec --model <m>` round

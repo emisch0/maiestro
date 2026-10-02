@@ -48,30 +48,63 @@
       "enum": ["claude", "codex", "antigravity", "copilot", null],
       "description": "The agentic coding CLI for this repo. Used for the session in each spawned worktree and for mAIestro Code's own drafting (issues, labels, PRs). null = use the global default. An existing worktree keeps the agentic coding CLI it was spawned with."
     },
-    "prompt_models": {
-      "type": ["object", "null"],
-      "title": "PromptModels",
-      "description": "Which model runs mAIestro Code's own drafting prompts (issue, label, PR), per agentic coding CLI. Only the entry for the repo's agentic coding CLI is used.",
+    "agent_settings": {
+      "type": "object",
+      "title": "AgentSettings",
+      "description": "Settings that apply to one agentic coding CLI, keyed by agent. Only the entry for the repo's agentic coding CLI is used.",
       "properties": {
         "claude": {
-          "type": ["string", "null"],
-          "default": "haiku",
-          "description": "Any value `claude --model` accepts; empty uses the default (haiku)."
+          "type": "object",
+          "title": "ClaudeSettings",
+          "description": "Settings used when this repo's agentic coding CLI is Claude Code.",
+          "properties": {
+            "prompt_model": {
+              "type": ["string", "null"],
+              "default": "haiku",
+              "description": "Which model runs mAIestro Code's own drafting prompts (issue, label, PR). Any value `claude --model` accepts; empty uses the default (haiku)."
+            },
+            "remote_control": {
+              "type": ["boolean", "null"],
+              "default": true,
+              "description": "Launch the Claude session with `--remote-control`, so it can be driven from claude.ai or the Claude app. Applies to new sessions and to existing ones the next time they are opened."
+            }
+          }
         },
         "codex": {
-          "type": ["string", "null"],
-          "default": null,
-          "description": "Any value `codex exec --model` accepts; empty uses the model configured in Codex itself."
+          "type": "object",
+          "title": "CodexSettings",
+          "description": "Settings used when this repo's agentic coding CLI is Codex CLI.",
+          "properties": {
+            "prompt_model": {
+              "type": ["string", "null"],
+              "default": null,
+              "description": "Which model runs mAIestro Code's own drafting prompts (issue, label, PR). Any value `codex exec --model` accepts; empty uses the model configured in Codex itself."
+            }
+          }
         },
         "antigravity": {
-          "type": ["string", "null"],
-          "default": "gemini-3.8-flash-low",
-          "description": "Any model id `agy models` lists (e.g. gemini-3.8-flash-low); empty uses the default (gemini-3.8-flash-low)."
+          "type": "object",
+          "title": "AntigravitySettings",
+          "description": "Settings used when this repo's agentic coding CLI is Antigravity CLI.",
+          "properties": {
+            "prompt_model": {
+              "type": ["string", "null"],
+              "default": "gemini-3.8-flash-low",
+              "description": "Which model runs mAIestro Code's own drafting prompts (issue, label, PR). Any model id `agy models` lists (e.g. gemini-3.8-flash-low); empty uses the default (gemini-3.8-flash-low)."
+            }
+          }
         },
         "copilot": {
-          "type": ["string", "null"],
-          "default": null,
-          "description": "Any value `copilot --model` accepts (e.g. claude-haiku-4.5, gpt-5-mini); which models work depends on your Copilot plan. Empty lets Copilot pick the model automatically."
+          "type": "object",
+          "title": "CopilotSettings",
+          "description": "Settings used when this repo's agentic coding CLI is GitHub Copilot CLI.",
+          "properties": {
+            "prompt_model": {
+              "type": ["string", "null"],
+              "default": null,
+              "description": "Which model runs mAIestro Code's own drafting prompts (issue, label, PR). Any value `copilot --model` accepts (e.g. claude-haiku-4.5, gpt-5-mini); which models work depends on your Copilot plan. Empty lets Copilot pick the model automatically."
+            }
+          }
         }
       }
     },

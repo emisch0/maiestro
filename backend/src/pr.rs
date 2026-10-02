@@ -178,7 +178,7 @@ pub async fn session_create_pr(
     // title + body.
     let activity = AgentActivity::new(app, request_id);
     let agent = crate::repo_settings::effective_agent(&settings);
-    let model = crate::prompts::model(&settings.prompt_models, agent);
+    let model = crate::prompts::model(&settings.agent_settings, agent);
     let reply = agent_text(agent, &work_dir, &prompt, model.as_deref(), "drafting the PR", Some(&activity))
         .await
         .map_err(|e| { tracing::warn!(error = %e, agent = %agent, "PR draft failed"); e })?;

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::agent::Agent;
 use crate::drafting::{resolve_draft, AgentActivity, DraftStep};
-use crate::editor::{close_window_and_wait, open_vscode, write_vscode_files, WindowClose};
+use crate::editor::{close_window_and_wait, open_vscode, write_vscode_files, LaunchOptions, WindowClose};
 use crate::gitops::{git, git_net, local_branch_exists};
 use crate::hooks::{reconcile_session_hooks, write_session_hooks};
 use crate::naming::{default_short_title, slugify};
@@ -147,12 +147,23 @@ fn work_parent_of(work_dir: &Path) -> String {
 /// the record too, so a worktree keeps launching the agent it was spawned with.
 ///
 /// Deliberately sourced from the session record rather than the caller's freshly
-/// picked theme: reopening a worktree must not re-theme it. Best-effort — a
-/// worktree with no session record is left untouched, and a write failure only
-/// warns, because the reopen itself must still succeed.
+/// picked theme: reopening a worktree must not re-theme it. The launch options
+/// (e.g. Claude's `--remote-control`) are the exception: they come from the
+/// repo's *current* settings, so changing them applies on the next reopen. A
+/// repo settings file that can't be read warns and falls back to the schema
+/// defaults. Best-effort — a worktree with no session record is left
+/// untouched, and a write failure only warns, because the reopen itself must
+/// still succeed.
 pub(crate) fn refresh_vscode_files(work_dir: &Path, workspace: &str) {
     let Some(session) = crate::sessions::get(workspace) else {
         return;
+    };
+    let launch = match crate::repo_settings::repo_settings_get(session.repo.clone()) {
+        Ok(settings) => LaunchOptions::from_settings(&settings),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read repo settings; launching with the default options");
+            LaunchOptions::from_settings(&crate::repo_settings::RepoSettings::default_for(&session.repo))
+        }
     };
     if let Err(e) = write_vscode_files(
         work_dir,
@@ -160,6 +171,7 @@ pub(crate) fn refresh_vscode_files(work_dir: &Path, workspace: &str) {
         &session.color,
         &session.session_title,
         session.agent,
+        launch,
     ) {
         tracing::warn!(error = %e, "could not refresh .vscode files on reuse");
     }
@@ -178,6 +190,8 @@ struct SpawnBg {
     session_title: String,
     color: String,
     agent: Agent,
+    /// The session command's launch options, from the repo's settings.
+    launch: LaunchOptions,
     default_branch: String,
     repo: String,
     issue_number: u64,
@@ -305,6 +319,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         session_title,
         color: color.to_string(),
         agent,
+        launch: LaunchOptions::from_settings(&settings),
         default_branch: default_branch.to_string(),
         repo: repo.to_string(),
         issue_number,
@@ -421,7 +436,7 @@ async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
         Err(e) => warnings.push(format!("could not resolve token user for assignment: {e}")),
     }
 
-    write_vscode_files(&bg.work_dir, &bg.work_parent, &bg.color, &bg.session_title, bg.agent)?;
+    write_vscode_files(&bg.work_dir, &bg.work_parent, &bg.color, &bg.session_title, bg.agent, bg.launch)?;
     if let Some(notice) = write_session_hooks(&bg.work_dir, &bg.workspace, bg.agent).await? {
         crate::sessions::set_notice(&bg.workspace, notice);
     }

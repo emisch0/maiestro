@@ -17,14 +17,25 @@ export interface PromptOverrides {
 /** The coding agent a repo runs (sessions and mAIestro Code's own drafting). */
 export type Agent = "claude" | "codex" | "antigravity" | "copilot";
 
-/** The drafting model per agent; null/empty = that entry's schema default
- *  (`haiku` for Claude; Codex's own configured model for Codex; a Gemini Flash
- *  id for Antigravity; Copilot's automatic model choice for Copilot). */
-export interface PromptModels {
-  claude: string | null;
-  codex: string | null;
-  antigravity?: string | null;
-  copilot?: string | null;
+/** Settings every agent has. `prompt_model` is the drafting model; null/empty
+ *  = that agent's schema default (`haiku` for Claude; Codex's own configured
+ *  model for Codex; a Gemini Flash id for Antigravity; Copilot's automatic
+ *  model choice for Copilot). */
+export interface AgentCommonSettings {
+  prompt_model?: string | null;
+}
+
+/** Claude Code's settings. `remote_control` null = the schema default (on). */
+export interface ClaudeSettings extends AgentCommonSettings {
+  remote_control?: boolean | null;
+}
+
+/** Per-agent settings; only the repo's effective agent's entry is used. */
+export interface AgentSettings {
+  claude?: ClaudeSettings;
+  codex?: AgentCommonSettings;
+  antigravity?: AgentCommonSettings;
+  copilot?: AgentCommonSettings;
 }
 
 export interface RepoSettings {
@@ -35,7 +46,7 @@ export interface RepoSettings {
   post_spawn_commands: string[];
   /** null = use the global `agent` setting. */
   agent: Agent | null;
-  prompt_models: PromptModels;
+  agent_settings: AgentSettings;
   identity_id: string | null;
   hidden: HideState | null;
   prompts: PromptOverrides;

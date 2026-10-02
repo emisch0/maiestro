@@ -15,13 +15,22 @@ const SCHEMA = {
   type: "object",
   properties: {
     worktree_prefix: { type: ["string", "null"], default: "~/src/work-" },
-    prompt_models: {
-      type: ["object", "null"],
+    agent_settings: {
+      type: "object",
       properties: {
-        claude: { type: ["string", "null"], default: "haiku" },
-        codex: { type: ["string", "null"], default: null },
-        antigravity: { type: ["string", "null"], default: "gemini-3.8-flash-low" },
-        copilot: { type: ["string", "null"], default: null },
+        claude: {
+          type: "object",
+          properties: {
+            prompt_model: { type: ["string", "null"], default: "haiku" },
+            remote_control: { type: ["boolean", "null"], default: true },
+          },
+        },
+        codex: { type: "object", properties: { prompt_model: { type: ["string", "null"], default: null } } },
+        antigravity: {
+          type: "object",
+          properties: { prompt_model: { type: ["string", "null"], default: "gemini-3.8-flash-low" } },
+        },
+        copilot: { type: "object", properties: { prompt_model: { type: ["string", "null"], default: null } } },
       },
     },
     cloned_repo_dir: { type: ["string", "null"] },
@@ -45,6 +54,7 @@ describe("extractFormDefaults", () => {
     // Per agent: Claude's alias default, no default at all for Codex, and a
     // Gemini Flash id for Antigravity.
     expect(d.promptModelDefaults).toEqual({ claude: "haiku", codex: "", antigravity: "gemini-3.8-flash-low", copilot: "" });
+    expect(d.remoteControlDefault).toBe(true);
     expect(d.promptDefaults).toEqual({
       draft_issue: "Draft an issue.",
       short_label: "Short label.",
@@ -54,7 +64,8 @@ describe("extractFormDefaults", () => {
 
   // Collected generically from the schema, so a boolean added there needs no
   // change to the form — and a `true` default must survive, since that's what a
-  // null (= "use the default") field renders as.
+  // null (= "use the default") field renders as. Only top-level booleans: the
+  // agent settings group renders its own (`remoteControlDefault`).
   it("collects every boolean property's default, keyed by name", () => {
     const d = extractFormDefaults(SCHEMA);
     expect(d.booleanDefaults).toEqual({
@@ -67,8 +78,16 @@ describe("extractFormDefaults", () => {
     const d = extractFormDefaults({ properties: {} });
     expect(d.worktreePrefixDefault).toBe("");
     expect(d.promptModelDefaults).toEqual({ claude: "", codex: "", antigravity: "", copilot: "" });
+    // No schema default → on, matching the backend's launch behavior.
+    expect(d.remoteControlDefault).toBe(true);
     expect(d.booleanDefaults).toEqual({});
     expect(d.promptDefaults).toEqual({ draft_issue: "", short_label: "", draft_pr: "" });
+  });
+
+  it("reads an off remote-control default", () => {
+    const schema = structuredClone(SCHEMA);
+    schema.properties.agent_settings.properties.claude.properties.remote_control.default = false;
+    expect(extractFormDefaults(schema).remoteControlDefault).toBe(false);
   });
 
   it("tolerates a schema with no properties at all", () => {
@@ -85,6 +104,7 @@ describe("sanitizeSchemaForForm", () => {
     expect(clean.$id).toBeUndefined();
     expect(clean.properties.worktree_prefix.default).toBeUndefined();
     expect(clean.properties.prompts.properties.draft_issue.default).toBeUndefined();
+    expect(clean.properties.agent_settings.properties.claude.properties.remote_control.default).toBeUndefined();
     // Non-default keys survive.
     expect(clean.properties.worktree_prefix.type).toEqual(["string", "null"]);
     expect(clean.type).toBe("object");
