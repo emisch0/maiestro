@@ -236,6 +236,13 @@ impl GitHub {
         serde_json::from_str(&body).map_err(|e| e.to_string())
     }
 
+    /// The token owner's Copilot entitlement and quota snapshots (`GET
+    /// /copilot_internal/user`). Undocumented — the endpoint Copilot's own
+    /// clients read their usage from — so callers must soft-fail (`crate::quota`).
+    pub async fn copilot_user(&self) -> Result<serde_json::Value, String> {
+        self.get_json(&self.api("/copilot_internal/user")).await
+    }
+
     /// Login of the token's owner (`GET /user`).
     pub async fn authenticated_login(&self) -> Result<String, String> {
         let v = self.get_json(&self.api("/user")).await?;

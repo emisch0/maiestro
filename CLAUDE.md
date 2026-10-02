@@ -32,6 +32,7 @@ The detailed how-it-works for each subsystem lives in `docs/`. **Read the releva
 | Worktree colors/emoji, the Claude session color, the generated `.vscode` files | `docs/theming.md` |
 | How the `claude` / `git` / `code` binaries are found, `tool_paths` overrides (`tools.rs`) | `docs/tool-resolution.md` |
 | The background update check and the popover's update banner (`update_check.rs`) | `docs/update-check.md` |
+| The popover's quota strip, the `statusline` helper, Codex/Copilot quota reads (`quota.rs`) | `docs/provider-quotas.md` |
 
 ## Architectural decisions
 
@@ -47,7 +48,7 @@ The spawn subsystem is split along its natural seams so each file owns one respo
 - **`agent.rs`** — the `Agent` enum (`claude` / `codex` / `antigravity` / `copilot`; Antigravity's binary is `agy` — resolve via `Agent::tool()`); `repo_settings::effective_agent` resolves a repo's agent. A session records its agent at spawn, so changing the repo setting never switches an existing worktree; only the explicit per-session switch does.
 - **`session_agent.rs`** — switching an existing session's agent (`session_set_agent`), the session-aware `session_open_in_editor`, and the VS Code restart that applies a switch (`session_restart_editor`).
 - **`pr.rs`** — the PR lifecycle commands (`session_pr`, `session_create_pr`, `session_pr_checks`, `session_work_state`, `session_merge_pr`).
-- **`health.rs`** — the Check Health diagnostics; **`update_check.rs`** — the background newer-release poll; **`tools.rs`** — external tool resolution; **`models.rs`** — asking an agent's CLI which models it offers (the drafting-model suggestions); **`app_settings.rs`** / **`repo_settings.rs`** — the two settings files and their schemas; **`about.rs`** — version/build info.
+- **`health.rs`** — the Check Health diagnostics; **`update_check.rs`** — the background newer-release poll; **`quota.rs`** — the per-agent subscription quota reads and the `statusline` helper; **`tools.rs`** — external tool resolution; **`models.rs`** — asking an agent's CLI which models it offers (the drafting-model suggestions); **`app_settings.rs`** / **`repo_settings.rs`** — the two settings files and their schemas; **`about.rs`** — version/build info.
 - **Shared helpers**: `gitops.rs` (`git()` / `local_branch_exists()`), `naming.rs` (slug/label helpers), `repo_context.rs` (the settings→identity→GitHub-client resolution + `validated_cloned_repo`), and `tools::{snippet, shell_quote}`.
 
 ### mAIestro Code launches sessions; it does not host them
@@ -126,6 +127,10 @@ Because mAIestro Code does not host the session, its working/waiting state comes
 ### The update check is an anonymous, read-only poll of GitHub Releases
 
 `update_check.rs` asks `api.github.com` for this repo's latest published release every ~12 hours (and once ~15 s after launch when the persisted `checked_at` is older than that) and offers it in the popover as a dismissable banner — only when it is strictly newer than the running version and has been public for at least 5 days. It uses `GitHub::anonymous()` — **no identity token, ever** — so it works with no identity configured and reveals nothing about the install (the generic user agent carries no version); it still goes through the `GitHub::send` choke point, so the logging invariant holds. It never auto-downloads or installs: the banner opens the release page. Any failure is logged at `warn` and the previous result stands. The README's privacy section describes this request and must stay accurate if it changes. Details: `docs/update-check.md`.
+
+### Provider quotas are per agent account, read-only and soft-fail
+
+The popover's quota strip (`quota.rs`) shows one chip per agent account behind the visible work items: Claude, Codex and Copilot; Antigravity has no reliable source and is not read. Quota belongs to the ambient agent login, never a session. Claude's comes from the documented status-line `rate_limits` field: each Claude worktree's `statusLine` runs `maiestro statusline --workspace <ws-id>` (dispatched before Tauri, like `hook`), which records it and then **chains the user's own status line** (project, then user settings) with a bounded timeout. We never replace a `statusLine` already in `settings.local.json`, never touch `~/.claude/`, and never read the agents' OAuth tokens. Codex's comes from its session logs, else `codex app-server`; Copilot's from `copilot_internal/user` with the repo identity's own token via `GitHub::send`. An agent is read only when a visible item uses it, and every failure logs at `warn` and drops the chip. Details: `docs/provider-quotas.md`.
 
 ### Launch at login is a per-user LaunchAgent, driven from Rust
 
