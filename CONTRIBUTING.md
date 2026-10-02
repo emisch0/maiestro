@@ -65,7 +65,7 @@ pnpm typecheck && pnpm test
 ## Git workflow
 
 Every change to `main` goes through a pull request; a branch ruleset on
-`main` requires the two CI checks to pass, and the committed
+`main` requires all CI checks to pass, and the committed
 `.githooks/pre-push` hook rejects direct pushes locally. Enable the hook once
 per clone:
 
