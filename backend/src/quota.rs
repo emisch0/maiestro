@@ -488,7 +488,7 @@ pub struct QuotaTarget {
 }
 
 /// The quota of every agent account behind `targets` (the popover's visible
-/// work items): Claude's last recorded reading, Codex's, and Copilot's for each
+/// repos and work items, #214): Claude's last recorded reading, Codex's, and Copilot's for each
 /// distinct GitHub account the targets' repos use. An agent is read only when
 /// a target uses it, so a Claude-only machine never runs `codex`. Antigravity
 /// is never read. Soft-fail throughout: a failed read just leaves its entry out.

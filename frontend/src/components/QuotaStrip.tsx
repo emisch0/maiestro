@@ -1,5 +1,5 @@
 // The subscription-quota strip along the popover's bottom edge (#205): one chip per
-// agent account behind the visible work items — Claude `5h 42% · 7d 18%`,
+// agent account behind the visible repos and work items — Claude `5h 42% · 7d 18%`,
 // Codex `30d 5%`, Copilot `premium 75%` — each window a small meter. Quota is
 // per account, not per session, so an agent shows once however many sessions
 // use it. The parent decides which readings to pass (only visible agents); with
@@ -9,7 +9,16 @@
 // green; past that, the usage so far is projected linearly to the window's
 // reset (`forecastPercent`), so 60% used with an hour of a 5h window left is
 // still green. See `quotaLevel` for the bands.
+//
+// Each chip's tooltip is our own rather than a native `title` (#214): a webview
+// can't open a native tooltip on demand, and the chip must show it at once on
+// click. One tooltip serves both, so a native one never stacks on it: hover
+// shows it after `HOVER_DELAY_MS`, a click pins it open until a second click,
+// a click elsewhere, Escape, or the popover hiding. It opens centered just
+// above the cursor (where it was when the tooltip appeared), kept inside the
+// window.
 
+import { MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ProviderQuota, QuotaWindow } from "../api";
 import { AGENT_MARKS, AGENT_NAMES } from "../lib/agents";
 
@@ -19,6 +28,12 @@ const CALM_PERCENT = 50;
 const ON_PACE_PERCENT = 100;
 /** …up to this amber (would run out shortly before the reset), beyond it red. */
 const OVER_PACE_PERCENT = 125;
+/** How long a hover waits before showing the tooltip, close to the native delay. */
+export const HOVER_DELAY_MS = 1000;
+/** Gap between the cursor and the tooltip's bottom edge, and the tooltip's
+ *  minimum distance from the window's sides. */
+const CURSOR_GAP_PX = 8;
+const EDGE_PX = 8;
 
 /** Usage projected to the window's reset at the pace so far (`used ÷ fraction
  *  of the window elapsed`), or `null` when the window's length or reset is
@@ -86,15 +101,106 @@ export function quotaTitle(q: ProviderQuota, nowSecs: number): string {
 export const quotaKey = (q: ProviderQuota) => `${q.agent}:${q.account ?? ""}`;
 
 export function QuotaStrip({ quotas, now }: { quotas: ProviderQuota[]; now: number }) {
+  // The chip (by `quotaKey`) whose tooltip a click pinned open, and the one a
+  // hover has shown; a pinned tooltip wins.
+  const [pinned, setPinned] = useState<string | null>(null);
+  const [hovered, setHovered] = useState<string | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stripRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  // Where the tooltip opens: the cursor, in strip coordinates. `lastPointer`
+  // follows the cursor over a chip; `anchor` is frozen when the tooltip shows,
+  // so it stays put like a native one rather than chasing the pointer.
+  const lastPointer = useRef({ x: 0, y: 0 });
+  const [anchor, setAnchor] = useState({ x: 0, y: 0 });
+
+  // A pointer event's position relative to the strip. A keyboard "click"
+  // carries no position (detail 0), so it anchors at the chip's top center.
+  const pointIn = (e: ReactMouseEvent<HTMLElement>) => {
+    const strip = stripRef.current?.getBoundingClientRect();
+    if (!strip) return { x: 0, y: 0 };
+    if (e.detail === 0 && e.type === "click") {
+      const chip = e.currentTarget.getBoundingClientRect();
+      return { x: chip.left + chip.width / 2 - strip.left, y: chip.top - strip.top };
+    }
+    return { x: e.clientX - strip.left, y: e.clientY - strip.top };
+  };
+
+  const clearHover = () => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    hoverTimer.current = null;
+    setHovered(null);
+  };
+  useEffect(() => () => { if (hoverTimer.current) clearTimeout(hoverTimer.current); }, []);
+
+  // A pinned tooltip closes on a click outside the strip (a click on another
+  // chip pins that one instead), on Escape, and when the popover hides.
+  useEffect(() => {
+    if (pinned === null) return;
+    const onDown = (e: MouseEvent) => {
+      if (!stripRef.current?.contains(e.target as Node)) setPinned(null);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setPinned(null); };
+    const onBlur = () => setPinned(null);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [pinned]);
+
+  // Center the tooltip above the anchor, clamped to the window's width (the
+  // width is only known once it renders, hence a layout effect).
+  const shownKey = pinned ?? hovered;
+  useLayoutEffect(() => {
+    const tip = tooltipRef.current;
+    const strip = stripRef.current;
+    if (!tip || !strip) return;
+    const stripLeft = strip.getBoundingClientRect().left;
+    const winWidth = window.innerWidth;
+    const width = tip.offsetWidth;
+    const left = Math.min(Math.max(anchor.x - width / 2, EDGE_PX - stripLeft), winWidth - EDGE_PX - stripLeft - width);
+    tip.style.left = `${left}px`;
+    tip.style.bottom = `${strip.clientHeight - anchor.y + CURSOR_GAP_PX}px`;
+  });
+
   if (quotas.length === 0) return null;
   const nowSecs = Math.floor(now / 1000);
+  // Recomputed each render, so an open tooltip follows fresh readings; a chip
+  // that went away takes its tooltip with it.
+  const shown = shownKey === null ? undefined : quotas.find((q) => quotaKey(q) === shownKey);
   return (
-    <div className="quota-strip" aria-label="Subscription usage">
+    <div ref={stripRef} className="quota-strip" aria-label="Subscription usage">
       {quotas.map((q) => {
         const Mark = AGENT_MARKS[q.agent];
+        const key = quotaKey(q);
         const title = quotaTitle(q, nowSecs);
         return (
-          <div key={quotaKey(q)} className="quota-chip" title={title} aria-label={title}>
+          <button
+            key={key}
+            type="button"
+            className="quota-chip"
+            aria-label={title}
+            aria-expanded={pinned === key}
+            onClick={(e) => {
+              clearHover();
+              setAnchor(pointIn(e));
+              setPinned((p) => (p === key ? null : key));
+            }}
+            onMouseEnter={(e) => {
+              lastPointer.current = pointIn(e);
+              if (hoverTimer.current) clearTimeout(hoverTimer.current);
+              hoverTimer.current = setTimeout(() => {
+                setAnchor(lastPointer.current);
+                setHovered(key);
+              }, HOVER_DELAY_MS);
+            }}
+            onMouseMove={(e) => { lastPointer.current = pointIn(e); }}
+            onMouseLeave={clearHover}
+          >
             <Mark className="quota-chip-mark" aria-hidden="true" />
             {q.windows.map((w) => {
               const reset = hasReset(w, nowSecs);
@@ -109,9 +215,12 @@ export function QuotaStrip({ quotas, now }: { quotas: ProviderQuota[]; now: numb
                 </span>
               );
             })}
-          </div>
+          </button>
         );
       })}
+      {shown && (
+        <div ref={tooltipRef} className="quota-tooltip" role="tooltip">{quotaTitle(shown, nowSecs)}</div>
+      )}
     </div>
   );
 }

@@ -313,6 +313,15 @@ pub struct SettingsProblem {
     pub message: String,
 }
 
+/// The global default agent, resolved (`agent`, else its schema default), so
+/// the popover can resolve a repo whose own `agent` is `null` without a
+/// hardcoded copy of the default (issue #214).
+#[tauri::command]
+pub fn app_agent_get() -> crate::agent::Agent {
+    crate::log_invoke_debug!("app_agent_get");
+    agent()
+}
+
 #[tauri::command]
 pub fn app_settings_problem() -> Option<SettingsProblem> {
     crate::log_invoke_debug!("app_settings_problem");

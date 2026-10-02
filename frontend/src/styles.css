@@ -2870,6 +2870,7 @@ body {
    meter and a percentage, with a divider between chips. Wraps rather than
    scrolls at the popover's minimum width. */
 .quota-strip {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -2886,6 +2887,12 @@ body {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
 }
 
 .quota-chip + .quota-chip {
@@ -2929,3 +2936,24 @@ body {
 .quota-window--warn .quota-window-value { color: var(--accent); }
 .quota-window--high .quota-meter-fill { background: var(--red); }
 .quota-window--high .quota-window-value { color: var(--red); }
+
+/* A chip's tooltip (#214), shown on hover after a delay or at once on click.
+   Styled like the native one it replaces: small, plain, multi-line. Its
+   `left`/`bottom` are set from the cursor in `QuotaStrip` (centered just above
+   it, clamped inside the window). */
+.quota-tooltip {
+  position: absolute;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  padding: 4px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-line;
+  pointer-events: none;
+  z-index: 10;
+}

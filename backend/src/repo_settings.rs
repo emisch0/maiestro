@@ -436,6 +436,27 @@ pub fn repo_set_visibility(repo: String, hidden: Option<HideState>) -> Result<()
     save(&repo, &settings).map_err(|e| e.to_string())
 }
 
+/// Pin a repo's `agent` (the popover's repo-menu switcher, issue #214). A
+/// partial write like `repo_set_visibility`, so it never clobbers the other
+/// fields or an unparseable file. There is no "use global default" here:
+/// resetting to `null` is done in the Settings form. Emits
+/// `repo-settings-changed` (payload: the repo) so an open Settings form
+/// re-reads rather than autosaving a stale `agent` over it.
+#[tauri::command]
+pub fn repo_set_agent(app: tauri::AppHandle, repo: String, agent: Agent) -> Result<(), String> {
+    crate::log_invoke!("repo_set_agent", repo = %repo, agent = agent.as_str());
+    set_agent(&repo, agent)?;
+    use tauri::Emitter;
+    let _ = app.emit("repo-settings-changed", &repo);
+    Ok(())
+}
+
+fn set_agent(repo: &str, agent: Agent) -> Result<(), String> {
+    let mut settings = load_validated(repo)?;
+    settings.agent = Some(agent);
+    save(repo, &settings).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn repo_scan_env_files(cloned_repo_dir: String) -> Vec<String> {
     crate::log_invoke!("repo_scan_env_files", cloned_repo_dir = %cloned_repo_dir);
@@ -758,6 +779,36 @@ mod tests {
         let err = repo_set_visibility("acme/widget".into(), None).expect_err("must refuse");
         assert!(err.contains("not valid JSON"), "got: {err}");
         // The bad file is left intact, not overwritten with defaults.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    /// The repo-menu agent switch (#214) pins `agent` and keeps every other field.
+    #[test]
+    fn set_agent_is_a_partial_write() {
+        let _home = TempHome::new();
+        let mut settings = RepoSettings::default_for("acme/widget");
+        settings.identity_id = Some("work".into());
+        settings.env_files = vec![".env".into()];
+        repo_settings_set("acme/widget".into(), settings).unwrap();
+
+        set_agent("acme/widget", Agent::Copilot).expect("set agent");
+
+        let loaded = repo_settings_get("acme/widget".into()).unwrap();
+        assert_eq!(loaded.agent, Some(Agent::Copilot));
+        assert_eq!(loaded.identity_id.as_deref(), Some("work"));
+        assert_eq!(loaded.env_files, vec![".env".to_string()]);
+    }
+
+    /// Like the visibility write, the agent switch refuses an unparseable file.
+    #[test]
+    fn set_agent_refuses_to_clobber_bad_file() {
+        let home = TempHome::new();
+        std::fs::create_dir_all(home.join("repos")).unwrap();
+        let path = home.join("repos/acme-widget.json");
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let err = set_agent("acme/widget", Agent::Codex).expect_err("must refuse");
+        assert!(err.contains("not valid JSON"), "got: {err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
     }
 

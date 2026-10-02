@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { ProviderQuota, QuotaWindow } from "../api";
-import { forecastPercent, formatSpan, quotaLevel, QuotaStrip, quotaTitle } from "./QuotaStrip";
+import { forecastPercent, formatSpan, HOVER_DELAY_MS, quotaLevel, QuotaStrip, quotaTitle } from "./QuotaStrip";
 
 const NOW = Date.UTC(2026, 9, 2, 12, 0, 0);
 const nowSecs = NOW / 1000;
@@ -83,5 +83,70 @@ describe("QuotaStrip (#205)", () => {
     expect(formatSpan(-5)).toBe("0 m");
     expect(formatSpan(59 * 60)).toBe("59 m");
     expect(formatSpan(25 * 3600)).toBe("1 d 1 h");
+  });
+
+  describe("tooltip (#214)", () => {
+    afterEach(() => vi.useRealTimers());
+    const tooltip = () => screen.queryByRole("tooltip");
+
+    it("has no native title, so only our tooltip ever shows", () => {
+      const { container } = render(<QuotaStrip quotas={[claude, copilot]} now={NOW} />);
+      expect(container.querySelector("[title]")).toBeNull();
+    });
+
+    it("shows on hover only after the delay, and hides on leave", () => {
+      vi.useFakeTimers();
+      const { container } = render(<QuotaStrip quotas={[claude]} now={NOW} />);
+      const chip = container.querySelector(".quota-chip")!;
+      fireEvent.mouseEnter(chip);
+      act(() => { vi.advanceTimersByTime(HOVER_DELAY_MS - 1); });
+      expect(tooltip()).toBeNull();
+      act(() => { vi.advanceTimersByTime(1); });
+      expect(tooltip()).toHaveTextContent(/5h: 42% used/);
+      fireEvent.mouseLeave(chip);
+      expect(tooltip()).toBeNull();
+    });
+
+    it("shows at once on click and closes on a second click, an outside click, or Escape", () => {
+      const { container } = render(<div><span data-testid="outside" /><QuotaStrip quotas={[claude, copilot]} now={NOW} /></div>);
+      const [chipA, chipB] = [...container.querySelectorAll(".quota-chip")];
+      fireEvent.click(chipA);
+      expect(tooltip()?.textContent).toBe(quotaTitle(claude, nowSecs));
+      fireEvent.click(chipA);
+      expect(tooltip()).toBeNull();
+
+      fireEvent.click(chipA);
+      fireEvent.click(chipB); // another chip swaps it
+      expect(tooltip()?.textContent).toBe(quotaTitle(copilot, nowSecs));
+      fireEvent.mouseDown(screen.getByTestId("outside"));
+      expect(tooltip()).toBeNull();
+
+      fireEvent.click(chipA);
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(tooltip()).toBeNull();
+    });
+
+    it("opens just above the cursor, clamped inside the window", () => {
+      const { container } = render(<QuotaStrip quotas={[claude]} now={NOW} />);
+      const chip = container.querySelector(".quota-chip")!;
+      fireEvent.click(chip, { clientX: 300, clientY: 10, detail: 1 });
+      const tip = tooltip()!;
+      // jsdom lays out nothing (zero-size strip and tooltip), so the cursor
+      // maps straight through: centered on x, bottom edge 8px above y.
+      expect(tip.style.left).toBe("300px");
+      expect(tip.style.bottom).toBe("-2px");
+      fireEvent.click(chip);
+      fireEvent.click(chip, { clientX: 2, clientY: 10, detail: 1 });
+      expect(tooltip()!.style.left).toBe("8px");
+    });
+
+    it("keeps a pinned tooltip open while the pointer leaves", () => {
+      const { container } = render(<QuotaStrip quotas={[claude]} now={NOW} />);
+      const chip = container.querySelector(".quota-chip")!;
+      fireEvent.mouseEnter(chip);
+      fireEvent.click(chip);
+      fireEvent.mouseLeave(chip);
+      expect(tooltip()).not.toBeNull();
+    });
   });
 });
