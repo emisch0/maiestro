@@ -392,9 +392,10 @@ mAIestro Code runs entirely on your Mac and has no servers of its own.
   drafting inputs go to that CLI under your own login, and the session is
   governed by that provider's terms. Copilot drafting and its Check Health
   probe each spend premium requests on your plan.
-- **Remote control.** Sessions are launched with Claude Code's
-  `--remote-control` flag so you can reach them from your Claude account on
-  other devices. See the
+- **Remote control.** By default, Claude sessions are launched with Claude
+  Code's `--remote-control` flag so you can reach them from your Claude
+  account on other devices. Turn off **Launch with Remote Control** in a
+  repo's settings to launch its sessions without it. See the
   [Claude Code docs](https://code.claude.com/docs/en/remote-control) for what
   that involves.
 - **Your git remotes.** Pushes and fetches inside a session use your ambient

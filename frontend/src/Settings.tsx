@@ -279,7 +279,7 @@ export function Settings() {
   // Extra data the custom renderers (identity select, env-files Scan) read via
   // JsonForms' `config`. Memoized so the form isn't needlessly re-keyed.
   // The global agent a repo with no `agent` of its own falls back to; the repo
-  // form names it and picks which drafting-model entry to edit from it.
+  // form names it and picks which agent's settings to edit from it.
   const globalAgent: Agent = appSettings?.agent ?? appFormDefaults.agentDefault;
   const repoAgent: Agent = loadedRepo?.settings.agent ?? globalAgent;
   const repoFormConfig = useMemo(
@@ -289,6 +289,7 @@ export function Settings() {
       clonedRepoDir: loadedRepo?.settings.cloned_repo_dir ?? null,
       worktreePrefixDefault: repoFormDefaults?.worktreePrefixDefault ?? "",
       promptModelDefaults: repoFormDefaults?.promptModelDefaults ?? { claude: "", codex: "", antigravity: "", copilot: "" },
+      remoteControlDefault: repoFormDefaults?.remoteControlDefault ?? true,
       globalAgent,
       repoAgent,
       booleanDefaults: repoFormDefaults?.booleanDefaults ?? {},

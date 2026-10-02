@@ -19,7 +19,7 @@ import {
 } from "@jsonforms/core";
 import { withJsonFormsControlProps } from "@jsonforms/react";
 import { vanillaRenderers, vanillaCells } from "@jsonforms/vanilla-renderers";
-import { Agent, api } from "./api";
+import { Agent, AgentSettings, api } from "./api";
 import { AGENTS, AGENT_PRODUCTS, asAgent } from "./lib/agents";
 import { PathField, RevealButton, usePathExists } from "./PathField";
 import { ToggleSwitch } from "./components/ToggleSwitch";
@@ -37,7 +37,7 @@ export const repoSettingsUISchema = {
     { type: "Control", scope: "#/properties/comment_on_spawn", label: "Comment on the issue when spawning" },
     { type: "Control", scope: "#/properties/delete_remote_on_teardown", label: "Delete remote branch on teardown" },
     { type: "Control", scope: "#/properties/agent", label: "Agentic Coding CLI" },
-    { type: "Control", scope: "#/properties/prompt_models", label: "Prompt model" },
+    { type: "Control", scope: "#/properties/agent_settings" },
     { type: "Control", scope: "#/properties/prompts" },
   ],
 } as unknown as UISchemaElement;
@@ -54,10 +54,12 @@ export interface RepoFormConfig {
    *  whose own `agent` is null uses. Named in the "Use global default" option. */
   globalAgent: Agent;
   /** This repo's effective agent (its own, else `globalAgent`): picks which
-   *  `prompt_models` entry the Prompt model field edits. */
+   *  `agent_settings` entry the agent settings group edits. */
   repoAgent: Agent;
   /** Each agent's drafting-model schema default ("" = none). */
   promptModelDefaults: Record<Agent, string>;
+  /** `agent_settings.claude.remote_control`'s schema default. */
+  remoteControlDefault: boolean;
 }
 
 // ── Identity select ─────────────────────────────────────────────────────────
@@ -216,18 +218,22 @@ function AgentControl(props: ControlProps) {
 export const agentTester = rankWith(20, scopeEndsWith("agent"));
 export const AgentRenderer = withJsonFormsControlProps(AgentControl);
 
-// ── Prompt model combobox ────────────────────────────────────────────────────
-// Which model runs the headless drafting prompts. The value is stored per agent
-// (`prompt_models.claude` / `.codex` / `.antigravity` / `.copilot`) and this field edits the entry for the
-// repo's *effective* agent, so switching the Agent select swaps which entry
-// shows. Deliberately NOT a closed select: the value is passed verbatim to
-// `claude --model` / `codex exec --model` / `agy --model` / `copilot --model`, which accept any
-// alias or model id they know (`agy` has no aliases: ids carry an effort
-// suffix). A datalist offers the agent's models as suggestions while still
-// accepting a typed-in value: the list the CLI itself reports (`agent_models` —
-// `codex debug models`, `agy models`) when it can, else the built-in hints
-// below, so a new model needs no mAIestro Code update. Empty falls back to the
-// entry's schema default, surfaced as the placeholder.
+// ── Agent settings ───────────────────────────────────────────────────────────
+// Settings that belong to one agentic coding CLI, stored per agent
+// (`agent_settings.claude` / `.codex` / `.antigravity` / `.copilot`). The group
+// edits the entry for the repo's *effective* agent, so switching the Agent
+// select swaps which entry shows. Every agent has a drafting model; Claude also
+// has the Remote Control launch switch. Field help comes from the schema's
+// descriptions, so it can't drift from what the backend documents.
+//
+// The drafting model is deliberately NOT a closed select: the value is passed
+// verbatim to `claude --model` / `codex exec --model` / `agy --model` /
+// `copilot --model`, which accept any alias or model id they know (`agy` has no
+// aliases: ids carry an effort suffix). A datalist offers the agent's models as
+// suggestions while still accepting a typed-in value: the list the CLI itself
+// reports (`agent_models` — `codex debug models`, `agy models`) when it can,
+// else the built-in hints below, so a new model needs no mAIestro Code update.
+// Empty falls back to the entry's schema default, surfaced as the placeholder.
 
 /** Built-in model hints per agent, used when the CLI can't list its models —
  *  always for Claude Code and Copilot (no listing command — Copilot's models
@@ -262,41 +268,69 @@ export function useAgentModels(agent: Agent): string[] {
   return queried?.agent === agent ? queried.models : PROMPT_MODEL_SUGGESTIONS[agent];
 }
 
-function PromptModelsControl(props: ControlProps) {
-  const { data, handleChange, path, label, description, config } = props;
+/** A property's description from the (sanitized) `agent_settings` schema. */
+function fieldDescription(schema: unknown, agent: Agent, field: string): string | undefined {
+  const props = (schema as { properties?: Record<string, { properties?: Record<string, { description?: string }> }> })
+    ?.properties;
+  return props?.[agent]?.properties?.[field]?.description;
+}
+
+function AgentSettingsControl(props: ControlProps) {
+  const { data, handleChange, path, schema, config } = props;
   const agent: Agent = asAgent(config?.repoAgent, "claude");
-  const models = (data ?? {}) as Partial<Record<Agent, string | null>>;
+  const all = (data ?? {}) as AgentSettings;
+  const entry: Record<string, unknown> = { ...(all[agent] ?? {}) };
+  const set = (field: string, value: unknown) =>
+    handleChange(path, { ...all, [agent]: { ...entry, [field]: value } });
   const listId = `prompt-model-suggestions-${agent}`;
   const suggestions = useAgentModels(agent);
+  const remoteControl = (entry.remote_control as boolean | null | undefined) ?? config?.remoteControlDefault ?? true;
   return (
-    <div className="control jsf-control">
-      <FieldHeading label={label} description={description} />
-      <input
-        className="text-input jsf-default-hint"
-        type="text"
-        list={suggestions.length ? listId : undefined}
-        value={models[agent] ?? ""}
-        placeholder={promptModelPlaceholder(agent, config?.promptModelDefaults?.[agent] ?? "")}
-        onChange={(e) => handleChange(path, { ...models, [agent]: e.target.value.trim() || null })}
-        aria-label={`${AGENT_PRODUCTS[agent]} drafting model`}
-        spellCheck={false}
-        autoCapitalize="off"
-        autoCorrect="off"
+    <div className="control jsf-control jsf-prompts">
+      <FieldHeading
+        label={`${AGENT_PRODUCTS[agent]} settings`}
+        description={`Settings for ${AGENT_PRODUCTS[agent]}, this repo's agentic coding CLI. Choosing another CLI shows its own settings.`}
       />
-      <div className="jsf-help">Editing the model for {AGENT_PRODUCTS[agent]}, this repo&apos;s agentic coding CLI.</div>
-      {suggestions.length > 0 && (
-        <datalist id={listId}>
-          {suggestions.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
+      <div className="jsf-prompt-field">
+        <span className="jsf-prompt-name">Prompt model</span>
+        <div className="jsf-help">{fieldDescription(schema, agent, "prompt_model")}</div>
+        <input
+          className="text-input jsf-default-hint"
+          type="text"
+          list={suggestions.length ? listId : undefined}
+          value={(entry.prompt_model as string | null | undefined) ?? ""}
+          placeholder={promptModelPlaceholder(agent, config?.promptModelDefaults?.[agent] ?? "")}
+          onChange={(e) => set("prompt_model", e.target.value.trim() || null)}
+          aria-label={`${AGENT_PRODUCTS[agent]} drafting model`}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+        />
+        {suggestions.length > 0 && (
+          <datalist id={listId}>
+            {suggestions.map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
+        )}
+      </div>
+      {agent === "claude" && (
+        <div className="jsf-prompt-field">
+          <span className="jsf-prompt-name">Launch with Remote Control</span>
+          <ToggleSwitch
+            on={remoteControl}
+            onChange={(next) => set("remote_control", next)}
+            label="Launch with Remote Control"
+            hint={fieldDescription(schema, agent, "remote_control")}
+          />
+        </div>
       )}
     </div>
   );
 }
 
-export const promptModelsTester = rankWith(20, scopeEndsWith("prompt_models"));
-export const PromptModelsRenderer = withJsonFormsControlProps(PromptModelsControl);
+export const agentSettingsTester = rankWith(20, scopeEndsWith("agent_settings"));
+export const AgentSettingsRenderer = withJsonFormsControlProps(AgentSettingsControl);
 
 // ── Env files list ──────────────────────────────────────────────────────────
 // A list with Scan / Add / Remove, preserving the existing scan flow. The array
@@ -584,7 +618,7 @@ export const repoSettingsRenderers = [
   { tester: envFilesTester, renderer: EnvFilesRenderer },
   { tester: postSpawnCommandsTester, renderer: PostSpawnCommandsRenderer },
   { tester: agentTester, renderer: AgentRenderer },
-  { tester: promptModelsTester, renderer: PromptModelsRenderer },
+  { tester: agentSettingsTester, renderer: AgentSettingsRenderer },
   { tester: promptsTester, renderer: PromptsRenderer },
   { tester: booleanTester, renderer: BooleanRenderer },
   ...vanillaRenderers,
@@ -623,6 +657,8 @@ export interface RepoFormDefaults {
   worktreePrefixDefault: string;
   /** Each agent's drafting-model default ("" = none, e.g. Codex's own model). */
   promptModelDefaults: Record<Agent, string>;
+  /** `agent_settings.claude.remote_control`'s default (on when absent). */
+  remoteControlDefault: boolean;
   /** Every boolean property's default, keyed by property name. Collected
    *  generically so a boolean added to the schema needs no change here. */
   booleanDefaults: Record<string, boolean>;
@@ -635,8 +671,9 @@ export function extractFormDefaults(
   const props = (schema.properties ?? {}) as Record<string, { default?: unknown }>;
   const promptProps =
     ((props.prompts as { properties?: Record<string, { default?: unknown }> })?.properties) ?? {};
-  const modelProps =
-    ((props.prompt_models as { properties?: Record<string, { default?: unknown }> })?.properties) ?? {};
+  type Props = { properties?: Record<string, { default?: unknown }> };
+  const agentProps = ((props.agent_settings as { properties?: Record<string, Props> })?.properties) ?? {};
+  const agentDefault = (agent: Agent, field: string) => agentProps[agent]?.properties?.[field]?.default;
   const str = (v: unknown) => (typeof v === "string" ? v : "");
   const booleanDefaults: Record<string, boolean> = {};
   for (const [key, prop] of Object.entries(props)) {
@@ -645,11 +682,12 @@ export function extractFormDefaults(
   return {
     worktreePrefixDefault: str(props.worktree_prefix?.default),
     promptModelDefaults: {
-      claude: str(modelProps.claude?.default),
-      codex: str(modelProps.codex?.default),
-      antigravity: str(modelProps.antigravity?.default),
-      copilot: str(modelProps.copilot?.default),
+      claude: str(agentDefault("claude", "prompt_model")),
+      codex: str(agentDefault("codex", "prompt_model")),
+      antigravity: str(agentDefault("antigravity", "prompt_model")),
+      copilot: str(agentDefault("copilot", "prompt_model")),
     },
+    remoteControlDefault: agentDefault("claude", "remote_control") !== false,
     booleanDefaults,
     promptDefaults: {
       draft_issue: str(promptProps.draft_issue?.default),

@@ -18,6 +18,24 @@ use crate::tools::shell_quote;
 
 // ── VS Code workspace files ─────────────────────────────────────────────────────
 
+/// Per-repo launch preferences for the session command, read from the repo's
+/// **current** settings each time the task is written (spawn, reopen, agent
+/// switch) — unlike the color and agent, which come from the session record,
+/// these are preferences rather than part of the worktree's identity. See
+/// [`session_argv`] for which agent honors which.
+#[derive(Debug, Clone, Copy)]
+pub struct LaunchOptions {
+    /// Claude: pass `--remote-control` (`agent_settings.claude.remote_control`).
+    pub remote_control: bool,
+}
+
+impl LaunchOptions {
+    /// The launch options `settings` asks for.
+    pub fn from_settings(settings: &crate::repo_settings::RepoSettings) -> Self {
+        Self { remote_control: crate::repo_settings::claude_remote_control(settings) }
+    }
+}
+
 /// Write the worktree's `.vscode/{settings,tasks}.json`: title-bar theming keyed
 /// to `color`, a `window.title` marker teardown finds the window by, and a
 /// folder-open task that starts the user-facing `agent` session in the integrated
@@ -29,6 +47,7 @@ pub fn write_vscode_files(
     color: &str,
     session_title: &str,
     agent: Agent,
+    launch: LaunchOptions,
 ) -> Result<(), String> {
     let vscode = work_dir.join(".vscode");
     std::fs::create_dir_all(&vscode).map_err(|e| e.to_string())?;
@@ -73,7 +92,7 @@ pub fn write_vscode_files(
         "presentation": { "reveal": "always", "panel": "new", "focus": true },
         "runOptions": { "runOn": "folderOpen" },
     });
-    let (program, args) = session_argv(agent, color, session_title);
+    let (program, args) = session_argv(agent, color, session_title, launch);
     if cfg!(target_os = "windows") {
         // A `process` task runs the program directly with an argv — no shell,
         // so no quoting that depends on the user's default terminal shell
@@ -100,8 +119,9 @@ pub fn write_vscode_files(
 /// carries whether the POSIX shell form ([`shell_command`], macOS) quotes it;
 /// Windows runs the argv directly as a `process` task.
 ///
-/// **Claude:** `--remote-control` lets the user drive the session remotely;
-/// mAIestro Code still only launches it, it does not host it. `--name` gives the
+/// **Claude:** `--remote-control` (unless the repo turned it off, see
+/// [`LaunchOptions`]) lets the user drive the session remotely; mAIestro Code
+/// still only launches it, it does not host it. `--name` gives the
 /// session the same display name mAIestro Code tracks it by, and the trailing
 /// `/color <name>` prompt carries the worktree's theme into the session UI so it
 /// matches the dashboard row and the title bar. The color goes through the
@@ -139,17 +159,21 @@ pub fn write_vscode_files(
 /// also decides which binary the session starts with. When nothing concrete
 /// resolves, `resolve_tool` yields the bare name, i.e. exactly the previous
 /// behavior.
-fn session_argv(agent: Agent, color: &str, session_title: &str) -> (String, Vec<(String, bool)>) {
+fn session_argv(agent: Agent, color: &str, session_title: &str, launch: LaunchOptions) -> (String, Vec<(String, bool)>) {
     let bin = crate::tools::resolve_tool(agent.tool()).to_string_lossy().into_owned();
     let flag = |s: &str| (s.to_string(), false);
     let value = |s: String| (s, true);
     let args = match agent {
-        Agent::Claude => vec![
-            flag("--remote-control"),
-            flag("--name"),
-            value(session_title.to_string()),
-            value(format!("/color {}", crate::theming::claude_color(color))),
-        ],
+        Agent::Claude => launch
+            .remote_control
+            .then(|| flag("--remote-control"))
+            .into_iter()
+            .chain([
+                flag("--name"),
+                value(session_title.to_string()),
+                value(format!("/color {}", crate::theming::claude_color(color))),
+            ])
+            .collect(),
         Agent::Codex => crate::hooks::codex_hook_overrides()
             .into_iter()
             .flat_map(|o| [flag("-c"), value(o)])
@@ -577,7 +601,10 @@ pub fn open_accessibility_settings() {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_editor_window, path_at_or_under, write_vscode_files};
+    use super::{is_editor_window, path_at_or_under, write_vscode_files, LaunchOptions};
+
+    /// The default launch: remote control on, as the schema default has it.
+    const ON: LaunchOptions = LaunchOptions { remote_control: true };
 
     /// Teardown only ever matches (and so closes) a VS Code window for this
     /// exact worktree. The real Windows title carries no "Visual Studio Code"
@@ -630,7 +657,7 @@ mod tests {
     #[test]
     fn startup_task_is_a_process_on_windows_and_a_shell_command_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
-        write_vscode_files(dir.path(), "work-2-x", "#c46686", "\u{1f981} #2 \u{2014} It's here", Agent::Claude).unwrap();
+        write_vscode_files(dir.path(), "work-2-x", "#c46686", "\u{1f981} #2 \u{2014} It's here", Agent::Claude, ON).unwrap();
         let task = read_task(dir.path());
         let bin = crate::tools::resolve_tool("claude").to_string_lossy().into_owned();
         if cfg!(target_os = "windows") {
@@ -654,13 +681,13 @@ mod tests {
     #[test]
     fn startup_task_themes_the_session() {
         let dir = tempfile::tempdir().unwrap();
-        write_vscode_files(dir.path(), "work-127-add-session-color", "#c46686", "\u{1f380} #127 \u{2014} Add session color", Agent::Claude).unwrap();
+        write_vscode_files(dir.path(), "work-127-add-session-color", "#c46686", "\u{1f380} #127 \u{2014} Add session color", Agent::Claude, ON).unwrap();
 
         let command = task_command_line(&read_task(dir.path()));
         assert!(command.contains("'/color pink'"), "not themed: {command}");
         assert!(command.contains("--name '\u{1f380} #127 \u{2014} Add session color'"), "not named: {command}");
 
-        write_vscode_files(dir.path(), "work-1-x", "#nonsense", "x", Agent::Claude).unwrap();
+        write_vscode_files(dir.path(), "work-1-x", "#nonsense", "x", Agent::Claude, ON).unwrap();
         assert!(task_command_line(&read_task(dir.path())).contains("'/color default'"));
     }
 
@@ -670,7 +697,7 @@ mod tests {
     #[test]
     fn startup_task_uses_the_resolved_claude_path() {
         let dir = tempfile::tempdir().unwrap();
-        write_vscode_files(dir.path(), "work-134-x", "#c46686", "x", Agent::Claude).unwrap();
+        write_vscode_files(dir.path(), "work-134-x", "#c46686", "x", Agent::Claude, ON).unwrap();
 
         let command = task_command_line(&read_task(dir.path()));
         let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("claude").to_string_lossy());
@@ -680,12 +707,34 @@ mod tests {
         );
     }
 
+    /// With remote control turned off for the repo, the Claude task drops
+    /// `--remote-control` and keeps everything else; the other agents never
+    /// pass it either way.
+    #[test]
+    fn startup_task_omits_remote_control_when_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let off = LaunchOptions { remote_control: false };
+        write_vscode_files(dir.path(), "work-209-x", "#c46686", "x", Agent::Claude, off).unwrap();
+
+        let command = task_command_line(&read_task(dir.path()));
+        let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("claude").to_string_lossy());
+        assert_eq!(command, format!("{expected} --name 'x' '/color pink'"));
+
+        for agent in [Agent::Codex, Agent::Antigravity, Agent::Copilot] {
+            write_vscode_files(dir.path(), "work-209-x", "#c46686", "x", agent, ON).unwrap();
+            let on = task_command_line(&read_task(dir.path()));
+            assert!(!on.contains("--remote-control"), "{agent:?}: {on}");
+            write_vscode_files(dir.path(), "work-209-x", "#c46686", "x", agent, off).unwrap();
+            assert_eq!(task_command_line(&read_task(dir.path())), on, "{agent:?} ignores the flag");
+        }
+    }
+
     /// The terminal font stack comes from the `terminal_font_family` preference
     /// (schema default when unset), not a copy hardcoded here.
     #[test]
     fn terminal_font_comes_from_preferences() {
         let dir = tempfile::tempdir().unwrap();
-        write_vscode_files(dir.path(), "work-134-x", "#c46686", "x", Agent::Claude).unwrap();
+        write_vscode_files(dir.path(), "work-134-x", "#c46686", "x", Agent::Claude, ON).unwrap();
 
         let settings: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/settings.json")).unwrap()).unwrap();
@@ -699,7 +748,7 @@ mod tests {
     #[test]
     fn codex_task_runs_the_bare_resolved_codex() {
         let dir = tempfile::tempdir().unwrap();
-        write_vscode_files(dir.path(), "work-162-x", "#c46686", "x", Agent::Codex).unwrap();
+        write_vscode_files(dir.path(), "work-162-x", "#c46686", "x", Agent::Codex, ON).unwrap();
 
         let task = &read_task(dir.path());
         let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("codex").to_string_lossy());
@@ -721,7 +770,7 @@ mod tests {
     #[test]
     fn antigravity_task_runs_the_bare_resolved_agy() {
         let dir = tempfile::tempdir().unwrap();
-        write_vscode_files(dir.path(), "work-185-x", "#c46686", "x", Agent::Antigravity).unwrap();
+        write_vscode_files(dir.path(), "work-185-x", "#c46686", "x", Agent::Antigravity, ON).unwrap();
         let task = &read_task(dir.path());
         let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("agy").to_string_lossy());
         assert_eq!(task_command_line(task), expected);
@@ -737,7 +786,7 @@ mod tests {
     #[test]
     fn copilot_task_runs_the_resolved_copilot_with_a_name() {
         let dir = tempfile::tempdir().unwrap();
-        write_vscode_files(dir.path(), "work-203-x", "#c46686", "⭐ #203 — It's Copilot", Agent::Copilot).unwrap();
+        write_vscode_files(dir.path(), "work-203-x", "#c46686", "⭐ #203 — It's Copilot", Agent::Copilot, ON).unwrap();
         let task = &read_task(dir.path());
         let expected = crate::tools::shell_quote(&crate::tools::resolve_tool("copilot").to_string_lossy());
         assert_eq!(task_command_line(task), format!(r"{expected} --name '⭐ #203 — It'\''s Copilot'"));
