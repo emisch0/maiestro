@@ -23,26 +23,25 @@ happens in your editor or terminal.
 
 A macOS menu-bar app that quickly shows active AI coding sessions. Features include:
 
+- **Parallel IDE sessions.** Each session is assigned a color, so it is easy to find across multiple windows.
+- **Live session status.** Each row shows what the AI engine is doing — working,
+  waiting for you, idle.
 - **One worktree per issue.** Spawn Work on an issue creates a branch and a
   worktree (e.g. `~/src/work-42-fix-thing/repo`), runs your setup commands, and
   opens your editor.
-- **Live session status.** Each row shows what the AI engine is doing — working,
-  waiting for you, idle.
 - **Idea → issue.** Type a rough idea and AI drafts the GitHub issue title
   and body before anything is created.
 - **PRs from the dashboard.** Create an AI-drafted pull request for a
   workspace, watch its checks, and merge it — then tear the worktree down.
 - **Multiple AI vendors.** Each repo picks its agentic coding CLI: Anthropic
   Claude Code, OpenAI Codex CLI, Google Antigravity CLI, or GitHub Copilot
-  CLI. Repos using different vendors sit side by side in the same dashboard,
-  and an existing workspace can be switched to another agent.
+  CLI.
 - **Multiple git repo support.** Work on multiple repos at the same time.
 - **Visibility and snooze controls.** Just focus on your active work. If there is a repo or work item you want to pause, just hide or snooze it for a couple of days.
 - **Subscription quota at a glance.** A strip at the bottom of the popover
   shows how much of your Claude, Codex and GitHub Copilot plan limits you've
   used (e.g. Claude `5h 42% · 7d 18%`), colored by whether you're on pace to
   run out before the limit resets.
-- **Color coded sessions.** Each session is assigned a color and emojis for remote control sessions, so it is easy to find across multiple windows.
 - **Per-identity GitHub access.** GitHub tokens are stored in the macOS
   Keychain per identity; each repo is tracked under the identity you choose.
   [Security and privacy](#security-and-privacy) covers what leaves your Mac.
