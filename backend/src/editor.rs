@@ -330,7 +330,9 @@ mod win32 {
         search.found
     }
 
-    /// Restore (if minimized) and raise the first matching window.
+    /// Restore (if minimized) and raise the first matching window. True only
+    /// when Windows actually brought it to the front: its foreground lock can
+    /// refuse `SetForegroundWindow`, leaving just a flashing taskbar button.
     pub fn focus(marker: &str) -> bool {
         let Some(&hwnd) = find(marker).first() else {
             return false;
@@ -341,9 +343,8 @@ mod win32 {
             if IsIconic(hwnd) != 0 {
                 ShowWindow(hwnd, SW_RESTORE);
             }
-            SetForegroundWindow(hwnd);
+            SetForegroundWindow(hwnd) != 0
         }
-        true
     }
 
     /// Ask every matching window to close, like clicking its close button. Fire
@@ -357,7 +358,9 @@ mod win32 {
 }
 
 /// Look for an open VS Code window whose title contains `marker` and, if found,
-/// raise it to the front. Returns true when one was focused.
+/// raise it to the front. Returns true when one was focused; false when none is
+/// open *or* Windows refused the switch, so `focus_or_open` falls through to
+/// `code <dir>`, which has VS Code raise its own window for an open folder.
 #[cfg(target_os = "windows")]
 async fn focus_editor_window(marker: &str) -> bool {
     win32::focus(marker)
@@ -564,6 +567,7 @@ pub async fn editor_window_open(work_dir: &Path) -> bool {
 /// cwd in the worktree, so this catches the common "still open" case without
 /// needing Accessibility. Uses `lsof -d cwd` (process CWDs only) to avoid the
 /// slow tree walk that `lsof +D` would do over a full cloned repo.
+#[cfg(not(target_os = "windows"))]
 pub async fn worktree_in_use(work_dir: &Path) -> bool {
     let dir = work_dir.to_string_lossy();
     // Async so the reachable-from-`teardown` `lsof` scan doesn't block a tokio
@@ -577,9 +581,18 @@ pub async fn worktree_in_use(work_dir: &Path) -> bool {
     }
 }
 
+/// Never reached on Windows: it backs only the `WinProbe::Denied` branches, and
+/// the Windows probe always knows (same-user windows need no grant). There is
+/// no `lsof` there either, so this is a stub rather than a process scan.
+#[cfg(target_os = "windows")]
+pub async fn worktree_in_use(_work_dir: &Path) -> bool {
+    false
+}
+
 /// Whether `path` is `base` itself or a descendant of it. A plain prefix test
 /// would count a sibling like `<base>-2` as inside `<base>`, so require the match
 /// to end at a path boundary.
+#[cfg(not(target_os = "windows"))]
 fn path_at_or_under(path: &str, base: &str) -> bool {
     path == base
         || path
@@ -590,18 +603,26 @@ fn path_at_or_under(path: &str, base: &str) -> bool {
 /// Open System Settings → Privacy & Security → Accessibility so the user can
 /// grant mAIestro Code the permission teardown needs to close VS Code windows.
 /// Triggered only by an explicit user click — we never launch it automatically.
+/// macOS only: Windows has no such grant, and the button that calls this never
+/// shows there (its `accessibility` flag needs a `Denied` probe), so the command
+/// stays registered but only logs.
 #[tauri::command]
 pub fn open_accessibility_settings() {
     crate::log_invoke!("open_accessibility_settings");
+    #[cfg(not(target_os = "windows"))]
     let _ = crate::tools::spawn_reaped(
         Command::new("open")
             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
     );
+    #[cfg(target_os = "windows")]
+    tracing::warn!("open_accessibility_settings called on Windows, which has no Accessibility grant");
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_editor_window, path_at_or_under, write_vscode_files, LaunchOptions};
+    #[cfg(not(target_os = "windows"))]
+    use super::path_at_or_under;
+    use super::{is_editor_window, write_vscode_files, LaunchOptions};
 
     /// The default launch: remote control on, as the schema default has it.
     const ON: LaunchOptions = LaunchOptions { remote_control: true };
@@ -796,6 +817,7 @@ mod tests {
         assert_eq!(settings["workbench.colorCustomizations"]["titleBar.activeBackground"], "#c46686");
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn path_at_or_under_requires_boundary() {
         let base = "/src/work-8/repo";
