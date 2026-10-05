@@ -247,6 +247,7 @@ fn fallbacks(name: &str) -> Vec<PathBuf> {
             // A user-level npm prefix.
             home().join(".npm-global/bin/copilot"),
         ],
+        "code" if cfg!(target_os = "windows") => windows_code_fallbacks(),
         "code" => vec![
             PathBuf::from("/opt/homebrew/bin/code"),
             PathBuf::from("/usr/local/bin/code"),
@@ -254,6 +255,23 @@ fn fallbacks(name: &str) -> Vec<PathBuf> {
         ],
         _ => Vec::new(),
     }
+}
+
+/// The `code` CLI inside VS Code's two default Windows installs — the per-user
+/// installer (`%LOCALAPPDATA%\Programs`) and the system one (`%ProgramFiles%`).
+/// The counterpart of the macOS app-bundle entry: it finds the CLI when the
+/// installer's "Add to PATH" option was unticked. Extensionless, so
+/// [`exe_candidates`] turns each into `code.cmd`.
+fn windows_code_fallbacks() -> Vec<PathBuf> {
+    let install = |root: PathBuf| root.join("Microsoft VS Code").join("bin").join("code");
+    let mut out = Vec::new();
+    if let Some(local) = dirs::data_local_dir() {
+        out.push(install(local.join("Programs")));
+    }
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        out.push(install(PathBuf::from(pf)));
+    }
+    out
 }
 
 /// Resolve `name` to a concrete, existing binary, or `None` if nothing was found.
@@ -316,11 +334,39 @@ pub fn resolved_status(name: &str) -> (String, bool) {
     }
 }
 
+/// Windows' `CREATE_NO_WINDOW` process-creation flag.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Keep a console program from opening a console window. A release build is a
+/// GUI-subsystem app on Windows (`windows_subsystem = "windows"`), so a console
+/// child (`git`, `claude`, `code.cmd`, `cmd`) has no console to inherit and
+/// Windows would open a new one for it — a window flashing up on every git call.
+/// `tauri dev` never shows this: the debug build has its own console. A no-op
+/// elsewhere.
+pub fn hide_console(c: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
+/// The `tokio::process::Command` equivalent of [`hide_console`].
+pub fn hide_console_async(c: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    #[cfg(target_os = "windows")]
+    c.creation_flags(CREATE_NO_WINDOW);
+    c
+}
+
 /// A `std::process::Command` for a directly-invoked tool: the resolved binary
-/// with the enriched PATH so any sub-tools it calls resolve too.
+/// with the enriched PATH so any sub-tools it calls resolve too, and no console
+/// window on Windows ([`hide_console`]).
 pub fn command(name: &str) -> std::process::Command {
     let mut c = std::process::Command::new(resolve_tool(name));
     c.env("PATH", enriched_path());
+    hide_console(&mut c);
     c
 }
 
@@ -328,6 +374,7 @@ pub fn command(name: &str) -> std::process::Command {
 pub fn tokio_command(name: &str) -> tokio::process::Command {
     let mut c = tokio::process::Command::new(resolve_tool(name));
     c.env("PATH", enriched_path());
+    hide_console_async(&mut c);
     c
 }
 
@@ -384,6 +431,26 @@ pub fn os_reveal(path: &Path) -> std::process::Command {
         c.arg("-R").arg(path);
         c
     }
+}
+
+/// Git for Windows' `bash.exe`, the shell Claude Code runs its commands (and so
+/// the user's status line) with on Windows. Found as Claude Code finds it:
+/// `CLAUDE_CODE_GIT_BASH_PATH` when set, else next to the resolved `git`
+/// (`<Git>\cmd\git.exe` or `<Git>\mingw64\bin\git.exe` → `<Git>\bin\bash.exe`),
+/// else the default install folder. Never a bare `bash` off PATH, which on
+/// Windows can be WSL's `System32\bash.exe`. `None` when none exists.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn git_bash() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CLAUDE_CODE_GIT_BASH_PATH").map(PathBuf::from) {
+        return p.is_file().then_some(p);
+    }
+    let from_git = find_tool("git").and_then(|git| {
+        git.ancestors().skip(1).take(3).map(|root| root.join(r"bin\bash.exe")).find(|b| b.is_file())
+    });
+    from_git.or_else(|| {
+        let p = PathBuf::from(std::env::var_os("ProgramFiles")?).join(r"Git\bin\bash.exe");
+        p.is_file().then_some(p)
+    })
 }
 
 /// A short, trimmed preview of some (possibly large) subprocess output for a
@@ -559,6 +626,21 @@ mod tests {
         assert!(f.contains(&home().join(".local/bin/copilot")));
         assert!(f.contains(&home().join(".npm-global/bin/copilot")));
         assert!(f.iter().all(|p| !is_copilot_shim(p)));
+    }
+
+    #[test]
+    fn code_fallbacks_probe_the_platform_installs() {
+        let f = fallbacks("code");
+        if cfg!(target_os = "windows") {
+            let local = dirs::data_local_dir().unwrap().join(r"Programs\Microsoft VS Code\bin\code");
+            assert!(f.contains(&local), "{f:?}");
+            let pf = PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join(r"Microsoft VS Code\bin\code");
+            assert!(f.contains(&pf), "{f:?}");
+        } else {
+            assert!(f.contains(&PathBuf::from(
+                "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+            )));
+        }
     }
 
     /// The file a runnable `copilot` is on this platform (`copilot.exe` on Windows).

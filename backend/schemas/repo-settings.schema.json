@@ -31,7 +31,7 @@
       "type": "array",
       "items": { "type": "string" },
       "default": [],
-      "description": "Shell commands to run in a freshly-created worktree, in order, right after it's created and before the editor opens (e.g. `pnpm install`). Run via your login shell so PATH and tool managers are available. Stops at the first command that fails. Empty by default."
+      "description": "Shell commands to run in a freshly-created worktree, in order, right after it's created and before the editor opens (e.g. `pnpm install`). Run via your login shell so PATH and tool managers are available (via cmd on Windows). Stops at the first command that fails. Empty by default."
     },
     "delete_remote_on_teardown": {
       "type": ["boolean", "null"],

@@ -197,7 +197,8 @@ fn shell_command(program: &str, args: &[(String, bool)]) -> String {
 
 /// Open `dir` in VS Code, preferring the `code` CLI so we can pass
 /// `--disable-workspace-trust` (skipping the trust prompt on every fresh
-/// worktree), falling back to Launch Services when the CLI isn't found.
+/// worktree), falling back to Launch Services when the CLI isn't found (macOS
+/// only; on Windows a missing CLI is an error).
 pub fn open_vscode(dir: &Path) -> Result<(), String> {
     // Prefer the `code` CLI so we can pass --disable-workspace-trust and skip the
     // "Do you trust the authors of the files in this folder?" prompt on every
@@ -211,6 +212,11 @@ pub fn open_vscode(dir: &Path) -> Result<(), String> {
         )
         .map_err(|e| format!("failed to open VS Code: {e}"))?;
         return Ok(());
+    }
+    // Windows has no second launch path: `find_tool` already probed VS Code's
+    // default install folders for its CLI (`tools::fallbacks`).
+    if cfg!(target_os = "windows") {
+        return Err("Visual Studio Code not found: no `code` CLI on PATH or in its default install folders".into());
     }
     // Fallback: Launch Services. --args forwards the flag, but only honored when
     // VS Code isn't already running.

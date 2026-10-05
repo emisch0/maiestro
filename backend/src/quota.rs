@@ -276,21 +276,15 @@ fn user_statusline_from(files: &[PathBuf]) -> Option<serde_json::Value> {
 /// Run a status-line `command` through the shell with `input` on stdin, in the
 /// current directory (Claude already started us in the session's), and return
 /// its stdout — or `None` if it fails to start or outlives [`STATUSLINE_TIMEOUT`]
-/// (then it is killed).
+/// (then it is killed). The shell is the one Claude Code itself would use
+/// ([`chained_shell`]), so the line prints exactly what it does outside a
+/// mAIestro Code worktree.
 fn run_chained(command: &str, input: &[u8]) -> Option<Vec<u8>> {
-    use std::process::{Command, Stdio};
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut c = Command::new("sh");
-        c.arg("-c").arg(command);
-        c
-    };
-    #[cfg(windows)]
-    let mut cmd = {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(command);
-        c
-    };
+    use std::process::Stdio;
+    let mut cmd = chained_shell(command);
+    // `maiestro statusline` is the GUI-subsystem release binary, which has no
+    // console even though Claude does, so the shell would open one of its own.
+    crate::tools::hide_console(&mut cmd);
     let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     // Feed stdin and drain stdout on their own threads so a command that never
     // reads its input, or writes a lot, can't deadlock against us.
@@ -329,6 +323,38 @@ fn run_chained(command: &str, input: &[u8]) -> Option<Vec<u8>> {
         out.extend(chunk);
     }
     Some(out)
+}
+
+/// The shell invocation for a chained status line: `sh -c` on macOS. On
+/// Windows, Git Bash (`tools::git_bash`) — Claude Code runs status lines with
+/// it, so a user's line is a bash script; `cmd /C` would fail on its first
+/// `$(…)` and leave the line blank. `cmd /C` remains only for a machine with no
+/// Git Bash, where Claude Code itself can't run.
+fn chained_shell(command: &str) -> std::process::Command {
+    use std::process::Command;
+    #[cfg(not(windows))]
+    {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    }
+    #[cfg(windows)]
+    {
+        let mut c = match crate::tools::git_bash() {
+            Some(bash) => {
+                let mut c = Command::new(bash);
+                c.arg("-c");
+                c
+            }
+            None => {
+                let mut c = Command::new("cmd");
+                c.arg("/C");
+                c
+            }
+        };
+        c.arg(command);
+        c
+    }
 }
 
 /// The last recorded Claude quota, if any. A corrupt file is logged and skipped.
@@ -700,10 +726,17 @@ mod tests {
         assert!(user_statusline_from(&[missing, user]).is_none());
     }
 
-    #[cfg(unix)]
+    /// On Windows this runs through Git Bash, as Claude Code does — the same
+    /// POSIX commands work, so a user's bash status line passes through.
     #[test]
     fn chained_status_line_gets_stdin_and_is_bounded() {
+        if cfg!(windows) && crate::tools::git_bash().is_none() {
+            eprintln!("skipping: no Git Bash on this machine");
+            return;
+        }
         assert_eq!(run_chained("tr a-z A-Z", b"hello").unwrap(), b"HELLO");
+        // Bash syntax a `cmd /C` would reject — the shape of a real status line.
+        assert_eq!(run_chained(r#"input=$(cat); echo "got $input""#, b"x").unwrap(), b"got x\n");
         assert!(run_chained("exit 3", b"").unwrap().is_empty());
         // A lingering background child holding stdout doesn't hang us.
         let start = Instant::now();

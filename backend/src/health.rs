@@ -788,8 +788,9 @@ async fn check_copilot(repo: &str, model: Option<&str>) -> HealthCheck {
 }
 
 /// The session editor. Today mAIestro Code always launches VS Code (`open_vscode`),
-/// preferring the `code` CLI and falling back to the app bundle — so mirror that:
-/// pass if the `code` CLI resolves, warn (with the fallback still viable) if not.
+/// preferring the `code` CLI and, on macOS, falling back to the app bundle — so
+/// mirror that: pass if the `code` CLI resolves, warn (with the fallback still
+/// viable) if not. Windows has no such fallback, so a missing CLI fails there.
 fn check_editor() -> HealthCheck {
     let id = "editor";
     let label = "Session editor available";
@@ -800,12 +801,16 @@ fn check_editor() -> HealthCheck {
         None if crate::tools::stale_override("code").is_some() => {
             HealthCheck::new(id, label, HealthStatus::Fail, tool_not_found_detail("code"))
         }
-        None if std::path::Path::new("/Applications/Visual Studio Code.app").is_dir() => HealthCheck::new(
+        None if !cfg!(target_os = "windows")
+            && std::path::Path::new("/Applications/Visual Studio Code.app").is_dir() =>
+        {
+            HealthCheck::new(
             id,
             label,
             HealthStatus::Warn,
             "`code` CLI not found; will fall back to launching Visual Studio Code.app",
-        ),
+            )
+        }
         None => HealthCheck::new(id, label, HealthStatus::Fail, "Visual Studio Code not found"),
     }
 }
@@ -863,19 +868,31 @@ fn check_env_files(cloned_repo_dir: Option<&str>, env_files: &[String]) -> Healt
 // missing Nerd Font is reported as `Info`, never a failure: nothing is broken,
 // the user just might want to install it.
 //
-// Detection is a filename scan of the macOS font directories rather than
+// Detection is a filename scan of the OS font directories rather than
 // CoreText or `system_profiler` (seconds slow) — no new dependency, and fast
 // enough to sit in a health run.
 
-/// Directories macOS loads fonts from, in search order: the user's own, the
-/// machine's, and the system's (whose `Supplemental` subdirectory holds many of
-/// the stock faces, so each directory is scanned one level deep).
+/// Directories the OS loads fonts from, in search order. macOS: the user's own,
+/// the machine's, and the system's (whose `Supplemental` subdirectory holds many
+/// of the stock faces, so each directory is scanned one level deep). Windows:
+/// the per-user installs (where a Nerd Font's "Install" lands) and the
+/// machine-wide `%WINDIR%\Fonts`.
 fn font_dirs() -> Vec<std::path::PathBuf> {
-    vec![
-        crate::paths::home().join("Library/Fonts"),
-        std::path::PathBuf::from("/Library/Fonts"),
-        std::path::PathBuf::from("/System/Library/Fonts"),
-    ]
+    if cfg!(target_os = "windows") {
+        let mut dirs = Vec::new();
+        if let Some(local) = dirs::data_local_dir() {
+            dirs.push(local.join(r"Microsoft\Windows\Fonts"));
+        }
+        let windir = std::env::var_os("WINDIR").map_or_else(|| r"C:\Windows".into(), std::path::PathBuf::from);
+        dirs.push(windir.join("Fonts"));
+        dirs
+    } else {
+        vec![
+            crate::paths::home().join("Library/Fonts"),
+            std::path::PathBuf::from("/Library/Fonts"),
+            std::path::PathBuf::from("/System/Library/Fonts"),
+        ]
+    }
 }
 
 /// Normalized form for comparing a font family to a font *file* name: lowercase,
@@ -934,12 +951,22 @@ fn font_installed(family: &str, installed: &[String]) -> bool {
     !want.is_empty() && installed.iter().any(|f| f.starts_with(&want))
 }
 
-/// The Homebrew cask that installs `family`, for the remediation one-liner. A
-/// cask name can't be derived from a family name (`JetBrainsMono Nerd Font` ships
-/// as `font-jetbrains-mono-nerd-font`), so this is a small verified table rather
-/// than a guess — an unknown family gets no command, which beats a wrong one.
+/// The remediation one-liner that installs `family`: `brew install --cask …` on
+/// macOS, and none on Windows — Nerd Fonts have no official winget package, and
+/// no command beats a wrong one.
 fn font_install_command(family: &str) -> Option<String> {
-    let cask = match normalize_font_name(family).as_str() {
+    if cfg!(target_os = "windows") {
+        return None;
+    }
+    brew_font_cask(family).map(|cask| format!("brew install --cask {cask}"))
+}
+
+/// The Homebrew cask that installs `family`. A cask name can't be derived from a
+/// family name (`JetBrainsMono Nerd Font` ships as
+/// `font-jetbrains-mono-nerd-font`), so this is a small verified table rather
+/// than a guess — an unknown family gets no cask.
+fn brew_font_cask(family: &str) -> Option<&'static str> {
+    Some(match normalize_font_name(family).as_str() {
         "jetbrainsmononerdfont" => "font-jetbrains-mono-nerd-font",
         "hacknerdfont" => "font-hack-nerd-font",
         "firacodenerdfont" => "font-fira-code-nerd-font",
@@ -949,8 +976,7 @@ fn font_install_command(family: &str) -> Option<String> {
         "symbolsnerdfont" | "symbolsnerdfontmono" => "font-symbols-only-nerd-font",
         "cascadiacode" => "font-cascadia-code",
         _ => return None,
-    };
-    Some(format!("brew install --cask {cask}"))
+    })
 }
 
 /// Is the preferred terminal font actually installed? Informational: the font
@@ -1395,26 +1421,60 @@ mod tests {
     /// The schema default's preferred family must map to a real cask, or the
     /// health check would offer no way to fix what it reports.
     #[test]
-    fn default_font_has_an_install_command() {
+    fn default_font_has_a_brew_cask() {
         let stack = crate::app_settings::terminal_font_family();
         let preferred = font_families(&stack).first().cloned().expect("a family");
         assert_eq!(
-            font_install_command(&preferred).as_deref(),
-            Some("brew install --cask font-jetbrains-mono-nerd-font"),
-            "no install command for the preferred font {preferred}"
+            brew_font_cask(&preferred),
+            Some("font-jetbrains-mono-nerd-font"),
+            "no cask for the preferred font {preferred}"
         );
+        assert_eq!(brew_font_cask("Some Unknown Face"), None);
+    }
+
+    /// The one-liner is `brew install --cask …` on macOS; Windows has no
+    /// verified package to name, so it offers none.
+    #[test]
+    fn font_install_command_is_brew_on_macos_and_none_on_windows() {
+        let cmd = font_install_command("JetBrainsMono Nerd Font");
+        if cfg!(target_os = "windows") {
+            assert_eq!(cmd, None);
+        } else {
+            assert_eq!(cmd.as_deref(), Some("brew install --cask font-jetbrains-mono-nerd-font"));
+        }
         assert_eq!(font_install_command("Some Unknown Face"), None);
     }
 
     /// A missing Nerd Font is Info, not a failure — the stack still resolves to a
-    /// stock face — and carries the one-liner that installs it.
+    /// stock face — and carries the platform's install one-liner, if it has one.
     #[test]
     fn missing_preferred_font_is_info_with_an_install_command() {
         let installed = vec![normalize_font_name("Menlo")];
         let check = terminal_font_check("'JetBrainsMono Nerd Font', Menlo, monospace", &installed);
         assert_eq!(check.status, HealthStatus::Info);
         assert!(check.detail.contains("falls back to Menlo"), "detail: {}", check.detail);
-        assert_eq!(check.command.as_deref(), Some("brew install --cask font-jetbrains-mono-nerd-font"));
+        assert_eq!(check.command, font_install_command("JetBrainsMono Nerd Font"));
+    }
+
+    /// Windows 11 ships Cascadia Code as `CascadiaCode.ttf`; the default stack
+    /// falls back to it, so a Windows machine without a Nerd Font reads Info.
+    #[test]
+    fn default_stack_falls_back_to_windows_cascadia_code() {
+        let installed = vec![normalize_font_name("CascadiaCode"), normalize_font_name("consola")];
+        let check = terminal_font_check(&crate::app_settings::terminal_font_family(), &installed);
+        assert_eq!(check.status, HealthStatus::Info);
+        assert!(check.detail.contains("falls back to Cascadia Code"), "detail: {}", check.detail);
+    }
+
+    #[test]
+    fn font_dirs_are_the_platform_font_folders() {
+        let dirs = font_dirs();
+        if cfg!(target_os = "windows") {
+            assert!(dirs.iter().any(|d| d.ends_with(r"Microsoft\Windows\Fonts")), "{dirs:?}");
+            assert!(dirs.iter().any(|d| d.ends_with("Fonts") && d.parent().is_some_and(|p| p.ends_with("Windows"))), "{dirs:?}");
+        } else {
+            assert!(dirs.contains(&std::path::PathBuf::from("/System/Library/Fonts")), "{dirs:?}");
+        }
     }
 
     /// Nothing in the configured stack installed is a real misconfiguration, so

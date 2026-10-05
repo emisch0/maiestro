@@ -487,23 +487,44 @@ fn effective_worktree_prefix(configured: Option<&str>) -> String {
         .unwrap_or_else(|| crate::repo_settings::schema_default("/properties/worktree_prefix/default"))
 }
 
-/// Run a repo's post-spawn commands in the freshly-created worktree, in order.
-/// Each runs via the user's login shell (`$SHELL -lc`) so PATH and tool managers
-/// (nvm, pnpm, asdf, …) are available — mAIestro Code's own environment is minimal and
-/// not sourced from a profile. Stops at the first command that fails or times
-/// out; returns a warning per problem (the worktree is left in place either way,
-/// never torn down). A blank command is skipped.
+/// The shell invocation for one post-spawn command. On macOS, the user's login
+/// shell (`$SHELL -l -c`) so PATH and tool managers (nvm, pnpm, asdf, …) are
+/// available — mAIestro Code's own environment is minimal and not sourced from a
+/// profile. On Windows, `%ComSpec% /C` (cmd), with the process PATH (which there
+/// already is the user's full PATH) and no console window. The command goes in
+/// via `raw_arg`: std's argument quoting doesn't follow how `cmd /C` parses
+/// quotes, so a command carrying its own quotes would arrive mangled.
+fn post_spawn_shell(cmd: &str) -> tokio::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut c = tokio::process::Command::new(shell);
+        c.arg("/C").raw_arg(cmd).env("PATH", crate::tools::enriched_path());
+        crate::tools::hide_console_async(&mut c);
+        c
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let mut c = tokio::process::Command::new(shell);
+        c.args(["-l", "-c", cmd]);
+        c
+    }
+}
+
+/// Run a repo's post-spawn commands in the freshly-created worktree, in order,
+/// each through [`post_spawn_shell`]. Stops at the first command that fails or
+/// times out; returns a warning per problem (the worktree is left in place
+/// either way, never torn down). A blank command is skipped.
 async fn run_post_spawn_commands(work_dir: &Path, commands: &[String]) -> Vec<String> {
     let mut warnings = Vec::new();
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     for cmd in commands {
         let cmd = cmd.trim();
         if cmd.is_empty() {
             continue;
         }
         tracing::info!(command = %cmd, "running post-spawn command");
-        let run = tokio::process::Command::new(&shell)
-            .args(["-l", "-c", cmd])
+        let run = post_spawn_shell(cmd)
             .current_dir(work_dir)
             // Without this, a command that hits the timeout below is orphaned
             // and keeps mutating the worktree under the live session.
@@ -1231,6 +1252,26 @@ mod tests {
         // A command added after the dialog listed the others is not approved.
         let grown = cmds(&["pnpm install", "cargo fetch", "curl https://example.com/x.sh | sh"]);
         assert!(gate_post_spawn_commands("acme/widget", &grown, Some(&configured)).is_empty());
+    }
+
+    /// Post-spawn commands run through cmd in the worktree, keep their own
+    /// quotes intact, and stop at the first failure with a warning. Windows
+    /// only: on macOS this would source the developer's login shell profile.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn post_spawn_commands_run_through_cmd_and_stop_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = [
+            r#"echo "a b" > out.txt"#.to_string(),
+            "   ".to_string(),
+            "exit /b 3".to_string(),
+            "echo never > never.txt".to_string(),
+        ];
+        let warnings = run_post_spawn_commands(dir.path(), &commands).await;
+        let out = std::fs::read_to_string(dir.path().join("out.txt")).unwrap();
+        assert_eq!(out.trim(), r#""a b""#);
+        assert_eq!(warnings, vec!["post-spawn command failed (exit 3): exit /b 3".to_string()]);
+        assert!(!dir.path().join("never.txt").exists());
     }
 
     /// A confirmation with no warnings still names what couldn't be checked.
