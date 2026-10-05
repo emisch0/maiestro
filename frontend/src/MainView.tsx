@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, Agent, AvailableUpdate, ProviderQuota, SettingsProblem, DraftPreviewOutcome, HideState, IssueNode, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
+import { api, Agent, AvailableUpdate, ProviderQuota, SettingsProblem, DraftPreviewOutcome, HideState, IssueNode, PostSpawnChoice, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
 import {
   ActiveSessions,
   furtherPhase,
@@ -26,6 +26,7 @@ import { AgentSwitchDialog } from "./components/AgentSwitchDialog";
 import { RepoAgentDialog } from "./components/RepoAgentDialog";
 import { RepoAgentButton } from "./components/RepoAgentButton";
 import { CodexHooksDialog } from "./components/CodexHooksDialog";
+import { PostSpawnConfirmDialog } from "./components/PostSpawnConfirmDialog";
 import { AgentPrompt, SessionRow, TeardownPrompt, PrCreateState, PrMergeState } from "./components/SessionRow";
 import { PickerOverlay, Picker, Preview, Expand } from "./components/PickerOverlay";
 import LogoIcon from "./icons/logo.svg?react";
@@ -109,6 +110,12 @@ export function MainView() {
   const [hideTarget, setHideTarget] = useState<HideTarget | null>(null);
   // A spawn or reopen waiting on the one-time Codex hook-trust notice.
   const [hooksNotice, setHooksNotice] = useState<{ proceed: () => void } | null>(null);
+  // A spawn waiting on the user's answer about the repo's post-spawn commands.
+  const [postSpawnConfirm, setPostSpawnConfirm] = useState<{
+    repo: string;
+    commands: string[];
+    proceed: (choice: PostSpawnChoice) => void;
+  } | null>(null);
   // Repo (full_name) awaiting remove confirmation; at most one at a time.
   const [removeConfirm, setRemoveConfirm] = useState<string | null>(null);
   // Per-repo removal failure message, keyed by repo full_name.
@@ -448,16 +455,28 @@ export function MainView() {
   }
 
   // Confirm a spawn preview: create/update the issue, then spawn. On success the
-  // overlay closes and we land back in the main window.
+  // overlay closes and we land back in the main window. If the repo has
+  // post-spawn commands not yet approved, ask about them first; closing that
+  // dialog cancels and leaves the preview as it was.
   async function confirmSpawnNow() {
     if (!picker?.preview) return;
     const repo = picker.repo;
     const pv = picker.preview;
     if (!pv.shortTitle.trim() || !pv.issueTitle.trim()) return;
-    withCodexHooksNotice(repo, undefined, () => void spawnFromPreview(repo, pv));
+    let check;
+    try {
+      check = await api.postSpawnCheck(repo);
+    } catch (e) {
+      setPreview({ error: String(e) });
+      return;
+    }
+    const proceed = (choice: PostSpawnChoice) =>
+      withCodexHooksNotice(repo, undefined, () => void spawnFromPreview(repo, pv, choice));
+    if (check.needs_confirmation) setPostSpawnConfirm({ repo, commands: check.commands, proceed });
+    else proceed({ action: "run", allow_once: [] });
   }
 
-  async function spawnFromPreview(repo: string, pv: NonNullable<Picker["preview"]>) {
+  async function spawnFromPreview(repo: string, pv: NonNullable<Picker["preview"]>, postSpawn: PostSpawnChoice) {
     setPreview({ spawning: true, error: undefined });
     const edits: SpawnEdits = {
       issue_number: pv.issueNumber,
@@ -475,7 +494,7 @@ export function MainView() {
       // backend's `creating` status) until the worktree is ready. A thrown error
       // here is a synchronous failure (issue create/update, identity) — keep the
       // overlay open and show it.
-      await api.confirmSpawn(repo, edits);
+      await api.confirmSpawn(repo, edits, postSpawn);
       refreshSessions();
       refreshStatuses();
       closePicker();
@@ -1048,6 +1067,15 @@ export function MainView() {
           />
         );
       })()}
+
+      {postSpawnConfirm && (
+        <PostSpawnConfirmDialog
+          repo={postSpawnConfirm.repo}
+          commands={postSpawnConfirm.commands}
+          onChoose={(choice) => { const { proceed } = postSpawnConfirm; setPostSpawnConfirm(null); proceed(choice); }}
+          onClose={() => setPostSpawnConfirm(null)}
+        />
+      )}
 
       {hooksNotice && (
         <CodexHooksDialog

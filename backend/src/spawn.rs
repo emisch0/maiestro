@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::Agent;
+use crate::approvals;
 use crate::drafting::{resolve_draft, AgentActivity, DraftStep};
 use crate::editor::{close_window_and_wait, open_vscode, write_vscode_files, LaunchOptions, WindowClose};
 use crate::gitops::{git, git_net, local_branch_exists};
@@ -64,6 +65,10 @@ struct SpawnDecision<'a> {
     color: &'a str,
     emoji: &'a str,
     force_new: bool,
+    /// What the user chose for the repo's post-spawn commands: `None` skips them;
+    /// `Some(extra)` runs them if every one is approved by the stored approvals or
+    /// by `extra` (approved for this spawn only, or just saved).
+    post_spawn_allowed: Option<&'a [String]>,
 }
 
 /// The naming/placement decision for a spawn — reuse an existing worktree or
@@ -214,7 +219,7 @@ struct SpawnBg {
 /// an existing worktree stays fully synchronous (it's near-instant).
 #[tracing::instrument(skip_all, fields(session = tracing::field::Empty))]
 async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
-    let SpawnDecision { repo, issue_number, issue_url, default_branch, short_label, color, emoji, force_new } = d;
+    let SpawnDecision { repo, issue_number, issue_url, default_branch, short_label, color, emoji, force_new, post_spawn_allowed } = d;
 
     let (settings, gh) = repo_context(repo).await?;
     let cloned_repo = validated_cloned_repo(&settings)?;
@@ -308,6 +313,8 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     // background task builds the worktree.
     crate::status::write_creating(&workspace);
 
+    let post_spawn_commands = gate_post_spawn_commands(repo, &settings.post_spawn_commands, post_spawn_allowed);
+
     // Hand the slow work off to a background task and return at once.
     let bg = SpawnBg {
         gh,
@@ -324,7 +331,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         repo: repo.to_string(),
         issue_number,
         env_files: settings.env_files.clone(),
-        post_spawn_commands: settings.post_spawn_commands.clone(),
+        post_spawn_commands,
         comment_on_spawn: crate::repo_settings::bool_or_default(
             settings.comment_on_spawn,
             "/properties/comment_on_spawn/default",
@@ -531,6 +538,69 @@ async fn run_post_spawn_commands(work_dir: &Path, commands: &[String]) -> Vec<St
     warnings
 }
 
+/// A repo's post-spawn commands as they run: trimmed, blanks dropped.
+fn effective_post_spawn_commands(configured: &[String]) -> Vec<String> {
+    configured.iter().map(|c| c.trim()).filter(|c| !c.is_empty()).map(str::to_string).collect()
+}
+
+/// The configured post-spawn commands that no list in `approved` covers, in run
+/// order. Approval is by exact trimmed text, so an edited command is unapproved
+/// again. Empty means everything may run without asking.
+fn unapproved_post_spawn_commands(configured: &[String], approved: &[&[String]]) -> Vec<String> {
+    effective_post_spawn_commands(configured)
+        .into_iter()
+        .filter(|cmd| !approved.iter().any(|list| list.iter().any(|a| a.trim() == cmd)))
+        .collect()
+}
+
+/// Decide which post-spawn commands this spawn runs. All or nothing: they run
+/// only when the user didn't skip them and every one is approved — stored for
+/// the repo or globally, or by this spawn's choice. Anything else runs none, so a
+/// command added after the dialog closed can't slip through.
+fn gate_post_spawn_commands(repo: &str, configured: &[String], allowed: Option<&[String]>) -> Vec<String> {
+    let commands = effective_post_spawn_commands(configured);
+    if commands.is_empty() {
+        return commands;
+    }
+    let Some(extra) = allowed else {
+        tracing::info!(count = commands.len(), "post-spawn commands skipped by the user");
+        return Vec::new();
+    };
+    let repo_ok = approvals::approved_post_spawn_commands(approvals::Scope::Repo(repo));
+    let global_ok = approvals::approved_post_spawn_commands(approvals::Scope::Global);
+    let missing = unapproved_post_spawn_commands(&commands, &[&repo_ok, &global_ok, extra]);
+    if missing.is_empty() {
+        commands
+    } else {
+        tracing::warn!(unapproved = ?missing, "post-spawn commands changed since confirmation; not run");
+        Vec::new()
+    }
+}
+
+/// Whether spawning in a repo needs the post-spawn confirmation dialog, and the
+/// commands it would list.
+#[derive(serde::Serialize)]
+pub struct PostSpawnCheck {
+    /// Every configured command, in run order (blanks dropped).
+    pub commands: Vec<String>,
+    /// True when at least one command is approved neither for the repo nor
+    /// globally.
+    pub needs_confirmation: bool,
+}
+
+/// Check a repo's post-spawn commands against the stored approvals, before the
+/// spawn preview's confirm. Read-only.
+#[tauri::command]
+pub fn post_spawn_check(repo: String) -> Result<PostSpawnCheck, String> {
+    crate::log_invoke_debug!("post_spawn_check", repo = %repo);
+    let settings = crate::repo_settings::repo_settings_get(repo.clone())?;
+    let commands = effective_post_spawn_commands(&settings.post_spawn_commands);
+    let repo_ok = approvals::approved_post_spawn_commands(approvals::Scope::Repo(&repo));
+    let global_ok = approvals::approved_post_spawn_commands(approvals::Scope::Global);
+    let needs_confirmation = !unapproved_post_spawn_commands(&commands, &[&repo_ok, &global_ok]).is_empty();
+    Ok(PostSpawnCheck { commands, needs_confirmation })
+}
+
 // ── Create issue ────────────────────────────────────────────────────────────────
 
 /// Open an issue from an explicit, already-reviewed title and body (no drafting).
@@ -659,11 +729,40 @@ pub struct SpawnEdits {
     pub update_issue: bool,
 }
 
+/// The user's answer to the post-spawn confirmation. Every variant but `Skip`
+/// carries the commands the dialog listed; `Run` with an empty list is sent when
+/// no confirmation was needed.
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum PostSpawnChoice {
+    /// Run them this time only.
+    Run { allow_once: Vec<String> },
+    /// Run them and approve them for this repo.
+    AllowRepo { commands: Vec<String> },
+    /// Run them and approve them for every repo.
+    AllowGlobal { commands: Vec<String> },
+    /// Spawn without running any of them.
+    Skip,
+}
+
+impl PostSpawnChoice {
+    fn action(&self) -> &'static str {
+        match self {
+            PostSpawnChoice::Run { .. } => "run",
+            PostSpawnChoice::AllowRepo { .. } => "allow_repo",
+            PostSpawnChoice::AllowGlobal { .. } => "allow_global",
+            PostSpawnChoice::Skip => "skip",
+        }
+    }
+}
+
 /// Confirm a previewed spawn: create or update the GitHub issue as needed, then
-/// build the worktree/session using the reviewed label and theming.
+/// build the worktree/session using the reviewed label and theming. An "always
+/// allow" `post_spawn` choice is saved to the approvals files first; if that
+/// fails the commands still run this time, with a warning.
 #[tauri::command]
-pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> Result<SpawnResult, String> {
-    crate::log_invoke!("confirm_spawn", repo = %repo, force_new);
+pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool, post_spawn: PostSpawnChoice) -> Result<SpawnResult, String> {
+    crate::log_invoke!("confirm_spawn", repo = %repo, force_new, post_spawn = post_spawn.action());
     let (_settings, gh) = repo_context(&repo).await?;
 
     let number = match edits.issue_number {
@@ -679,7 +778,20 @@ pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> 
     let default_branch = gh.repo(&repo).await?["default_branch"].as_str().unwrap_or("main").to_string();
     let issue_url = format!("https://github.com/{repo}/issues/{number}");
 
-    do_spawn(SpawnDecision {
+    let mut warnings = Vec::new();
+    let (allowed, remember) = match &post_spawn {
+        PostSpawnChoice::Run { allow_once } => (Some(allow_once.as_slice()), None),
+        PostSpawnChoice::AllowRepo { commands } => (Some(commands.as_slice()), Some(approvals::Scope::Repo(&repo))),
+        PostSpawnChoice::AllowGlobal { commands } => (Some(commands.as_slice()), Some(approvals::Scope::Global)),
+        PostSpawnChoice::Skip => (None, None),
+    };
+    if let (Some(scope), Some(commands)) = (remember, allowed) {
+        if let Err(e) = approvals::add(scope, commands) {
+            warnings.push(format!("could not save the post-spawn approval: {e}"));
+        }
+    }
+
+    let mut result = do_spawn(SpawnDecision {
         repo: &repo,
         issue_number: number,
         issue_url: &issue_url,
@@ -688,8 +800,11 @@ pub async fn confirm_spawn(repo: String, edits: SpawnEdits, force_new: bool) -> 
         color: &edits.color,
         emoji: &edits.emoji,
         force_new,
+        post_spawn_allowed: allowed,
     })
-    .await
+    .await?;
+    result.warnings.extend(warnings);
+    Ok(result)
 }
 
 // ── Teardown ────────────────────────────────────────────────────────────────────
@@ -1076,6 +1191,47 @@ async fn remove_leftover_worktree_dir(dir: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    fn cmds(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Approval is by exact trimmed text, across any of the approved lists, and
+    /// blank commands never need it.
+    #[test]
+    fn unapproved_post_spawn_commands_checks_every_list() {
+        let configured = cmds(&[" pnpm install ", "", "  ", "cargo fetch"]);
+        assert!(unapproved_post_spawn_commands(&[], &[]).is_empty(), "no commands, nothing to approve");
+        assert!(unapproved_post_spawn_commands(&cmds(&["", " "]), &[]).is_empty(), "blank commands are skipped");
+        assert_eq!(unapproved_post_spawn_commands(&configured, &[]), cmds(&["pnpm install", "cargo fetch"]));
+        let all = cmds(&["pnpm install", "cargo fetch "]);
+        assert!(unapproved_post_spawn_commands(&configured, &[&all]).is_empty(), "approved via one list");
+        let (repo, global) = (cmds(&["pnpm install"]), cmds(&["cargo fetch"]));
+        assert!(unapproved_post_spawn_commands(&configured, &[&repo, &global]).is_empty(), "split across lists");
+        assert_eq!(unapproved_post_spawn_commands(&configured, &[&repo]), cmds(&["cargo fetch"]));
+        let edited = cmds(&["pnpm install --frozen-lockfile", "cargo fetch"]);
+        assert_eq!(unapproved_post_spawn_commands(&edited, &[&all]), cmds(&["pnpm install --frozen-lockfile"]), "an edited command needs approval again");
+    }
+
+    /// All or nothing: skipped or not fully approved runs none; approved by the
+    /// stored files and/or this spawn's choice runs all of them.
+    #[test]
+    fn gate_post_spawn_commands_is_all_or_nothing() {
+        let _home = crate::testutil::TempHome::new();
+        let configured = cmds(&["pnpm install", "cargo fetch"]);
+        assert!(gate_post_spawn_commands("acme/widget", &configured, None).is_empty(), "skip runs none");
+        assert!(gate_post_spawn_commands("acme/widget", &configured, Some(&[])).is_empty(), "unapproved runs none");
+        assert_eq!(gate_post_spawn_commands("acme/widget", &configured, Some(&configured)), configured, "allowed once");
+
+        approvals::add(approvals::Scope::Repo("acme/widget"), &cmds(&["pnpm install"])).unwrap();
+        approvals::add(approvals::Scope::Global, &cmds(&["cargo fetch"])).unwrap();
+        assert_eq!(gate_post_spawn_commands("acme/widget", &configured, Some(&[])), configured, "stored approvals");
+        assert!(gate_post_spawn_commands("acme/other", &configured, Some(&[])).is_empty(), "repo approvals stay with their repo");
+
+        // A command added after the dialog listed the others is not approved.
+        let grown = cmds(&["pnpm install", "cargo fetch", "curl https://example.com/x.sh | sh"]);
+        assert!(gate_post_spawn_commands("acme/widget", &grown, Some(&configured)).is_empty());
+    }
 
     /// A confirmation with no warnings still names what couldn't be checked.
     #[test]
