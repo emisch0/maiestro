@@ -1,10 +1,19 @@
-import { useEffect } from "react";
+import { ComponentType, lazy, Suspense, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { initTheme } from "./theme";
 import { MainView } from "./MainView";
-import { Settings } from "./Settings";
-import { LogsView } from "./LogsView";
-import { Onboarding } from "./Onboarding";
+
+// The non-popover windows load their code on demand, so the popover (opened
+// most often) doesn't parse them, and Settings' JSON Forms + ajv in particular.
+// MainView stays a static import so the popover never waits on a chunk.
+const Settings = lazy(() => import("./Settings").then((m) => ({ default: m.Settings })));
+const LogsView = lazy(() => import("./LogsView").then((m) => ({ default: m.LogsView })));
+const Onboarding = lazy(() => import("./Onboarding").then((m) => ({ default: m.Onboarding })));
+const LAZY_VIEWS: Record<string, ComponentType | undefined> = {
+  settings: Settings,
+  logs: LogsView,
+  onboarding: Onboarding,
+};
 
 export default function App() {
   // Apply the persisted theme to this window and keep it in sync with the
@@ -15,9 +24,9 @@ export default function App() {
     return () => { unlisten.then((f) => f()); };
   }, []);
 
-  const label = getCurrentWindow().label;
-  if (label === "settings") return <Settings />;
-  if (label === "logs") return <LogsView />;
-  if (label === "onboarding") return <Onboarding />;
-  return <MainView />;
+  // No Suspense fallback: the chunk loads from local disk, so a loader would
+  // only flash.
+  const View = LAZY_VIEWS[getCurrentWindow().label];
+  if (!View) return <MainView />;
+  return <Suspense fallback={null}><View /></Suspense>;
 }
