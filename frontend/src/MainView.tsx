@@ -11,7 +11,6 @@ import {
   ZONES,
 } from "./lib/lifecycle";
 import { effectiveHidden, formatSnoozeRemaining, HideTarget } from "./lib/snooze";
-import { AGENT_NAMES } from "./lib/agents";
 import { filterIssues } from "./lib/issues";
 import { useTauriListen } from "./hooks/useTauriListen";
 import { ResizeGrips } from "./components/ResizeGrips";
@@ -24,6 +23,7 @@ import { RemoveConfirm } from "./components/RemoveConfirm";
 import { HideSnoozeDialog } from "./components/HideSnoozeDialog";
 import { AgentSwitchDialog } from "./components/AgentSwitchDialog";
 import { RepoAgentDialog } from "./components/RepoAgentDialog";
+import { RepoAgentButton } from "./components/RepoAgentButton";
 import { CodexHooksDialog } from "./components/CodexHooksDialog";
 import { AgentPrompt, SessionRow, TeardownPrompt, PrCreateState, PrMergeState } from "./components/SessionRow";
 import { PickerOverlay, Picker, Preview, Expand } from "./components/PickerOverlay";
@@ -845,21 +845,30 @@ export function MainView() {
                       onClick={() => setRepoMenuOpen((r) => (r === repo ? null : repo))}
                     />
                   )}
-                  <button
-                    className="pill-btn repo-open-editor"
-                    onClick={async () => {
-                      setOpenRepoErr((e) => { const { [repo]: _, ...rest } = e; return rest; });
-                      try {
-                        await api.openRepoInEditor(repo);
-                      } catch (err) {
-                        setOpenRepoErr((e) => ({ ...e, [repo]: String(err) }));
-                      }
-                    }}
-                    title="Open cloned repo in VS Code"
-                    aria-label="Open cloned repo in VS Code"
-                  >
-                    <VSCodeIcon />
-                  </button>
+                  <div className="session-pill repo-pill">
+                    {repoAgent && (
+                      <RepoAgentButton
+                        agent={repoAgent}
+                        pinned={repoSettings[repo]?.agent != null}
+                        onClick={() => setRepoAgentTarget(repo)}
+                      />
+                    )}
+                    <button
+                      className="pill-btn repo-open-editor"
+                      onClick={async () => {
+                        setOpenRepoErr((e) => { const { [repo]: _, ...rest } = e; return rest; });
+                        try {
+                          await api.openRepoInEditor(repo);
+                        } catch (err) {
+                          setOpenRepoErr((e) => ({ ...e, [repo]: String(err) }));
+                        }
+                      }}
+                      title="Open cloned repo in VS Code"
+                      aria-label="Open cloned repo in VS Code"
+                    >
+                      <VSCodeIcon />
+                    </button>
+                  </div>
                   <button className="btn-add" onClick={() => openStartWork(repo)}>
                     Start Work
                   </button>
@@ -874,14 +883,6 @@ export function MainView() {
                   </button>
                 </div>
                 <div className={`command-strip ${repoMenu ? "command-strip--open" : ""}`}>
-                  <button
-                    className="command-btn"
-                    disabled={!repoAgent}
-                    onClick={() => setRepoAgentTarget(repo)}
-                    title={repoAgent ? `Choose this repo's agentic coding CLI (now ${AGENT_NAMES[repoAgent]})` : undefined}
-                  >
-                    Agentic Coding CLI…
-                  </button>
                   <HideCommandButton
                     hidden={repoHidden}
                     onHide={() => { setRepoMenuOpen(null); setHideTarget({ kind: "repo", repo }); }}
