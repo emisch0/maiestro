@@ -1,5 +1,10 @@
 import { ReactNode, useEffect, useRef } from "react";
 
+// Open dialogs, oldest first. Escape closes only the topmost one, so a dialog
+// stacked over another (e.g. the post-spawn confirmation over the spawn
+// preview) goes back to the one below instead of closing both.
+const openDialogs: object[] = [];
+
 // The modal scaffold shared by the health, hide/snooze, and Start Work overlays:
 // a click-to-dismiss scrim, a panel that stops propagation, and a header with a
 // title + close button. Adds the dialog a11y the inline versions lacked —
@@ -19,11 +24,18 @@ export function OverlayDialog({ title, panelClass, onClose, children, footer }: 
   onCloseRef.current = onClose;
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCloseRef.current(); };
+    const self = {};
+    openDialogs.push(self);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && openDialogs[openDialogs.length - 1] === self) onCloseRef.current();
+    };
     document.addEventListener("keydown", onKey);
     const panel = panelRef.current;
     if (panel && !panel.contains(document.activeElement)) panel.focus();
-    return () => document.removeEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      openDialogs.splice(openDialogs.indexOf(self), 1);
+    };
   }, []);
 
   return (

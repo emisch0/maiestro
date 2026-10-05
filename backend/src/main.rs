@@ -4,6 +4,7 @@
 mod about;
 mod agent;
 mod app_settings;
+mod approvals;
 mod credentials;
 mod drafting;
 mod editor;
@@ -495,6 +496,7 @@ fn main() {
             drafting::suggest_short_title,
             spawn::draft_spawn_preview,
             spawn::confirm_spawn,
+            spawn::post_spawn_check,
             spawn::create_issue_direct,
             session_agent::session_open_in_editor,
             session_agent::session_set_agent,

@@ -111,6 +111,22 @@ export interface SpawnEdits {
   update_issue: boolean;
 }
 
+/** `post_spawn_check`: the repo's post-spawn commands in run order, and whether
+ *  any of them still needs the user's approval before a spawn runs them. */
+export interface PostSpawnCheck {
+  commands: string[];
+  needs_confirmation: boolean;
+}
+
+/** The answer to the post-spawn confirmation, sent with `confirm_spawn`. All or
+ *  nothing: each choice covers every listed command. `run` with an empty list is
+ *  sent when no confirmation was needed. */
+export type PostSpawnChoice =
+  | { action: "run"; allow_once: string[] }
+  | { action: "allow_repo"; commands: string[] }
+  | { action: "allow_global"; commands: string[] }
+  | { action: "skip" };
+
 export type TeardownOutcome =
   | { status: "done" }
   | { status: "needs_confirmation"; warnings: string[] }
@@ -497,8 +513,11 @@ export const api = {
   draftSpawnPreview: (repo: string, idea: string, requestId: string, useRawFallback = false) =>
     invoke<DraftPreviewOutcome>("draft_spawn_preview", { repo, idea, useRawFallback, requestId }),
 
-  confirmSpawn: (repo: string, edits: SpawnEdits, forceNew = false) =>
-    invoke<SpawnResult>("confirm_spawn", { repo, edits, forceNew }),
+  postSpawnCheck: (repo: string) =>
+    invoke<PostSpawnCheck>("post_spawn_check", { repo }),
+
+  confirmSpawn: (repo: string, edits: SpawnEdits, postSpawn: PostSpawnChoice, forceNew = false) =>
+    invoke<SpawnResult>("confirm_spawn", { repo, edits, forceNew, postSpawn }),
 
   createIssueDirect: (repo: string, title: string, body: string) =>
     invoke<CreateIssueOutcome>("create_issue_direct", { repo, title, body }),

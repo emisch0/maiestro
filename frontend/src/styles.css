@@ -2859,6 +2859,117 @@ body {
 .codex-hooks-dialog {
   max-width: 420px;
 }
+
+/* Post-spawn confirmation (PostSpawnConfirmDialog, #225). The dialog body
+   scrolls if the popover is short; the command list is capped on its own so a
+   long setup script never pushes the choices out of reach. */
+.post-spawn-dialog {
+  max-width: 420px;
+  max-height: calc(100% - 20px);
+}
+.post-spawn-dialog .hide-dialog-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+.post-spawn-lead {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.post-spawn-term-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+/* Long commands wrap with their continuation lines indented under the "$", so
+   every character is visible without sideways scrolling and each command's
+   start stays unambiguous. */
+.post-spawn-term {
+  margin: 0;
+  padding: 8px 10px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: calc(10 * 1.6em + 16px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+}
+.post-spawn-term li {
+  display: grid;
+  grid-template-columns: 2ch minmax(0, 1fr);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.post-spawn-term li::before {
+  content: "$";
+  color: var(--muted);
+}
+.post-spawn-term:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+.post-spawn-term-fade {
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  bottom: 1px;
+  height: 36px;
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: linear-gradient(to bottom, transparent, var(--bg));
+  pointer-events: none;
+}
+.post-spawn-more {
+  margin: -6px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+.post-spawn-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.post-spawn-choices .hide-choice-hint b {
+  font-weight: 500;
+  color: var(--text);
+}
+.post-spawn-split {
+  height: 1px;
+  margin: 2px 0;
+  background: var(--border);
+}
+/* The default choice, styled like the primary button. */
+.hide-choice--primary {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+}
+.hide-choice--primary .hide-choice-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+/* A choice that skips the action: present but visually quieter. */
+.hide-choice--quiet {
+  background: transparent;
+}
+.hide-choice--quiet:hover {
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+.hide-choice:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+.post-spawn-dialog .session-hint {
+  margin: 0;
+}
 .codex-hooks-lead {
   margin: 0;
   font-size: 12.5px;
