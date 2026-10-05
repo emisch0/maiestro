@@ -51,9 +51,30 @@ pub fn app_version(app: tauri::AppHandle) -> AppVersion {
     }
 }
 
+/// The OS this build targets: `"macos"`, `"windows"` or `"linux"`. The frontend
+/// uses it for platform wording (e.g. "menu bar" vs "taskbar") instead of
+/// sniffing `navigator.userAgent`, so the backend owns the only platform decision.
+#[tauri::command]
+pub fn platform() -> &'static str {
+    crate::log_invoke_debug!("platform");
+    std::env::consts::OS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_matches_the_build_target() {
+        let expected = if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "linux"
+        };
+        assert_eq!(platform(), expected);
+    }
 
     #[test]
     fn release_url_points_at_the_version_tag() {

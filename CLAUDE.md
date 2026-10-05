@@ -10,7 +10,7 @@ Directory layout: `backend/` (Rust/Tauri) and `frontend/` (web). Not Tauri's def
 
 The frontend uses **pnpm** (`pnpm-lock.yaml`), not npm or yarn. Use `pnpm install` / `pnpm dev` — `npm install` fails on the `link:` workspace deps.
 
-The menu-bar tray icon is a **brain** icon (`backend/icons/tray.png`, a template image set at `main.rs:258`). Any docs or prose that describe the menu-bar icon should call it the brain icon.
+The tray icon is a **brain** icon: in the macOS menu bar it is `backend/icons/tray.png`, a template image the system tints; on the Windows taskbar it is a copy pre-scaled to the display's DPI, `backend/icons/tray-windows-{16,20,24,32}.png` (both chosen by `tray_icon` in `main.rs`). Any docs or prose that describe the tray icon should call it the brain icon.
 
 ## Git workflow
 
@@ -48,7 +48,7 @@ The spawn subsystem is split along its natural seams so each file owns one respo
 - **`agent.rs`** — the `Agent` enum (`claude` / `codex` / `antigravity` / `copilot`; Antigravity's binary is `agy` — resolve via `Agent::tool()`); `repo_settings::effective_agent` resolves a repo's agent. A session records its agent at spawn, so changing the repo setting never switches an existing worktree; only the explicit per-session switch does.
 - **`session_agent.rs`** — switching an existing session's agent (`session_set_agent`), the session-aware `session_open_in_editor`, and the VS Code restart that applies a switch (`session_restart_editor`).
 - **`pr.rs`** — the PR lifecycle commands (`session_pr`, `session_create_pr`, `session_pr_checks`, `session_work_state`, `session_merge_pr`).
-- **`health.rs`** — the Check Health diagnostics; **`update_check.rs`** — the background newer-release poll; **`quota.rs`** — the per-agent subscription quota reads and the `statusline` helper; **`tools.rs`** — external tool resolution; **`models.rs`** — asking an agent's CLI which models it offers (the drafting-model suggestions); **`app_settings.rs`** / **`repo_settings.rs`** — the two settings files and their schemas; **`approvals.rs`** — the append-only post-spawn approvals files; **`about.rs`** — version/build info.
+- **`health.rs`** — the Check Health diagnostics; **`update_check.rs`** — the background newer-release poll; **`quota.rs`** — the per-agent subscription quota reads and the `statusline` helper; **`tools.rs`** — external tool resolution; **`tray_visibility.rs`** — whether the Windows tray icon is hidden in the taskbar overflow (a read-only registry check, for onboarding); **`models.rs`** — asking an agent's CLI which models it offers (the drafting-model suggestions); **`app_settings.rs`** / **`repo_settings.rs`** — the two settings files and their schemas; **`approvals.rs`** — the append-only post-spawn approvals files; **`about.rs`** — version/build info.
 - **Shared helpers**: `gitops.rs` (`git()` / `local_branch_exists()`), `naming.rs` (slug/label helpers), `repo_context.rs` (the settings→identity→GitHub-client resolution + `validated_cloned_repo`), and `tools::{snippet, shell_quote}`.
 
 ### mAIestro Code launches sessions; it does not host them
