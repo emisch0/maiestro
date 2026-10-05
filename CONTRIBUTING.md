@@ -73,15 +73,6 @@ per clone:
 git config core.hooksPath .githooks
 ```
 
-Line endings are pinned to LF by the root `.gitattributes` on every OS
-(only `*.bat`/`*.cmd`/`*.ps1` are CRLF), so `core.autocrlf` doesn't matter.
-A Windows checkout made before that file existed may still have CRLF files;
-rewrite them once, on a clean tree:
-
-```bash
-git rm --cached -r -q . && git reset --hard
-```
-
 ## Build and release
 
 ```bash
