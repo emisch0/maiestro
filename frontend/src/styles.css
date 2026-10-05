@@ -129,7 +129,8 @@ body {
 
 /* ── Resize grips ──────────────────────────────────────────────────────────
    Invisible drag targets for the undecorated, transparent popover (the OS draws
-   no resize border). Edge strips are inset by the corner size so the corner
+   no resize border; on macOS ResizeGrips drives the resize itself, since
+   tao has no `startResizeDragging` there). Edge strips are inset by the corner size so the corner
    grips own the corners; everything sits above content via z-index. The grips
    stay clear of the header buttons: the top strip is only 6px tall while the
    header has 14px top padding, and the corner grips (14px) fall inside the
