@@ -257,7 +257,8 @@ An annotated tour of the popover (illustrative diagram, not a screenshot):
    and workspaces; the gear opens the Settings window (identities, repos,
    appearance).
 2. **Repo group** — one section per tracked repo, with a button to open its
-   checkout in VS Code.
+   checkout in VS Code and, beside it, the mark of the repo's agentic coding
+   CLI — click it to switch the agent new work items start with.
 3. **Start Work** — opens the issue picker for this repo (next diagram).
 4. **Agent status pill** — the Claude or OpenAI logo with the session's live state, fed by the agent's hooks:
    *Working* (rainbow ring), *Needs you* (amber — e.g. a permission prompt),

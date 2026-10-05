@@ -253,9 +253,10 @@ body {
   white-space: nowrap;
 }
 
-.repo-group-header .repo-open-editor {
+/* The agent icon and the VS Code button share one pill (issue #217), styled
+   like a work item's link pill. */
+.repo-group-header .repo-pill {
   margin-left: auto;
-  flex-shrink: 0;
 }
 
 .repo-group-header .btn-add {
