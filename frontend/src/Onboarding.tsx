@@ -1,6 +1,7 @@
 // One-time onboarding window (issue #98) — a single wizard (issues #148, #189).
-// Step 1 connects a GitHub identity; step 2 chooses the default agent and
-// launch at login together. A branded webview dialog — rather than a native
+// On Windows it opens with "Find the brain icon" (#198), shown only while the
+// icon is hidden in the taskbar's `^` overflow. Then it connects a GitHub
+// identity, and finally chooses the default agent and launch at login together. A branded webview dialog — rather than a native
 // alert, which can only show the generic OS icon — so it shows the mAIestro
 // Code logo and name. The backend opens this window only on the very first run;
 // pressing "Get started" (or closing the window, which accepts the defaults)
@@ -15,14 +16,16 @@
 // below — there's no generic step framework.
 
 import { useEffect, useState } from "react";
-import { Agent, ResolvedTool, api } from "./api";
+import { Agent, Platform, ResolvedTool, api } from "./api";
 import { GITHUB_PAT_SETUP_URL } from "./components/CredRows";
+import { TrayDragDemo } from "./components/TrayDragDemo";
 import { AGENTS, AGENT_MARKS, AGENT_PRODUCTS, AGENT_TOOLS, asAgent } from "./lib/agents";
 import LogoIcon from "./icons/logo.svg?react";
 
-type Step = "github" | "defaults";
+type Step = "tray" | "github" | "defaults";
 
 const STEPS: { id: Step; label: string }[] = [
+  { id: "tray", label: "Find the brain icon" },
   { id: "github", label: "Connect GitHub" },
   { id: "defaults", label: "Choose defaults" },
 ];
@@ -55,6 +58,13 @@ export function Onboarding() {
   const [agent, setAgent] = useState<Agent>("claude");
   const [tools, setTools] = useState<ResolvedTool[] | null>(null);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  // The tray lives in the macOS menu bar but the Windows taskbar (#198).
+  const [platform, setPlatform] = useState<Platform>("macos");
+  // Whether the Windows "Find the brain icon" step is in the wizard: decided
+  // once at load (the icon was hidden or unknown), so the rail doesn't change
+  // when the user drags the icon out. `trayPromoted` is the live answer.
+  const [showTray, setShowTray] = useState(false);
+  const [trayPromoted, setTrayPromoted] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -63,7 +73,13 @@ export function Onboarding() {
       api.toolsResolved().catch(() => null),
       api.getAppSettings().catch(() => null),
       api.appSettingsSchema().catch(() => null),
-    ]).then(([ids, resolved, settings, schema]) => {
+      api.platform().catch(() => null),
+      api.trayIconPromoted().catch(() => null),
+    ]).then(([ids, resolved, settings, schema, os, promoted]) => {
+      if (os) setPlatform(os);
+      const tray = os === "windows" && promoted !== true;
+      setShowTray(tray);
+      setTrayPromoted(promoted);
       const props = (schema?.properties ?? {}) as Record<string, { default?: unknown }>;
       const isInstalled = (a: Agent) =>
         !!resolved?.find((t) => t.tool === AGENT_TOOLS[a])?.exists;
@@ -71,9 +87,20 @@ export function Onboarding() {
       setAgent(initialAgent(settings?.agent, asAgent(props.agent?.default, "claude"), isInstalled));
       const has = ids.length > 0;
       setHasIdentities(has);
-      setStep(has ? "defaults" : "github");
+      setStep(tray ? "tray" : has ? "defaults" : "github");
     });
   }, []);
+
+  // Watch for the user dragging the icon out while the tray step is up.
+  // Explorer writes the registry entry a moment after the icon first appears,
+  // so `null` early on just means "not yet known".
+  useEffect(() => {
+    if (step !== "tray") return;
+    const id = setInterval(() => {
+      api.trayIconPromoted().then(setTrayPromoted, () => {});
+    }, 1000);
+    return () => clearInterval(id);
+  }, [step]);
 
   async function handleContinue() {
     const token = githubToken.trim();
@@ -99,7 +126,9 @@ export function Onboarding() {
     api.completeOnboarding(launchAtLogin, agent).catch(() => setBusy(false));
   };
 
-  const steps = hasIdentities ? STEPS.filter((s) => s.id !== "github") : STEPS;
+  const steps = STEPS.filter(
+    (s) => (s.id !== "tray" || showTray) && (s.id !== "github" || !hasIdentities),
+  );
   const stepIndex = steps.findIndex((s) => s.id === step);
   const toolFor = (a: Agent) => tools?.find((t) => t.tool === AGENT_TOOLS[a]);
   const chosenMissing = tools !== null && !toolFor(agent)?.exists;
@@ -133,7 +162,26 @@ export function Onboarding() {
 
       {hasIdentities !== null && (
         <section className="onboarding-body" key={step}>
-          {step === "github" ? (
+          {step === "tray" ? (
+            <>
+              <h2 className="onboarding-heading">Find the brain icon</h2>
+              <p className="onboarding-lead">
+                mAIestro Code lives in the taskbar. Windows hides new icons under the{" "}
+                <strong>^</strong> arrow, so open it and drag the brain onto the taskbar to keep it
+                one click away.
+              </p>
+              <TrayDragDemo done={trayPromoted === true} />
+              {trayPromoted === true ? (
+                <p className="onboarding-tray-status found" role="status">
+                  The brain icon is on your taskbar.
+                </p>
+              ) : trayPromoted === false ? (
+                <p className="onboarding-tray-status" role="status">
+                  Waiting for you to drag it out…
+                </p>
+              ) : null}
+            </>
+          ) : step === "github" ? (
             <>
               <h2 className="onboarding-heading">Connect GitHub</h2>
               <p className="onboarding-lead">
@@ -229,7 +277,8 @@ export function Onboarding() {
                 <div className="toggle-text">
                   <div className="onboarding-option-label">Launch at login</div>
                   <div className="onboarding-option-hint">
-                    Keep the brain icon in your menu bar after a restart.
+                    Keep the brain icon in your {platform === "windows" ? "taskbar" : "menu bar"} after
+                    a restart.
                   </div>
                 </div>
                 <button
@@ -252,16 +301,20 @@ export function Onboarding() {
         <footer className="onboarding-foot">
           <span className="onboarding-foot-note">Change any of this later in Settings.</span>
           <div className="onboarding-actions">
-            {step === "defaults" && !hasIdentities && (
+            {stepIndex > 0 && (
               <button
                 className="onboarding-btn onboarding-btn-secondary"
-                disabled={busy}
-                onClick={() => setStep("github")}
+                disabled={busy || identityBusy}
+                onClick={() => setStep(steps[stepIndex - 1].id)}
               >
                 Back
               </button>
             )}
-            {step === "github" ? (
+            {step === "tray" ? (
+              <button className="onboarding-btn" onClick={() => setStep(steps[stepIndex + 1].id)}>
+                {trayPromoted === false ? "Skip for now" : "Continue"}
+              </button>
+            ) : step === "github" ? (
               <button className="onboarding-btn" disabled={identityBusy} onClick={handleContinue}>
                 {identityBusy ? "Saving…" : githubToken.trim() ? "Continue" : "Skip for now"}
               </button>

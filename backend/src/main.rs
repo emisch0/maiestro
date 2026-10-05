@@ -34,6 +34,7 @@ mod status;
 mod testutil;
 mod theming;
 mod tools;
+mod tray_visibility;
 mod update_check;
 
 use std::sync::Mutex;
@@ -220,8 +221,8 @@ fn cursor_points(app: &tauri::AppHandle) -> Option<(f64, f64)> {
 
 /// Size and position the popover under the tray icon, on the tray's display,
 /// fully on-screen — all before `show()`, so it never flashes at the wrong spot.
-/// The math lives in `popover_placement` and runs entirely in macOS points, then
-/// is applied as `LogicalSize`/`LogicalPosition`: tao's physical setters divide
+/// The math lives in `popover_placement`. On macOS it runs in points and is
+/// applied as `LogicalSize`/`LogicalPosition`: tao's physical setters divide
 /// by the window's *current* scale, which put the popover on the wrong display
 /// in mixed-DPI setups (#175). It's computed analytically rather than read back
 /// from the live window, whose geometry lags a cycle on macOS.
@@ -527,6 +528,8 @@ fn main() {
             tools::tools_resolved,
             models::agent_models,
             about::app_version,
+            about::platform,
+            tray_visibility::tray_icon_promoted,
             update_check::update_check_status,
             update_check::update_dismiss,
             quota::provider_quotas_list,

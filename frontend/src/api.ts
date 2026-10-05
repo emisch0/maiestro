@@ -17,6 +17,9 @@ export interface PromptOverrides {
 /** The coding agent a repo runs (sessions and mAIestro Code's own drafting). */
 export type Agent = "claude" | "codex" | "antigravity" | "copilot";
 
+/** `std::env::consts::OS` of the running backend build. */
+export type Platform = "macos" | "windows" | "linux";
+
 /** Settings every agent has. `prompt_model` is the drafting model; null/empty
  *  = that agent's schema default (`haiku` for Claude; Codex's own configured
  *  model for Codex; a Gemini Flash id for Antigravity; Copilot's automatic
@@ -598,6 +601,15 @@ export const api = {
   /** Version + build metadata of the running app, for the About section. */
   appVersion: () =>
     invoke<AppVersion>("app_version"),
+
+  /** The OS the backend was built for, for platform-specific wording. */
+  platform: () =>
+    invoke<Platform>("platform"),
+
+  /** Whether the brain icon is on the Windows taskbar (`true`), hidden in its
+   *  `^` overflow (`false`), or unknown (`null`; always on macOS). */
+  trayIconPromoted: () =>
+    invoke<boolean | null>("tray_icon_promoted"),
 
   /** Whether settings.json is currently unreadable, for the popover banner. */
   appSettingsProblem: () =>
