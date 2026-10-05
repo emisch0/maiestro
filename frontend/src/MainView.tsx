@@ -12,6 +12,7 @@ import {
 } from "./lib/lifecycle";
 import { effectiveHidden, formatSnoozeRemaining, HideTarget } from "./lib/snooze";
 import { filterIssues } from "./lib/issues";
+import { repoGitHubUrl } from "./lib/repos";
 import { useTauriListen } from "./hooks/useTauriListen";
 import { ResizeGrips } from "./components/ResizeGrips";
 import { DismissibleError } from "./components/DismissibleError";
@@ -31,6 +32,7 @@ import LogoIcon from "./icons/logo.svg?react";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
 import VSCodeIcon from "./icons/vscode.svg?react";
+import GitHubIcon from "./icons/github.svg?react";
 import ChevronRightIcon from "./icons/chevron-right.svg?react";
 
 // Opening Settings goes through the backend so this and the tray menu share one
@@ -831,6 +833,7 @@ export function MainView() {
               : "";
             const repoMenu = repoMenuOpen === repo;
             const repoAgent = repoSettings[repo] ? repoSettings[repo].agent ?? defaultAgent : null;
+            const repoUrl = repoGitHubUrl(repo);
             const visibleSessions = showHidden
               ? repoSessions
               : repoSessions.filter((s) => !effectiveHidden(s.hidden, now));
@@ -846,6 +849,23 @@ export function MainView() {
                     />
                   )}
                   <div className="session-pill repo-pill">
+                    {repoUrl && (
+                      <button
+                        className="pill-btn repo-open-github"
+                        onClick={async () => {
+                          setOpenRepoErr((e) => { const { [repo]: _, ...rest } = e; return rest; });
+                          try {
+                            await api.openUrl(repoUrl);
+                          } catch (err) {
+                            setOpenRepoErr((e) => ({ ...e, [repo]: String(err) }));
+                          }
+                        }}
+                        title={`Open ${repo} on GitHub`}
+                        aria-label={`Open ${repo} on GitHub`}
+                      >
+                        <GitHubIcon />
+                      </button>
+                    )}
                     {repoAgent && (
                       <RepoAgentButton
                         agent={repoAgent}
