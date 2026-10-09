@@ -153,6 +153,38 @@ Download the latest `.dmg` from the [Releases page](https://github.com/yanokamay
 
 </details>
 
+### Windows (preview)
+
+Windows support is a **preview** while the port settles
+([#160](https://github.com/yanokamay-org/maiestro/issues/160)). You need
+Windows 10 or 11, `git` (Git for Windows), VS Code with its `code` CLI, a
+GitHub account, and **one** agentic coding CLI installed and logged in — the
+same choices as on macOS (see step 2 above, using each CLI's Windows install
+instructions).
+
+#### 1. Install mAIestro Code
+
+From the [Releases page](https://github.com/yanokamay-org/maiestro/releases),
+download `mAIestro-Code_X.Y.Z_x64-unsigned-setup.exe`. It's for x64 PCs
+(Intel / AMD, "x64-based processor" under *Settings → System → About → System
+type*); there's no Windows on ARM installer yet.
+
+Run it. It installs for your user only (no administrator prompt) under
+`%LOCALAPPDATA%\mAIestro Code`, and installs Microsoft's WebView2 runtime if
+it's missing. Uninstall from *Settings → Apps*.
+
+**The installers are not code-signed yet**
+([#224](https://github.com/yanokamay-org/maiestro/issues/224)), so SmartScreen
+shows *"Windows protected your PC"* when you run one: click **More info → Run
+anyway**. With no publisher signature to check, download them only from the
+Releases page above.
+
+#### 2. Then
+
+Follow steps 2–4 of the macOS instructions above (agent CLI, git
+authentication, optional Nerd Font). mAIestro Code lives in the notification
+area (system tray) — the brain icon — instead of the menu bar.
+
 ### Other Platforms
 
 mAIestro Code is not yet available on other platforms, but it is designed to support multiple OS, agentic coding CLIs, etc. Please submit a github issue to request more platforms.
