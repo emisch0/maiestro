@@ -139,13 +139,13 @@ pub fn write_vscode_files(
 /// are still themed.
 ///
 /// **Antigravity:** the bare binary. Its status hooks live in the worktree's
-/// `.agents/hooks.json` (`hooks.rs`), and it has no session-name flag or
+/// `.agents/hooks.json` (`hooks/antigravity.rs`), and it has no session-name flag or
 /// `/color`; an initial prompt (`-i`) would start a real model turn. Antigravity
 /// asks the user to trust each new worktree folder at startup — its own prompt.
 ///
 /// **Copilot:** the binary plus `--name <session title>`, as Claude gets. Its
 /// status hooks live in the worktree's `.github/hooks/maiestro-status.json`
-/// (`hooks.rs`), loaded once the user answers Copilot's own "Do you trust the
+/// (`hooks/copilot.rs`), loaded once the user answers Copilot's own "Do you trust the
 /// files in this folder?" prompt. No initial prompt: `-i` would start a real
 /// model turn (a premium request), and Copilot has no `/color` anyway. No
 /// `--no-auto-update` either — updating the interactive CLI is the user's call.

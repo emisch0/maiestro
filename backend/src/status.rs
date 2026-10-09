@@ -3,7 +3,7 @@
 //! mAIestro Code launches the repo's agent (`claude`, `codex`, `agy` or `copilot`) into VS Code and
 //! no longer owns its stdio (see CLAUDE.md → "mAIestro Code launches sessions; it
 //! does not host them"), so it can't read working/waiting state from the stream.
-//! Instead, each spawned worktree gets agent hooks (written by `hooks.rs`) that
+//! Instead, each spawned worktree gets agent hooks (written by the `hooks` module) that
 //! invoke this very binary as `maiestro hook <state> --workspace <ws-id>`. The
 //! hook reads the agent's event JSON on stdin, writes a small status record to `~/.maiestro/status/<ws-id>.json`,
 //! and the backend watches that directory and pushes changes to the popover.
@@ -305,7 +305,7 @@ fn next_last_error(
 pub fn run_hook_cli(args: &[String]) {
     // args = ["<state>", "--workspace", "<ws-id>"] (order-tolerant for the flag).
     // Codex hooks pass only the state: they must be identical for every worktree
-    // (see hooks.rs), so the workspace comes from the payload's `cwd` instead.
+    // (see `hooks/codex.rs`), so the workspace comes from the payload's `cwd` instead.
     let raw_arg = args.first().map(|s| s.as_str()).unwrap_or("");
     let flag = args.iter().position(|a| a == "--workspace").and_then(|i| args.get(i + 1)).cloned();
     if raw_arg.is_empty() {
