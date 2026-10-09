@@ -34,6 +34,8 @@ The detailed how-it-works for each subsystem lives in `docs/`. **Read the releva
 | The background update check and the popover's update banner (`update_check.rs`) | `docs/update-check.md` |
 | The popover's quota strip, the `statusline` helper, Codex/Copilot quota reads (`quota.rs`) | `docs/provider-quotas.md` |
 
+**Don't cite issue numbers in docs or code comments.** Docs and comments describe how things work now, not the history of how they got there — write "Codex sessions get no session color", not "Codex sessions (issue #162) get no session color", and never "see #126" or "(#175)". The one exception is a pointer to work that is still **open** (e.g. "unsigned until #224 adds signing"); check with `gh issue view <N> --json state` before citing one, and remove the reference when that issue closes. Issue numbers belong in branch names, commit messages and PR descriptions, which already record the history.
+
 ## Architectural decisions
 
 ### Backend module layout
@@ -98,7 +100,7 @@ Per-repo settings are in `~/.maiestro/repos/<owner>-<name>.json` (`repo_settings
 
 ### Releases are signed, notarized, and cut by the `/release` skill
 
-Release builds must be signed with a **Developer ID Application** certificate and notarized, and are cut locally on the release Mac rather than in CI. The mechanics — `scripts/release.sh`'s three idempotent phases, the `.env.release` secrets, why signing also governs Keychain trust — live with the **`/release` skill** (`.claude/skills/release/SKILL.md`), which drives the pipeline.
+A release is one version, one tag and one GitHub Release carrying the macOS `.dmg` and the Windows x64 NSIS installer (per-user install; ARM64 is #232), cut locally on **two machines** rather than in CI: the `.dmg` on the release Mac, signed with a **Developer ID Application** certificate and notarized; the Windows installer on a Windows PC under Git Bash, **unsigned** until #224 adds Authenticode signing. Either machine publishes first into a shared **draft**, and the release is published only once every expected asset is attached (immutable releases), never with one missing unless `finalize --allow-missing` says so. No signing config is committed to `tauri.conf.json`. The mechanics — `scripts/release.sh`'s idempotent `bump`/`build`/`publish`/`finalize`, the `.env.release` secrets, why signing also governs Keychain trust on macOS — live with the **`/release` skill** (`.claude/skills/release/SKILL.md`), which drives the pipeline.
 
 ### Backend logging
 
