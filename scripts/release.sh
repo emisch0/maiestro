@@ -695,9 +695,22 @@ print(json.dumps({
     created="$(printf '%s' "$payload" | github_call POST "/releases" 201 -)"
     mine="$(printf '%s' "$created" | pyrun -c 'import json,sys;print(json.load(sys.stdin)["id"])')"
     # Race guard: if the other machine created a draft at the same moment, both
-    # re-list and keep the oldest; the loser deletes its own.
+    # re-list and keep the oldest; the loser deletes its own. The listing lags
+    # creation (it is served with max-age=60), so a fresh draft can be missing
+    # from it for up to a minute: re-list until ours (or an older one) shows
+    # up, and never read an empty or newer result as having lost.
+    local tries=0
     find_release "$tag"
-    if [[ "$RELEASE_ID" != "$mine" ]]; then
+    while { [[ -z "$RELEASE_ID" ]] || (( RELEASE_ID > mine )); } && (( tries < 40 )); do
+      sleep 2
+      tries=$((tries + 1))
+      find_release "$tag"
+    done
+    if [[ -z "$RELEASE_ID" ]] || (( RELEASE_ID > mine )); then
+      RELEASE_ID="$mine"
+      UPLOAD_URL="$(printf '%s' "$created" | pyrun -c 'import json,sys;print(json.load(sys.stdin)["upload_url"])')"
+      IS_DRAFT=1
+    elif [[ "$RELEASE_ID" != "$mine" ]]; then
       echo "Another draft for $tag won the race — using it, deleting ours ($mine)"
       github_call DELETE "/releases/$mine" 204 >/dev/null
     fi
