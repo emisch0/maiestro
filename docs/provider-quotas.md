@@ -40,7 +40,7 @@ Hook payloads don't carry the quota; only the status line's stdin does. So each 
 2. Runs the status line the user would otherwise see: `statusLine` from the project's `.claude/settings.json`, else `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude/settings.json`), Claude's precedence below `settings.local.json`. It runs through `sh -c` in the same directory with the same stdin, and its stdout is passed through. On Windows it runs through Git Bash (`tools::git_bash`: `CLAUDE_CODE_GIT_BASH_PATH`, else the `bash.exe` beside the resolved `git`, else `%ProgramFiles%\Git\bin\bash.exe`), the shell Claude Code runs status lines with, so a bash status line prints exactly what it does outside a worktree; `cmd /C` is used only when no Git Bash exists. The shell gets no console window, since the release `maiestro.exe` is a GUI-subsystem app. With no user status line it prints nothing, as before.
 3. Never blocks or crashes the session: the chained command is killed after 5 s, and every failure path exits 0.
 
-Installing, reconciling and removing follow the hooks (`hooks.rs`), matched by the trailing `--workspace '<ws-id>'`:
+Installing, reconciling and removing follow the hooks (`hooks/claude.rs`), matched by the trailing `--workspace '<ws-id>'`:
 
 - **Spawn** adds it, copying the user's `padding`, unless the file already has a `statusLine` that isn't ours. That one is the user's and is never replaced; that worktree then records no Claude quota.
 - **Reconcile** (startup and reopen) re-points ours at the running binary. Where our hooks exist and no `statusLine` is set, it also **adds** ours, so worktrees spawned before this feature pick it up on the next launch. This is the one thing reconcile adds rather than re-points.

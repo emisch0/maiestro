@@ -28,7 +28,7 @@ The detailed how-it-works for each subsystem lives in `docs/`. **Read the releva
 |---|---|
 | Per-repo or global settings, their JSON Schemas, the Settings window forms, launch at login / onboarding, the About block | `docs/settings.md` |
 | The Check Health diagnostics (`health.rs`) | `docs/health-check.md` |
-| Session status pills, the hook helper (`hooks.rs`), `last_error`, the `creating` state | `docs/session-status.md` |
+| Session status pills, the hook helper (`hooks/`), `last_error`, the `creating` state | `docs/session-status.md` |
 | Worktree colors/emoji, the Claude session color, the generated `.vscode` files | `docs/theming.md` |
 | How the `claude` / `git` / `code` binaries are found, `tool_paths` overrides (`tools.rs`) | `docs/tool-resolution.md` |
 | The background update check and the popover's update banner (`update_check.rs`) | `docs/update-check.md` |
@@ -44,7 +44,7 @@ The spawn subsystem is split along its natural seams so each file owns one respo
 
 - **`spawn.rs`** — spawn core (`do_spawn`/`finish_spawn`), the preview commands (`prepare_spawn`/`draft_spawn_preview`/`confirm_spawn`), and `teardown`.
 - **`theming.rs`** — worktree color/emoji picking (`pick_theme`) and the palette → Claude-session-color mapping (`claude_color`).
-- **`hooks.rs`** — the agent status-hook subsystem, Claude Code, Codex, Antigravity or Copilot (write, merge, reconcile) — see "Live per-session status".
+- **`hooks/`** — the agent status-hook subsystem (write, merge, reconcile) — see "Live per-session status". `mod.rs` holds what the agents share (`HookShell`, the `write_session_hooks`/`reconcile_*` dispatch, the stable hook wrapper, `info/exclude`); each agent's hook format is in its own file: `claude.rs` (with the quota status line), `codex.rs` (the session-flag overrides and the hook-trust check), `antigravity.rs` (with the `.gitignore` handling) and `copilot.rs`.
 - **`editor.rs`** — VS Code workspace-file generation, launch/focus, and the teardown window control (AppleScript/`lsof` on macOS, Win32 `EnumWindows`/`WM_CLOSE` on Windows).
 - **`drafting.rs`** — the AI-drafting calls (`agent_text`, which dispatches to `claude -p`, `codex exec`, headless `agy` or headless `copilot`; issue/short-label drafting; `AgentActivity`).
 - **`agent.rs`** — the `Agent` enum (`claude` / `codex` / `antigravity` / `copilot`; Antigravity's binary is `agy` — resolve via `Agent::tool()`); `repo_settings::effective_agent` resolves a repo's agent. A session records its agent at spawn, so changing the repo setting never switches an existing worktree; only the explicit per-session switch does.
