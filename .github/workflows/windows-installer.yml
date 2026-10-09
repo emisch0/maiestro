@@ -1,0 +1,60 @@
+# Windows installer smoke test — run on demand only (Actions → "Windows
+# installer" → Run workflow, or `gh workflow run windows-installer.yml --ref
+# <branch>`), not on every PR: it builds a full release bundle per arch.
+#
+# Builds the unsigned x64 NSIS installer, then installs it silently, runs the
+# installed binary's `hook` CLI, and uninstalls
+# (scripts/smoke-test-installer.ps1). Run it before cutting a release.
+name: Windows installer
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-installer:
+    name: Windows installer (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build installer
+        run: pnpm tauri build --bundles nsis
+
+      - name: Install, exercise, uninstall
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem backend/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (-not $installer) { throw 'no NSIS installer was built' }
+          ./scripts/smoke-test-installer.ps1 $installer.FullName

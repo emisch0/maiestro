@@ -1,6 +1,6 @@
 # Update check
 
-How mAIestro Code learns that a newer release exists and how it tells the user (issue #182). Code: `backend/src/update_check.rs`, the `GitHub::anonymous()` client in `backend/src/plugins/github.rs`, and `frontend/src/components/UpdateBanner.tsx`. The persisted state is the `update_check` block of `~/.maiestro/settings.json` (`docs/settings.md`).
+How mAIestro Code learns that a newer release exists and how it tells the user. Code: `backend/src/update_check.rs`, the `GitHub::anonymous()` client in `backend/src/plugins/github.rs`, and `frontend/src/components/UpdateBanner.tsx`. The persisted state is the `update_check` block of `~/.maiestro/settings.json` (`docs/settings.md`).
 
 ## What it does
 
