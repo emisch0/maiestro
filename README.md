@@ -355,6 +355,7 @@ with dotfile tooling. The Settings window is the GUI over the same files.
 | `identities.json` | The known identity names and the optional default (the tokens themselves live in the macOS Keychain, never here) |
 | `repos/<owner>-<name>.json` | Per-repo settings (see below) |
 | `settings.json` | App-wide settings: theme (`light`/`dark`/`system`), CLI tool-path overrides, terminal font, launch-at-login, popover size, update-check state |
+| `approvals/` | Post-spawn commands you chose to always allow, per repo (`<owner>-<name>.json`) or for all repos (`global.json`). The app only adds to these; edit or delete a file to revoke |
 | `sessions/` / `status/` | Workspace records and live session status (managed by the app) |
 | `quota/` | The latest Claude subscription-quota reading (managed by the app) |
 
@@ -384,7 +385,9 @@ agent that then works in it is steered by files the repository controls:
 - **Your `post_spawn_commands` run in the new worktree** through your login
   shell (`$SHELL -lc`) with your full ambient environment, before the editor
   opens. Anything they invoke (`pnpm install`, `make setup`, …) executes
-  whatever the checked-out repo provides.
+  whatever the checked-out repo provides. A spawn lists them and asks first,
+  unless you chose to always allow those exact commands for the repo or for
+  all repos; a changed command asks again.
 - **Your `env_files` are copied from the clone into every worktree**, so any
   secrets in those `.env` files are present in each workspace you spawn.
 - **VS Code opens with `--disable-workspace-trust`.** The repo's own `.vscode`

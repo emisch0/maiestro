@@ -226,9 +226,14 @@ fn repos_dir() -> PathBuf {
     crate::paths::maiestro_dir("repos")
 }
 
+/// The per-repo file name, `<owner>-<name>.json`. Shared with `approvals.rs`, so
+/// a repo's approvals file is named like its settings file.
+pub fn file_name(repo: &str) -> String {
+    repo.replace('/', "-") + ".json"
+}
+
 fn settings_path(repo: &str) -> PathBuf {
-    let filename = repo.replace('/', "-") + ".json";
-    repos_dir().join(filename)
+    repos_dir().join(file_name(repo))
 }
 
 /// Load and validate a repo's settings file. Three outcomes:

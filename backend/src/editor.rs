@@ -739,6 +739,10 @@ mod tests {
     /// pass it either way.
     #[test]
     fn startup_task_omits_remote_control_when_off() {
+        // The Codex launch command embeds a path under MAIESTRO_HOME; hold a
+        // TempHome so a concurrent env-overriding test can't change it between
+        // the two writes compared below.
+        let _home = crate::testutil::TempHome::new();
         let dir = tempfile::tempdir().unwrap();
         let off = LaunchOptions { remote_control: false };
         write_vscode_files(dir.path(), "work-209-x", "#c46686", "x", Agent::Claude, off).unwrap();

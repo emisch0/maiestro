@@ -17,6 +17,9 @@ export interface PromptOverrides {
 /** The coding agent a repo runs (sessions and mAIestro Code's own drafting). */
 export type Agent = "claude" | "codex" | "antigravity" | "copilot";
 
+/** `std::env::consts::OS` of the running backend build. */
+export type Platform = "macos" | "windows" | "linux";
+
 /** Settings every agent has. `prompt_model` is the drafting model; null/empty
  *  = that agent's schema default (`haiku` for Claude; Codex's own configured
  *  model for Codex; a Gemini Flash id for Antigravity; Copilot's automatic
@@ -110,6 +113,22 @@ export interface SpawnEdits {
   /** Existing issue only: PATCH the title/body back to GitHub. */
   update_issue: boolean;
 }
+
+/** `post_spawn_check`: the repo's post-spawn commands in run order, and whether
+ *  any of them still needs the user's approval before a spawn runs them. */
+export interface PostSpawnCheck {
+  commands: string[];
+  needs_confirmation: boolean;
+}
+
+/** The answer to the post-spawn confirmation, sent with `confirm_spawn`. All or
+ *  nothing: each choice covers every listed command. `run` with an empty list is
+ *  sent when no confirmation was needed. */
+export type PostSpawnChoice =
+  | { action: "run"; allow_once: string[] }
+  | { action: "allow_repo"; commands: string[] }
+  | { action: "allow_global"; commands: string[] }
+  | { action: "skip" };
 
 export type TeardownOutcome =
   | { status: "done" }
@@ -497,8 +516,11 @@ export const api = {
   draftSpawnPreview: (repo: string, idea: string, requestId: string, useRawFallback = false) =>
     invoke<DraftPreviewOutcome>("draft_spawn_preview", { repo, idea, useRawFallback, requestId }),
 
-  confirmSpawn: (repo: string, edits: SpawnEdits, forceNew = false) =>
-    invoke<SpawnResult>("confirm_spawn", { repo, edits, forceNew }),
+  postSpawnCheck: (repo: string) =>
+    invoke<PostSpawnCheck>("post_spawn_check", { repo }),
+
+  confirmSpawn: (repo: string, edits: SpawnEdits, postSpawn: PostSpawnChoice, forceNew = false) =>
+    invoke<SpawnResult>("confirm_spawn", { repo, edits, forceNew, postSpawn }),
 
   createIssueDirect: (repo: string, title: string, body: string) =>
     invoke<CreateIssueOutcome>("create_issue_direct", { repo, title, body }),
@@ -579,6 +601,15 @@ export const api = {
   /** Version + build metadata of the running app, for the About section. */
   appVersion: () =>
     invoke<AppVersion>("app_version"),
+
+  /** The OS the backend was built for, for platform-specific wording. */
+  platform: () =>
+    invoke<Platform>("platform"),
+
+  /** Whether the brain icon is on the Windows taskbar (`true`), hidden in its
+   *  `^` overflow (`false`), or unknown (`null`; always on macOS). */
+  trayIconPromoted: () =>
+    invoke<boolean | null>("tray_icon_promoted"),
 
   /** Whether settings.json is currently unreadable, for the popover banner. */
   appSettingsProblem: () =>

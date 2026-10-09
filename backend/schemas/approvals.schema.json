@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maiestro.app/schemas/approvals.schema.json",
+  "title": "Approvals",
+  "description": "Commands the user has approved, stored apart from the settings files so no settings write can erase or change them. One file per scope: ~/.maiestro/approvals/<owner>-<name>.json for one repo, ~/.maiestro/approvals/global.json for all repos. mAIestro Code only ever adds entries; revoke an approval by editing or deleting the file. This schema is the hand-written specification for the file format; the Rust Approvals struct must conform to it (a unit test enforces the two stay in sync). Unknown fields are tolerated so files written by a newer app version still load in an older one.",
+  "type": "object",
+  "properties": {
+    "post_spawn_commands": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Post-spawn commands approved to run without asking, matched by their exact (trimmed) text. A spawn asks first unless every one of the repo's post_spawn_commands is approved here or in the other scope's file."
+    }
+  }
+}

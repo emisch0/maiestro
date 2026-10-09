@@ -75,7 +75,8 @@ pub enum Edge {
     Right,
 }
 
-/// The popover's target frame, in points. `size` is `Some` only when the window
+/// The popover's target frame, in the same space as the inputs (macOS points,
+/// Windows physical px). `size` is `Some` only when the window
 /// must shrink to fit the display.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Placement {

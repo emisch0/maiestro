@@ -129,7 +129,8 @@ body {
 
 /* ── Resize grips ──────────────────────────────────────────────────────────
    Invisible drag targets for the undecorated, transparent popover (the OS draws
-   no resize border). Edge strips are inset by the corner size so the corner
+   no resize border; on macOS ResizeGrips drives the resize itself, since
+   tao has no `startResizeDragging` there). Edge strips are inset by the corner size so the corner
    grips own the corners; everything sits above content via z-index. The grips
    stay clear of the header buttons: the top strip is only 6px tall while the
    header has 14px top padding, and the corner grips (14px) fall inside the
@@ -2224,6 +2225,226 @@ body {
   color: var(--text);
 }
 
+/* Onboarding "Find the brain icon" status line under the demo (#198). */
+.onboarding-tray-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.onboarding-tray-status::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: tray-status-wait 1.6s ease-in-out infinite;
+}
+
+.onboarding-tray-status.found {
+  color: var(--green);
+}
+
+.onboarding-tray-status.found::before {
+  background: var(--green);
+  animation: none;
+}
+
+@keyframes tray-status-wait {
+  50% { opacity: 0.3; }
+}
+
+/* The Windows taskbar demo (TrayDragDemo, #198). A fixed 300×140 stage; every
+   piece is absolutely placed in stage px, and one 5s loop moves the pointer
+   and the brain on the same keyframe times so the brain stays under it:
+   open ^ (≈25%) → pick up the brain (44%) → drop it on the taskbar (66–70%).
+   Base (non-animated) styles are the reduced-motion still frame. */
+.tray-demo {
+  --tray-demo-loop: 5s;
+  position: relative;
+  width: 300px;
+  height: 140px;
+  margin-top: 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.tray-demo-taskbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 32px;
+  background: var(--surface-hover);
+  border-top: 1px solid var(--border);
+}
+
+.tray-demo-chevron {
+  position: absolute;
+  left: 192px;
+  top: 3px;
+  width: 22px;
+  height: 24px;
+  border-radius: 4px;
+  display: grid;
+  place-items: center;
+  animation: tray-demo-chevron var(--tray-demo-loop) infinite;
+}
+
+.tray-demo-sys {
+  position: absolute;
+  left: 244px;
+  top: 9px;
+  display: flex;
+  gap: 2px;
+}
+
+.tray-demo-clock {
+  position: absolute;
+  right: 6px;
+  top: 5px;
+  font-size: 8.5px;
+  line-height: 1.25;
+  text-align: right;
+}
+
+.tray-demo-flyout {
+  position: absolute;
+  left: 160px;
+  top: 36px;
+  width: 92px;
+  height: 64px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  animation: tray-demo-flyout var(--tray-demo-loop) infinite;
+}
+
+.tray-demo-app {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: var(--border);
+}
+
+/* Sits in the flyout's empty cell (194,70); the drop moves it +24,+42 to the
+   taskbar slot right of the chevron (218,112). */
+.tray-demo-brain {
+  position: absolute;
+  left: 197px;
+  top: 73px;
+  width: 18px;
+  height: 18px;
+  animation: tray-demo-brain var(--tray-demo-loop) infinite;
+}
+
+.tray-demo-drop {
+  position: absolute;
+  left: 216px;
+  top: 110px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--green);
+  opacity: 0;
+  animation: tray-demo-drop var(--tray-demo-loop) infinite;
+}
+
+/* Origin = the pointer's tip. Still frame: resting on the brain. */
+.tray-demo-cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(206px, 82px);
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.3));
+  animation: tray-demo-cursor var(--tray-demo-loop) infinite;
+}
+
+.tray-demo-arrow {
+  position: absolute;
+  left: 192px;
+  top: 80px;
+  color: var(--accent);
+  display: none;
+}
+
+@keyframes tray-demo-cursor {
+  0% { transform: translate(110px, 50px); opacity: 0; }
+  6% { transform: translate(110px, 50px); opacity: 1; }
+  22% { transform: translate(203px, 124px) scale(1); }
+  25% { transform: translate(203px, 124px) scale(0.85); }
+  28% { transform: translate(203px, 124px) scale(1); }
+  40% { transform: translate(206px, 82px) scale(1); }
+  44% { transform: translate(206px, 82px) scale(0.85); }
+  66% { transform: translate(230px, 124px) scale(0.85); }
+  70% { transform: translate(230px, 124px) scale(1); }
+  82% { transform: translate(262px, 86px); opacity: 1; }
+  92% { transform: translate(262px, 86px); opacity: 1; }
+  100% { transform: translate(262px, 86px); opacity: 0; }
+}
+
+/* Fill only: interpolating an inset box-shadow to/from none leaves a faint
+   outline around the chevron for most of the loop. */
+@keyframes tray-demo-chevron {
+  0%, 21%, 30%, 100% { background: transparent; }
+  24%, 27% { background: var(--border); }
+}
+
+@keyframes tray-demo-flyout {
+  0%, 25% { opacity: 0; transform: translateY(6px); }
+  29%, 66% { opacity: 1; transform: none; }
+  71%, 100% { opacity: 0; transform: translateY(6px); }
+}
+
+@keyframes tray-demo-brain {
+  0%, 25% { opacity: 0; transform: none; }
+  29%, 40% { opacity: 1; transform: none; }
+  44% { transform: scale(1.2); }
+  66% { transform: translate(24px, 42px) scale(1.2); }
+  70%, 94% { opacity: 1; transform: translate(24px, 42px); }
+  100% { opacity: 0; transform: translate(24px, 42px); }
+}
+
+@keyframes tray-demo-drop {
+  0%, 69% { opacity: 0; transform: scale(0.6); }
+  73% { opacity: 0.9; transform: scale(1); }
+  88%, 100% { opacity: 0; transform: scale(1.7); }
+}
+
+/* Detected on the taskbar: hold the final frame. */
+.tray-demo.done * {
+  animation: none;
+}
+
+.tray-demo.done .tray-demo-flyout,
+.tray-demo.done .tray-demo-cursor {
+  display: none;
+}
+
+.tray-demo.done .tray-demo-brain {
+  transform: translate(24px, 42px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tray-demo *,
+  .onboarding-tray-status::before {
+    animation: none;
+  }
+
+  .tray-demo:not(.done) .tray-demo-arrow {
+    display: block;
+  }
+}
+
 .env-file-list {
   display: flex;
   flex-direction: column;
@@ -2858,6 +3079,117 @@ body {
 /* One-time Codex hook-trust instructions (CodexHooksDialog). */
 .codex-hooks-dialog {
   max-width: 420px;
+}
+
+/* Post-spawn confirmation (PostSpawnConfirmDialog, #225). The dialog body
+   scrolls if the popover is short; the command list is capped on its own so a
+   long setup script never pushes the choices out of reach. */
+.post-spawn-dialog {
+  max-width: 420px;
+  max-height: calc(100% - 20px);
+}
+.post-spawn-dialog .hide-dialog-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+.post-spawn-lead {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.post-spawn-term-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+/* Long commands wrap with their continuation lines indented under the "$", so
+   every character is visible without sideways scrolling and each command's
+   start stays unambiguous. */
+.post-spawn-term {
+  margin: 0;
+  padding: 8px 10px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: calc(10 * 1.6em + 16px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+}
+.post-spawn-term li {
+  display: grid;
+  grid-template-columns: 2ch minmax(0, 1fr);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.post-spawn-term li::before {
+  content: "$";
+  color: var(--muted);
+}
+.post-spawn-term:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+.post-spawn-term-fade {
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  bottom: 1px;
+  height: 36px;
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: linear-gradient(to bottom, transparent, var(--bg));
+  pointer-events: none;
+}
+.post-spawn-more {
+  margin: -6px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+.post-spawn-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.post-spawn-choices .hide-choice-hint b {
+  font-weight: 500;
+  color: var(--text);
+}
+.post-spawn-split {
+  height: 1px;
+  margin: 2px 0;
+  background: var(--border);
+}
+/* The default choice, styled like the primary button. */
+.hide-choice--primary {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+}
+.hide-choice--primary .hide-choice-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+/* A choice that skips the action: present but visually quieter. */
+.hide-choice--quiet {
+  background: transparent;
+}
+.hide-choice--quiet:hover {
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+.hide-choice:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+.post-spawn-dialog .session-hint {
+  margin: 0;
 }
 .codex-hooks-lead {
   margin: 0;
