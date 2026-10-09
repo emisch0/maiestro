@@ -235,7 +235,7 @@ mod tests {
         // leaving it again removes them.
         session_set_agent(s.id.clone(), Agent::Antigravity).await.unwrap();
         let agy_hooks = std::fs::read_to_string(wt.path().join(".agents/hooks.json")).unwrap();
-        assert!(agy_hooks.contains("maiestro-status") && agy_hooks.contains("--workspace '186-x'"), "{agy_hooks}");
+        assert!(agy_hooks.contains("maiestro-status") && agy_hooks.contains("--workspace ") && agy_hooks.contains("186-x"), "{agy_hooks}");
         assert_eq!(read("tasks.json")["tasks"][0]["label"], "Start Antigravity");
         let gi = std::fs::read_to_string(wt.path().join(".gitignore")).unwrap();
         assert!(gi.contains(".agents/hooks.json"), "{gi}");

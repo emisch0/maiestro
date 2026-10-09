@@ -461,16 +461,26 @@ fn stop_error(error: &str, ts: &str) -> ToolError {
 /// a worktree nested under another (unusual, but possible with a custom prefix)
 /// resolves to itself. `None` when `cwd` is in no tracked worktree (a Codex
 /// session mAIestro Code didn't launch), and the hook then records nothing.
+/// Paths are compared through [`comparable_path`], so a Windows `cwd` matches
+/// whichever separators and drive-letter case either side uses.
 fn workspace_for_cwd(cwd: &str, sessions: &[(String, String)]) -> Option<String> {
-    let cwd = cwd.trim_end_matches('/');
+    let cwd = comparable_path(cwd);
     sessions
         .iter()
         .filter(|(_, dir)| {
-            let dir = dir.trim_end_matches('/');
-            !dir.is_empty() && (cwd == dir || cwd.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/')))
+            let dir = comparable_path(dir);
+            !dir.is_empty() && (cwd == dir || cwd.strip_prefix(&dir).is_some_and(|rest| rest.starts_with('/')))
         })
         .max_by_key(|(_, dir)| dir.len())
         .map(|(id, _)| id.clone())
+}
+
+/// `path` with `/` separators and no trailing one; on Windows also lowercased,
+/// since its paths are case-insensitive and an agent may report `c:\…` for a
+/// worktree recorded as `C:\…`.
+fn comparable_path(path: &str) -> String {
+    let path = if cfg!(windows) { path.replace('\\', "/").to_lowercase() } else { path.to_string() };
+    path.trim_end_matches('/').to_string()
 }
 
 /// Pull a human-readable failure message out of a `PostToolUseFailure` payload.
@@ -878,6 +888,16 @@ mod tests {
         // A sibling whose name merely extends the worktree's is not inside it.
         assert_eq!(workspace_for_cwd("/src/work-8-a/repo-2", &sessions), None);
         assert_eq!(workspace_for_cwd("/elsewhere", &sessions), None);
+    }
+
+    /// On Windows a Codex `cwd` uses backslashes and any drive-letter case.
+    #[cfg(windows)]
+    #[test]
+    fn workspace_for_cwd_matches_windows_paths() {
+        let sessions = vec![("8-a".to_string(), r"C:\src\work-8-a\repo".to_string())];
+        assert_eq!(workspace_for_cwd(r"c:\src\work-8-a\repo\frontend", &sessions).as_deref(), Some("8-a"));
+        assert_eq!(workspace_for_cwd("C:/src/work-8-a/repo/", &sessions).as_deref(), Some("8-a"));
+        assert_eq!(workspace_for_cwd(r"C:\src\work-8-a\repo-2", &sessions), None);
     }
 
     #[test]
