@@ -227,7 +227,11 @@ fn fallbacks(name: &str) -> Vec<PathBuf> {
             PathBuf::from("/usr/local/bin/codex"),
             // Codex's standalone installer links its binary here.
             home().join(".local/bin/codex"),
-        ],
+        ]
+        .into_iter()
+        // Its Windows installer, which only appends this to the user `Path`.
+        .chain(windows_local_fallback(r"Programs\OpenAI\Codex\bin\codex"))
+        .collect(),
         "agy" => vec![
             // Antigravity's install script (`antigravity.google/cli/install.sh`)
             // puts the binary here.
@@ -235,7 +239,11 @@ fn fallbacks(name: &str) -> Vec<PathBuf> {
             // The `antigravity-cli` Homebrew cask.
             PathBuf::from("/opt/homebrew/bin/agy"),
             PathBuf::from("/usr/local/bin/agy"),
-        ],
+        ]
+        .into_iter()
+        // Its Windows install script, which only appends this to the user `Path`.
+        .chain(windows_local_fallback(r"agy\bin\agy"))
+        .collect(),
         "copilot" => vec![
             // `brew install copilot-cli`, and `npm install -g @github/copilot`
             // when npm's prefix is Homebrew (the npm entry point is a Node
@@ -255,6 +263,15 @@ fn fallbacks(name: &str) -> Vec<PathBuf> {
         ],
         _ => Vec::new(),
     }
+}
+
+/// `rel` under `%LOCALAPPDATA%`, where Windows installers put a per-user CLI;
+/// nothing elsewhere. Extensionless, so [`exe_candidates`] turns it into `.exe`.
+fn windows_local_fallback(rel: &str) -> Option<PathBuf> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    dirs::data_local_dir().map(|local| local.join(rel))
 }
 
 /// The `code` CLI inside VS Code's two default Windows installs — the per-user
@@ -616,6 +633,16 @@ mod tests {
         let f = fallbacks("agy");
         assert!(f.contains(&home().join(".local/bin/agy")));
         assert!(f.contains(&PathBuf::from("/opt/homebrew/bin/agy")));
+    }
+
+    /// Codex's and Antigravity's Windows installers put the CLI under
+    /// `%LOCALAPPDATA%` and only append it to the user `Path`.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn codex_and_agy_fallbacks_probe_their_windows_installs() {
+        let local = dirs::data_local_dir().unwrap();
+        assert!(fallbacks("codex").contains(&local.join(r"Programs\OpenAI\Codex\bin\codex")));
+        assert!(fallbacks("agy").contains(&local.join(r"agy\bin\agy")));
     }
 
     #[test]

@@ -306,15 +306,24 @@ pub(crate) fn antigravity_draft_dir() -> std::path::PathBuf {
 }
 
 /// The drafting folder's `.agents/hooks.json`: one `PreToolUse` hook matching
-/// every tool that answers `deny`. It is plain `printf` — no mAIestro Code binary
-/// involved — so it can't fail open if the app moves.
+/// every tool that answers `deny`. It just prints the decision — no mAIestro
+/// Code binary involved — so it can't fail open if the app moves. On Windows,
+/// where agy runs hooks with `cmd` and a `"` can't get through, that decision
+/// is `{}`, which agy also reads as a deny. In the wrong shell the command
+/// would fail, which agy reads as a block.
 pub(crate) fn antigravity_lockdown_hooks() -> serde_json::Value {
-    let decision = r#"{"decision":"deny","reason":"mAIestro Code drafting runs without tools."}"#;
+    use crate::hooks::HookShell;
+    let shell = HookShell::for_agent(Agent::Antigravity);
+    let decision = match shell {
+        HookShell::Cmd => "{}",
+        _ => r#"{"decision":"deny","reason":"mAIestro Code drafting runs without tools."}"#,
+    };
+    let command = shell.print_line(decision);
     serde_json::json!({
         "maiestro-lockdown": {
             "PreToolUse": [{
                 "matcher": "*",
-                "hooks": [{ "type": "command", "command": format!("printf '%s\\n' '{decision}'"), "timeout": 5 }]
+                "hooks": [{ "type": "command", "command": command, "timeout": 5 }]
             }]
         }
     })
@@ -788,10 +797,7 @@ mod tests {
     /// The Antigravity drafting call has no usable tools: it runs in the
     /// mAIestro-owned lockdown folder (not the repo), whose hook denies every
     /// tool, and never passes a flag that would auto-approve one. The prompt
-    /// comes from stdin, and `--model` is passed only when set. Unix-only: runs
-    /// the POSIX-shell hook command through `sh`; Windows hook commands are not
-    /// supported yet (#160).
-    #[cfg(unix)]
+    /// comes from stdin, and `--model` is passed only when set.
     #[test]
     fn antigravity_drafting_has_no_tools() {
         let hooks = antigravity_lockdown_hooks();
@@ -799,11 +805,17 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0]["matcher"], "*", "every tool");
         let command = groups[0]["hooks"][0]["command"].as_str().unwrap();
-        // What the hook prints is exactly a deny decision (run it through sh).
-        let out = std::process::Command::new("sh").args(["-c", command]).output().unwrap();
+        // What the hook prints is exactly a deny decision, run through the
+        // shell agy uses on this OS.
+        let shell = crate::hooks::HookShell::for_agent(Agent::Antigravity);
+        let out = crate::hooks::run_hook_command(shell, command);
         assert!(out.status.success());
         let decision: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(decision["decision"], "deny");
+        match shell {
+            // agy reads `{}` as a deny too.
+            crate::hooks::HookShell::Cmd => assert_eq!(decision, serde_json::json!({})),
+            _ => assert_eq!(decision["decision"], "deny"),
+        }
         assert_eq!(hooks.as_object().unwrap().len(), 1, "no other hook groups");
         assert!(antigravity_draft_dir().ends_with("antigravity-draft"), "a mAIestro-owned folder, not the repo");
 

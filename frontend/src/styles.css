@@ -608,13 +608,22 @@ body {
   cursor: default;
 }
 
-/* Clean Up confirmation, shown under a session row when teardown needs review. */
+/* Clean Up confirmation, shown under a session row when teardown needs review.
+   Also the error block (DismissibleError): its text is worth copying, so opt
+   back into selection, since the app container sets user-select: none. */
 .cleanup-confirm {
   margin: 0 6px 6px 14px;
   padding: 8px;
   background: var(--red-bg);
   border: 1px solid var(--red-border);
   border-radius: var(--radius);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.cleanup-confirm button {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .cleanup-lead {
@@ -654,6 +663,10 @@ body {
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
+  /* Also shown outside .cleanup-confirm (Check Health, the detail-pane crash). */
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
 }
 
 .btn-danger {
@@ -3035,6 +3048,13 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* An error banner's text can be selected; the copy holds the full text even
+   where the line is cut off with an ellipsis. */
+.notice-banner--error .notice-banner-text {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .notice-banner-action {
