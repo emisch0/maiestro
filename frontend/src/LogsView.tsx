@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./api";
+import { Wordmark } from "./components/Wordmark";
 
 const LOG_POLL_MS = 2000;
 const LOG_LEVELS = ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"] as const;
@@ -84,7 +85,7 @@ export function LogsView() {
   return (
     <main className="panel panel--window logs-panel">
       <header className="panel-header">
-        <h1>m<span className="ai">AI</span>estro Code</h1>
+        <h1><Wordmark /></h1>
         <span className="panel-subtitle">Logs</span>
       </header>
 

@@ -6,6 +6,7 @@
 // `update_dismiss`).
 
 import { api, AvailableUpdate } from "../api";
+import { Wordmark } from "./Wordmark";
 
 export function UpdateBanner({ update, onDismiss }: {
   update: AvailableUpdate;
@@ -16,7 +17,7 @@ export function UpdateBanner({ update, onDismiss }: {
   return (
     <div className="notice-banner notice-banner--update" role="status">
       <span className="notice-banner-text">
-        A new version of m<span className="ai">AI</span>estro Code (
+        A new version of <Wordmark /> (
         {/* A button styled as a link: navigation goes through the backend's
             open_url (the webview has no browser to hand an href to). */}
         <button className="notice-banner-link" onClick={openRelease} title={`Open the ${tag} release page`}>

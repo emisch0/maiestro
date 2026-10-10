@@ -1034,8 +1034,16 @@ body {
   line-height: 1;
 }
 
-.panel-header h1 .ai {
-  color: var(--accent);
+/* The outlined "mAIestro Code" wordmark (components/Wordmark.tsx). Its viewBox
+   is Inter's cap height plus the round letters' overshoot, so 0.748em of height
+   matches Inter text at the surrounding font size, and the -0.011em shift puts
+   the letters' baseline on the text baseline (the overshoot hangs below it). */
+.wordmark {
+  display: inline-block;
+  height: 0.748em;
+  width: auto;
+  vertical-align: -0.011em;
+  --wordmark-accent: var(--accent);
 }
 
 .panel-subtitle {
@@ -1964,10 +1972,6 @@ body {
   font-weight: 600;
   letter-spacing: 0.1px;
   line-height: 1;
-}
-
-.onboarding-title .ai {
-  color: var(--accent);
 }
 
 /* Step rail: one bar per step, filled for the current and completed ones. */
@@ -2997,10 +3001,6 @@ body {
   font-size: 12.5px;
   font-weight: 500;
   color: var(--text);
-}
-
-.about-version .ai {
-  color: var(--accent);
 }
 
 /* Marks a build that didn't come from scripts/release.sh, next to the
