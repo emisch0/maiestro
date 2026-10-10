@@ -1,7 +1,7 @@
 //! Switching an existing session's agent (Claude, Codex, Antigravity, Copilot)
 //! without re-spawning its worktree, and the window restart that applies it.
 //!
-//! The agent session only changes when its host opens a fresh window — VS
+//! The agent session only changes when its terminal host opens a fresh window — VS
 //! Code's generated `.vscode/tasks.json` runs on `folderOpen`, and a Terminal
 //! window runs the command it was opened with — so a switch rewrites the
 //! worktree's launch files and hooks, and when the session's window is already
@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use crate::agent::Agent;
-use crate::host::Permission;
+use crate::terminal_host::Permission;
 use crate::sessions::Session;
 
 #[derive(serde::Serialize)]
@@ -69,7 +69,7 @@ pub async fn session_set_agent(session_id: String, agent: Agent) -> Result<SetAg
     if session.agent != agent {
         let work_dir = PathBuf::from(&session.work_dir);
         let from = session.agent;
-        let window_open = crate::host::window_open(&session).await;
+        let window_open = crate::terminal_host::window_open(&session).await;
 
         let notice = crate::hooks::write_session_hooks(&work_dir, &session_id, agent).await?;
         match from {
@@ -101,7 +101,7 @@ fn outcome(s: &Session) -> SetAgentOutcome {
     SetAgentOutcome { restart_needed: s.restart_pending(), editor_agent: s.editor_agent.filter(|_| s.restart_pending()) }
 }
 
-/// Open a session in its host (VS Code or Terminal): focus its window if open,
+/// Open a session in its terminal host (VS Code or Terminal): focus its window if open,
 /// else launch one. While a switch is pending and the window is still open, returns
 /// `RestartRequired` instead of focusing the old agent. A pending switch whose
 /// window has since closed just clears — the fresh window runs the new agent.
@@ -115,19 +115,19 @@ pub async fn session_open_in_editor(session_id: String, focus_existing: Option<b
     crate::log_invoke!("session_open_in_editor", session = %session_id, focus_existing);
     let mut session = crate::sessions::get(&session_id).ok_or_else(|| format!("session not found: {session_id}"))?;
     if focus_existing {
-        crate::host::focus_or_open(&session).await?;
+        crate::terminal_host::focus_or_open(&session).await?;
         return Ok(OpenOutcome::Opened);
     }
     if let Some(editor_agent) = session.editor_agent {
-        if session.restart_pending() && crate::host::window_open(&session).await {
+        if session.restart_pending() && crate::terminal_host::window_open(&session).await {
             return Ok(OpenOutcome::RestartRequired { agent: session.agent, editor_agent });
         }
         session.editor_agent = None;
         crate::sessions::save(&session).map_err(|e| e.to_string())?;
-        crate::host::open(&session).await?;
+        crate::terminal_host::open(&session).await?;
         return Ok(OpenOutcome::Opened);
     }
-    crate::host::focus_or_open(&session).await?;
+    crate::terminal_host::focus_or_open(&session).await?;
     Ok(OpenOutcome::Opened)
 }
 
@@ -139,16 +139,16 @@ pub async fn session_open_in_editor(session_id: String, focus_existing: Option<b
 pub async fn session_restart_editor(session_id: String) -> Result<RestartOutcome, String> {
     crate::log_invoke!("session_restart_editor");
     let mut session = crate::sessions::get(&session_id).ok_or_else(|| format!("session not found: {session_id}"))?;
-    let close = crate::host::close_and_wait(&session).await;
-    if let Some((message, permission)) = crate::host::blocked(session.host, close, "restart the session") {
+    let close = crate::terminal_host::close_and_wait(&session).await;
+    if let Some((message, permission)) = crate::terminal_host::blocked(session.terminal_host, close, "restart the session") {
         return Ok(RestartOutcome::BlockedByEditor { message, permission });
     }
     // The old agent's pill would otherwise linger until the new agent's first hook.
     crate::status::remove(&session_id);
     session.editor_agent = None;
     crate::sessions::save(&session).map_err(|e| e.to_string())?;
-    crate::host::open(&session).await?;
-    tracing::info!(agent = %session.agent, host = %session.host, "restarted the session's window for its agent");
+    crate::terminal_host::open(&session).await?;
+    tracing::info!(agent = %session.agent, terminal_host = %session.terminal_host, "restarted the session's window for its agent");
     Ok(RestartOutcome::Restarted)
 }
 

@@ -93,8 +93,8 @@ describe("SessionRow notice (#185)", () => {
   });
 });
 
-describe("SessionRow session host", () => {
-  it("shows the VS Code button for VS Code sessions and records without a host", () => {
+describe("SessionRow terminal host", () => {
+  it("shows the VS Code button for VS Code sessions and records without a terminal host", () => {
     render(<SessionRow {...props()} />);
     expect(screen.getByRole("button", { name: "Open in VS Code" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open in Terminal" })).toBeNull();
@@ -102,7 +102,7 @@ describe("SessionRow session host", () => {
 
   it("shows a Terminal button for Terminal sessions", () => {
     const onOpenInEditor = vi.fn();
-    render(<SessionRow {...props({ session: { ...session, host: "terminal_app" }, onOpenInEditor })} />);
+    render(<SessionRow {...props({ session: { ...session, terminal_host: "terminal_app" }, onOpenInEditor })} />);
     expect(screen.queryByRole("button", { name: "Open in VS Code" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open in Terminal" }));
     expect(onOpenInEditor).toHaveBeenCalled();
@@ -112,7 +112,7 @@ describe("SessionRow session host", () => {
     render(
       <SessionRow
         {...props({
-          session: { ...session, host: "terminal_app", agent: "codex" },
+          session: { ...session, terminal_host: "terminal_app", agent: "codex" },
           agentPrompt: { id: "186-x", kind: "restart", reason: "open", agent: "codex", editorAgent: "claude" },
         })}
       />,
@@ -126,7 +126,7 @@ describe("SessionRow session host", () => {
     const { rerender } = render(
       <SessionRow
         {...props({
-          session: { ...session, host: "terminal_app" },
+          session: { ...session, terminal_host: "terminal_app" },
           teardownConfirm: { id: "186-x", kind: "blocked", message: "The Terminal window is still open.", permission: "automation" },
           onOpenPermissionSettings,
         })}

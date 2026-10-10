@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::agent::Agent;
-use crate::host::{session_argv, shell_command, LaunchOptions};
+use crate::terminal_host::{session_argv, shell_command, LaunchOptions};
 
 // ── VS Code workspace files ─────────────────────────────────────────────────────
 
@@ -94,6 +94,43 @@ pub fn write_vscode_files(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Drop the folder-open task [`write_vscode_files`] generated, when a session
+/// moves to another terminal host: left behind, opening the folder in VS Code
+/// would start a second agent in the worktree. A `tasks.json` the repo itself
+/// tracks is restored from `HEAD` rather than deleted; one that isn't ours (no
+/// folder-open "Start …" task) is left alone. `settings.json` only themes the
+/// window, so it stays.
+pub async fn remove_session_task(work_dir: &Path) {
+    let path = work_dir.join(".vscode").join("tasks.json");
+    let ours = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .is_some_and(|v| is_session_task(&v));
+    if !ours {
+        return;
+    }
+    let rel = ".vscode/tasks.json";
+    let result = if crate::gitops::git(work_dir, &["ls-files", "--error-unmatch", rel]).await.is_ok() {
+        crate::gitops::git(work_dir, &["checkout", "HEAD", "--", rel]).await.map(drop)
+    } else {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())
+    };
+    if let Err(e) = result {
+        tracing::warn!(error = %e, "could not remove the VS Code session task");
+    }
+}
+
+/// Whether `tasks` is the file [`write_vscode_files`] writes: a single
+/// folder-open "Start <agent>" task.
+fn is_session_task(tasks: &serde_json::Value) -> bool {
+    let list = tasks["tasks"].as_array();
+    list.is_some_and(|l| {
+        l.len() == 1
+            && l[0]["label"].as_str().is_some_and(|s| s.starts_with("Start "))
+            && l[0]["runOptions"]["runOn"] == "folderOpen"
+    })
 }
 
 // ── Launch / focus ──────────────────────────────────────────────────────────────
@@ -532,7 +569,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     use super::path_at_or_under;
     use super::{is_editor_window, write_vscode_files};
-    use crate::host::LaunchOptions;
+    use crate::terminal_host::LaunchOptions;
 
     /// The default launch: remote control on, as the schema default has it.
     const ON: LaunchOptions = LaunchOptions { remote_control: true };
@@ -573,7 +610,7 @@ mod tests {
                 (a, quote)
             })
             .collect();
-        crate::host::shell_command(command, &args)
+        crate::terminal_host::shell_command(command, &args)
     }
 
     fn read_task(dir: &std::path::Path) -> serde_json::Value {
@@ -729,6 +766,21 @@ mod tests {
         let settings: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/settings.json")).unwrap()).unwrap();
         assert_eq!(settings["workbench.colorCustomizations"]["titleBar.activeBackground"], "#c46686");
+    }
+
+    /// Only the task file we generate counts as ours.
+    #[test]
+    fn recognizes_only_the_generated_session_task() {
+        let ours = serde_json::json!({ "version": "2.0.0", "tasks": [
+            { "label": "Start Claude", "runOptions": { "runOn": "folderOpen" } }
+        ]});
+        assert!(super::is_session_task(&ours));
+        let theirs = serde_json::json!({ "version": "2.0.0", "tasks": [{ "label": "build" }] });
+        assert!(!super::is_session_task(&theirs));
+        let more = serde_json::json!({ "tasks": [
+            { "label": "Start Claude", "runOptions": { "runOn": "folderOpen" } }, { "label": "build" }
+        ]});
+        assert!(!super::is_session_task(&more));
     }
 
     #[cfg(not(target_os = "windows"))]

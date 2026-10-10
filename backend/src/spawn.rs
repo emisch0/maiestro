@@ -2,10 +2,10 @@
 //! (in VS Code or Terminal.app) for a GitHub issue, and later tear it down.
 //!
 //! GitHub is reached via the REST API under the repo's identity (no `gh`), env
-//! files come from the repo's settings, and the session's host is launched the
+//! files come from the repo's settings, and the session's terminal host is launched the
 //! way the OS launches it (no constructed env). The pieces this orchestrates
-//! live in focused modules: `theming`, `hooks`, `host` (with `editor` and
-//! `terminal`), `drafting`, `pr`, plus the shared
+//! live in focused modules: `theming`, `hooks`, `terminal_host` (with `editor`
+//! and `terminal_app`), `drafting`, `pr`, plus the shared
 //! `gitops` / `naming` / `repo_context` helpers.
 
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use crate::agent::Agent;
 use crate::approvals;
 use crate::drafting::{resolve_draft, AgentActivity, DraftStep};
 use crate::editor::{open_vscode, write_vscode_files};
-use crate::host::{LaunchOptions, Permission, SessionHost};
+use crate::terminal_host::{LaunchOptions, Permission, TerminalHost};
 use crate::gitops::{git, git_net, local_branch_exists};
 use crate::hooks::{reconcile_session_hooks, write_session_hooks};
 use crate::naming::{default_short_title, slugify};
@@ -165,12 +165,12 @@ pub(crate) fn refresh_vscode_files(work_dir: &Path, workspace: &str) {
     let Some(session) = crate::sessions::get(workspace) else {
         return;
     };
-    // A session hosted elsewhere gets no `.vscode` files: opening its folder in
+    // A session in another terminal host gets no `.vscode` files: opening its folder in
     // VS Code would otherwise start a second agent in the worktree.
-    if session.host != SessionHost::Vscode {
+    if session.terminal_host != TerminalHost::Vscode {
         return;
     }
-    let launch = crate::host::launch_options(&session.repo);
+    let launch = crate::terminal_host::launch_options(&session.repo);
     if let Err(e) = write_vscode_files(
         work_dir,
         &work_parent_of(work_dir),
@@ -196,7 +196,7 @@ struct SpawnBg {
     session_title: String,
     color: String,
     agent: Agent,
-    host: SessionHost,
+    terminal_host: TerminalHost,
     /// The session command's launch options, from the repo's settings.
     launch: LaunchOptions,
     default_branch: String,
@@ -265,7 +265,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
             // before a change to them (e.g. the session color) picks it up.
             refresh_vscode_files(&work_dir, &workspace);
             match crate::sessions::get(&workspace) {
-                Some(session) => crate::host::reopen(&session).await?,
+                Some(session) => crate::terminal_host::reopen(&session).await?,
                 None => open_vscode(&work_dir)?,
             }
             tracing::info!(repo = %repo, issue = issue_number, branch = %branch, reused = true, "spawned workspace");
@@ -290,10 +290,10 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
     // Fixed at spawn and recorded, so later changes to the repo's agent never
     // switch this worktree over.
     let agent = crate::repo_settings::effective_agent(&settings);
-    // Recorded the same way: the repo's host applies to new sessions only.
-    let host = crate::repo_settings::effective_session_host(&settings);
-    if !host.supported_here() {
-        return Err(format!("{} isn't available on this computer; choose another app to open sessions in", host.app_name()));
+    // Recorded too, so reopen and teardown know which app's window to look for.
+    let terminal_host = crate::repo_settings::effective_terminal_host(&settings);
+    if !terminal_host.supported_here() {
+        return Err(format!("{} isn't available on this computer; choose another app to open sessions in", terminal_host.app_name()));
     }
 
     // Record the session up front so the dashboard shows the row immediately
@@ -314,8 +314,8 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         emoji: emoji.to_string(),
         agent,
         editor_agent: None,
-        host,
-        terminal_window: None,
+        terminal_host,
+        terminal_app_window: None,
         hidden: None,
         notice: None,
     };
@@ -338,7 +338,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         session_title,
         color: color.to_string(),
         agent,
-        host,
+        terminal_host,
         launch: LaunchOptions::from_settings(&settings),
         default_branch: default_branch.to_string(),
         repo: repo.to_string(),
@@ -456,7 +456,7 @@ async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
         Err(e) => warnings.push(format!("could not resolve token user for assignment: {e}")),
     }
 
-    if bg.host == SessionHost::Vscode {
+    if bg.terminal_host == TerminalHost::Vscode {
         write_vscode_files(&bg.work_dir, &bg.work_parent, &bg.color, &bg.session_title, bg.agent, bg.launch)?;
     }
     if let Some(notice) = write_session_hooks(&bg.work_dir, &bg.workspace, bg.agent).await? {
@@ -468,12 +468,12 @@ async fn do_finish_spawn(bg: &SpawnBg) -> Result<Vec<String>, String> {
     warnings.extend(run_post_spawn_commands(&bg.work_dir, &bg.post_spawn_commands).await);
 
     // Worktree is ready: clear the `creating` marker before opening the editor,
-    // so the agent's SessionStart hook (fired only once the host launches it)
+    // so the agent's SessionStart hook (fired only once the terminal host launches it)
     // owns the status from here without us racing to clobber it.
     crate::status::clear_creating(&bg.workspace);
 
     let session = crate::sessions::get(&bg.workspace).ok_or("the session record disappeared during the spawn")?;
-    crate::host::open(&session).await?;
+    crate::terminal_host::open(&session).await?;
     Ok(warnings)
 }
 
@@ -1071,8 +1071,8 @@ pub async fn teardown(session_id: String, confirmed: bool, force: bool) -> Resul
     //    `force` skips this entirely: the user chose "Delete anyway" knowing the
     //    open window may crash.
     if !force {
-        let close = crate::host::close_and_wait(&session).await;
-        if let Some((message, permission)) = crate::host::blocked(session.host, close, "tear down") {
+        let close = crate::terminal_host::close_and_wait(&session).await;
+        if let Some((message, permission)) = crate::terminal_host::blocked(session.terminal_host, close, "tear down") {
             return Ok(TeardownOutcome::BlockedByEditor { message, permission });
         }
     }

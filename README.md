@@ -260,7 +260,7 @@ copy-pasteable fix.
 
 > - **Cloned repo exists** — `cloned_repo_dir` is a git repo whose `origin`
 >   really points at this `owner/name`.
-> - **Git available** and **Session host available** — the `git` and VS Code
+> - **Git available** and **Terminal host available** — the `git` and VS Code
 >   `code` CLIs resolve (pin them under **General → Tool paths** if not); for a
 >   repo whose sessions open in Terminal.app, that Terminal is there and
 >   mAIestro Code is allowed to control it (Automation).
@@ -305,7 +305,7 @@ An annotated tour of the popover (illustrative diagram, not a screenshot):
    checks status (green passing, spinning while running).
 7. **Quick links** — open the issue on GitHub, reveal the worktree in Finder,
    or open the session in VS Code — or in Terminal, for a repo whose
-   **Open sessions in** setting is Terminal.app (macOS), where each session
+   **Terminal host** setting is Terminal.app (macOS), where each session
    gets its own window tinted with the worktree's color.
 8. **Command strip** (expand a row with its chevron) — *Create PR* (Claude
    drafts the description from the diff), *Merge PR* (creates the PR if

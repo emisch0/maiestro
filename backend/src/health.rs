@@ -16,7 +16,7 @@
 //! object (fine-grained tokens) — see the module's `github` sub-check.
 
 use crate::agent::Agent;
-use crate::host::SessionHost;
+use crate::terminal_host::TerminalHost;
 use crate::paths::expand_tilde;
 use crate::plugins::GitHub;
 use crate::repo_settings;
@@ -94,7 +94,7 @@ pub async fn repo_health_check(window: tauri::Window, repo: String) -> Result<He
     let agent = repo_settings::effective_agent(&settings);
     // Likewise only the app the repo opens new sessions in: a Terminal.app repo
     // never checks VS Code's CLI, version, or terminal font.
-    let host = repo_settings::effective_session_host(&settings);
+    let terminal_host = repo_settings::effective_terminal_host(&settings);
     // The model mAIestro Code's own drafting calls would use — the agent probe
     // runs against it so it doubles as a "is this model available?" check.
     let model = crate::prompts::model(&settings.agent_settings, agent);
@@ -110,7 +110,7 @@ pub async fn repo_health_check(window: tauri::Window, repo: String) -> Result<He
     // the popover streams rows (and shows a live spinner for the running one)
     // instead of waiting for the whole batch. `total` lets the UI stop spinning.
     let mut checks: Vec<HealthCheck> = Vec::new();
-    let total = if host == SessionHost::Vscode { 8 } else { 7 };
+    let total = if terminal_host == TerminalHost::Vscode { 8 } else { 7 };
     // Each `step!` announces the check's title (so the spinner can name what's
     // running) *before* running it, then emits the result. The title here must
     // match the label the check function produces — the result event carries the
@@ -143,14 +143,14 @@ pub async fn repo_health_check(window: tauri::Window, repo: String) -> Result<He
         Agent::Copilot => step!(login_label, check_copilot(&repo, model.as_deref()).await),
     }
     step!("GitHub token & permissions", check_github(&repo, settings.identity_id.as_deref()).await);
-    step!("Session host available", check_session_host(host).await);
+    step!("Terminal host available", check_terminal_host(terminal_host).await);
     step!("Configured env files exist", check_env_files(settings.cloned_repo_dir.as_deref(), &settings.env_files));
     // The font preference is VS Code's terminal font; a Terminal.app session
     // uses the user's own Terminal profile, which we never touch.
-    if host == SessionHost::Vscode {
+    if terminal_host == TerminalHost::Vscode {
         step!("Terminal font installed", check_terminal_font());
     }
-    step!("Tool versions", check_tool_versions(&repo, agent, host).await);
+    step!("Tool versions", check_tool_versions(&repo, agent, terminal_host).await);
 
     Ok(HealthReport { repo, checks })
 }
@@ -795,21 +795,21 @@ async fn check_copilot(repo: &str, model: Option<&str>) -> HealthCheck {
     copilot_checks(model, outcome, &bin.display().to_string())
 }
 
-/// The app the repo opens new sessions in (`session_host`).
-async fn check_session_host(host: SessionHost) -> HealthCheck {
-    match host {
-        SessionHost::Vscode => check_editor(),
-        SessionHost::TerminalApp => check_terminal_app().await,
+/// The app the repo opens new sessions in (`terminal_host`).
+async fn check_terminal_host(terminal_host: TerminalHost) -> HealthCheck {
+    match terminal_host {
+        TerminalHost::Vscode => check_editor(),
+        TerminalHost::TerminalApp => check_terminal_app().await,
     }
 }
 
-/// VS Code as the session host. mAIestro Code launches it via `open_vscode`,
+/// VS Code as the terminal host. mAIestro Code launches it via `open_vscode`,
 /// preferring the `code` CLI and, on macOS, falling back to the app bundle — so
 /// mirror that: pass if the `code` CLI resolves, warn (with the fallback still
 /// viable) if not. Windows has no such fallback, so a missing CLI fails there.
 fn check_editor() -> HealthCheck {
     let id = "editor";
-    let label = SESSION_HOST_LABEL;
+    let label = TERMINAL_HOST_LABEL;
     match crate::tools::find_tool("code") {
         Some(p) => HealthCheck::new(id, label, HealthStatus::Pass, p.display().to_string()),
         // A configured-but-missing `code` pin is authoritative — fail naming it,
@@ -831,27 +831,27 @@ fn check_editor() -> HealthCheck {
     }
 }
 
-const SESSION_HOST_LABEL: &str = "Session host available";
+const TERMINAL_HOST_LABEL: &str = "Terminal host available";
 
-/// Terminal.app as the session host: the app is there, and — as a sub-check —
+/// Terminal.app as the terminal host: the app is there, and — as a sub-check —
 /// mAIestro Code may control it (Automation). The grant is probed only while
 /// Terminal is already running, so a health run never launches Terminal; that
 /// probe may raise macOS's Automation prompt, which is the point. Never
 /// touches Terminal's profiles or preferences.
 async fn check_terminal_app() -> HealthCheck {
     let id = "editor";
-    if !SessionHost::TerminalApp.supported_here() {
-        return HealthCheck::new(id, SESSION_HOST_LABEL, HealthStatus::Fail, "Terminal.app sessions are only available on macOS");
+    if !TerminalHost::TerminalApp.supported_here() {
+        return HealthCheck::new(id, TERMINAL_HOST_LABEL, HealthStatus::Fail, "Terminal.app sessions are only available on macOS");
     }
     let app = std::path::Path::new(TERMINAL_APP);
     if !app.is_dir() {
-        return HealthCheck::new(id, SESSION_HOST_LABEL, HealthStatus::Fail, format!("Terminal.app not found at {TERMINAL_APP}"));
+        return HealthCheck::new(id, TERMINAL_HOST_LABEL, HealthStatus::Fail, format!("Terminal.app not found at {TERMINAL_APP}"));
     }
-    let automation = automation_check(crate::terminal::automation_allowed().await);
+    let automation = automation_check(crate::terminal_app::automation_allowed().await);
     let sub = vec![automation];
     HealthCheck {
         id: id.into(),
-        label: SESSION_HOST_LABEL.into(),
+        label: TERMINAL_HOST_LABEL.into(),
         status: rollup(&sub),
         detail: TERMINAL_APP.into(),
         sub,
@@ -861,14 +861,14 @@ async fn check_terminal_app() -> HealthCheck {
 
 const TERMINAL_APP: &str = "/System/Applications/Utilities/Terminal.app";
 
-/// The Automation sub-check from [`crate::terminal::automation_allowed`]'s
+/// The Automation sub-check from [`crate::terminal_app::automation_allowed`]'s
 /// answer: `None` = Terminal isn't running, so nothing was asked yet.
 fn automation_check(allowed: Result<Option<bool>, String>) -> HealthCheck {
     let id = "terminal_automation";
     let label = "Allowed to control Terminal";
     match allowed {
         Ok(Some(true)) => HealthCheck::new(id, label, HealthStatus::Pass, "Automation permission granted"),
-        Ok(Some(false)) => HealthCheck::new(id, label, HealthStatus::Fail, crate::terminal::AUTOMATION_DENIED)
+        Ok(Some(false)) => HealthCheck::new(id, label, HealthStatus::Fail, crate::terminal_app::AUTOMATION_DENIED)
             .with_command(AUTOMATION_SETTINGS_COMMAND),
         Ok(None) => HealthCheck::new(
             id,
@@ -1417,12 +1417,12 @@ async fn check_one_tool_version(repo: &str, min: &ToolMinimum) -> HealthCheck {
 }
 
 /// Whether a [`MIN_TOOL_VERSIONS`] entry applies to a repo on `agent` opening
-/// sessions in `host`: `git` always does; `code` only when sessions open in VS
+/// sessions in `terminal_host`: `git` always does; `code` only when sessions open in VS
 /// Code; an agent CLI only when it is the repo's agent.
-fn tool_applies(tool: &str, agent: Agent, host: SessionHost) -> bool {
+fn tool_applies(tool: &str, agent: Agent, terminal_host: TerminalHost) -> bool {
     match tool {
         "claude" | "codex" | "agy" | "copilot" => tool == agent.tool(),
-        "code" => host == SessionHost::Vscode,
+        "code" => terminal_host == TerminalHost::Vscode,
         _ => true,
     }
 }
@@ -1431,11 +1431,11 @@ fn tool_applies(tool: &str, agent: Agent, host: SessionHost) -> bool {
 /// to the repo's agent and return the parent "Tool versions" row with one
 /// sub-check per tool, rolled up the same way every other multi-sub group is
 /// (see [`rollup`]).
-async fn check_tool_versions(repo: &str, agent: Agent, host: SessionHost) -> HealthCheck {
+async fn check_tool_versions(repo: &str, agent: Agent, terminal_host: TerminalHost) -> HealthCheck {
     let id = "tool_versions";
     let label = "Tool versions";
     let mut sub = Vec::with_capacity(MIN_TOOL_VERSIONS.len());
-    for min in MIN_TOOL_VERSIONS.iter().filter(|m| tool_applies(m.tool, agent, host)) {
+    for min in MIN_TOOL_VERSIONS.iter().filter(|m| tool_applies(m.tool, agent, terminal_host)) {
         sub.push(check_one_tool_version(repo, min).await);
     }
     let status = rollup(&sub);
@@ -1712,15 +1712,15 @@ mod tests {
     /// when sessions open in VS Code.
     #[test]
     fn tool_versions_are_filtered_by_agent_and_host() {
-        let applies = |a: Agent, h: SessionHost| -> Vec<&str> {
+        let applies = |a: Agent, h: TerminalHost| -> Vec<&str> {
             MIN_TOOL_VERSIONS.iter().map(|m| m.tool).filter(|t| tool_applies(t, a, h)).collect()
         };
-        let for_agent = |a: Agent| applies(a, SessionHost::Vscode);
+        let for_agent = |a: Agent| applies(a, TerminalHost::Vscode);
         assert_eq!(for_agent(Agent::Claude), vec!["claude", "git", "code"]);
         assert_eq!(for_agent(Agent::Codex), vec!["codex", "git", "code"]);
         assert_eq!(for_agent(Agent::Antigravity), vec!["agy", "git", "code"]);
         assert_eq!(for_agent(Agent::Copilot), vec!["copilot", "git", "code"]);
-        assert_eq!(applies(Agent::Claude, SessionHost::TerminalApp), vec!["claude", "git"]);
+        assert_eq!(applies(Agent::Claude, TerminalHost::TerminalApp), vec!["claude", "git"]);
     }
 
     /// The Terminal Automation sub-check: a denial fails with the System

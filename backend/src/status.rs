@@ -613,9 +613,14 @@ pub fn write_creating(ws: &str) {
 /// since this runs before the editor opens — belt and braces) is never clobbered.
 /// The watcher then emits `ended`, clearing the pill until Claude's first hook.
 pub fn clear_creating(ws: &str) {
-    if read_record(ws).map(|r| r.state == "creating").unwrap_or(false) {
+    if is_creating(ws) {
         remove(ws);
     }
+}
+
+/// Whether the workspace is still being built in the background.
+pub fn is_creating(ws: &str) -> bool {
+    read_record(ws).map(|r| r.state == "creating").unwrap_or(false)
 }
 
 /// Record a failed background spawn as a surfaced `last_error` on the workspace's

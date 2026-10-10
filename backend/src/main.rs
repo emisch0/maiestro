@@ -11,7 +11,6 @@ mod editor;
 mod gitops;
 mod health;
 mod hooks;
-mod host;
 mod identities;
 mod links;
 mod logging;
@@ -33,7 +32,8 @@ mod spawn;
 mod status;
 #[cfg(test)]
 mod testutil;
-mod terminal;
+mod terminal_app;
+mod terminal_host;
 mod theming;
 mod tools;
 mod tray_visibility;
@@ -509,7 +509,8 @@ fn main() {
             editor::open_repo_in_editor,
             spawn::teardown,
             editor::open_accessibility_settings,
-            host::open_automation_settings,
+            terminal_host::open_automation_settings,
+            terminal_host::repo_set_terminal_host,
             pr::session_pr,
             pr::session_create_pr,
             pr::session_pr_checks,

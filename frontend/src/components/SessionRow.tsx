@@ -1,4 +1,4 @@
-import { Agent, PrChecks, PrLink, Session, SessionHost, StatusRecord, WindowPermission } from "../api";
+import { Agent, PrChecks, PrLink, Session, TerminalHost, StatusRecord, WindowPermission } from "../api";
 import { AGENT_NAMES } from "../lib/agents";
 import { accentColor, checkLabel, PR_STATE_ICONS, PrOpenIcon } from "../lib/lifecycle";
 import { effectiveHidden, formatSnoozeRemaining } from "../lib/snooze";
@@ -18,9 +18,9 @@ export type TeardownPrompt =
   | { id: string; kind: "confirm"; warnings: string[] }
   | { id: string; kind: "blocked"; message: string; permission: WindowPermission | null };
 
-/** How each session host is named in the row: the open button, the restart
+/** How each terminal host is named in the row: the open button, the restart
  *  prompt, and the blocked prompts. */
-export const HOST_UI: Record<SessionHost, { name: string; Icon: typeof VSCodeIcon }> = {
+export const TERMINAL_HOST_UI: Record<TerminalHost, { name: string; Icon: typeof VSCodeIcon }> = {
   vscode: { name: "VS Code", Icon: VSCodeIcon },
   terminal_app: { name: "Terminal", Icon: TerminalIcon },
 };
@@ -107,7 +107,7 @@ export function SessionRow({
   // command buttons' busy flags so it clears on completion or failure.
   const agent = s.agent ?? "claude";
   // The app the session runs in, recorded at spawn (older records: VS Code).
-  const host = HOST_UI[s.host ?? "vscode"] ?? HOST_UI.vscode;
+  const terminalHost = TERMINAL_HOST_UI[s.terminal_host ?? "vscode"] ?? TERMINAL_HOST_UI.vscode;
   // Switching mid-PR-create/merge or mid-teardown would fight over the window.
   const switchBusy = creating || teardownBusy || !!prc?.creating || (!!pm?.intent && pr?.state !== "merged");
   const prompt = agentPrompt?.id === s.id ? agentPrompt : null;
@@ -176,10 +176,10 @@ export function SessionRow({
             className="pill-btn"
             onClick={onOpenInEditor}
             disabled={creating}
-            title={creating ? "Still creating this workspace…" : `Open in ${host.name}`}
-            aria-label={`Open in ${host.name}`}
+            title={creating ? "Still creating this workspace…" : `Open in ${terminalHost.name}`}
+            aria-label={`Open in ${terminalHost.name}`}
           >
-            <host.Icon style={{ color: accentColor(s.color) }} />
+            <terminalHost.Icon style={{ color: accentColor(s.color) }} />
           </button>
         </div>
         <button
@@ -259,13 +259,13 @@ export function SessionRow({
         <div className="cleanup-confirm">
           <p className="cleanup-lead">
             {prompt.reason === "open"
-              ? `This session was switched to ${AGENT_NAMES[prompt.agent]}, but its ${host.name} window is still running ${AGENT_NAMES[prompt.editorAgent]}.`
-              : `${host.name} is still running ${AGENT_NAMES[prompt.editorAgent]} in this worktree.`}{" "}
+              ? `This session was switched to ${AGENT_NAMES[prompt.agent]}, but its ${terminalHost.name} window is still running ${AGENT_NAMES[prompt.editorAgent]}.`
+              : `${terminalHost.name} is still running ${AGENT_NAMES[prompt.editorAgent]} in this worktree.`}{" "}
             Restart the window to start {AGENT_NAMES[prompt.agent]}? The {AGENT_NAMES[prompt.editorAgent]} conversation won't carry over.
           </p>
           <div className="issue-actions">
             <button className={`btn-save ${agentBusy ? "btn-busy" : ""}`} disabled={agentBusy} onClick={onRestartEditor}>
-              Restart {host.name}
+              Restart {terminalHost.name}
             </button>
             <button className="btn-ghost" onClick={onDismissAgentPrompt}>Later</button>
           </div>
@@ -275,7 +275,7 @@ export function SessionRow({
         <div className="cleanup-confirm">
           <p className="cleanup-lead" style={{ whiteSpace: "pre-line" }}>{prompt.message}</p>
           <div className="issue-actions">
-            <button className="btn-ghost" onClick={onFocusEditor}>Open {host.name}</button>
+            <button className="btn-ghost" onClick={onFocusEditor}>Open {terminalHost.name}</button>
             {prompt.permission && (
               <button className="btn-ghost" onClick={() => onOpenPermissionSettings(prompt.permission!)}>
                 {PERMISSION_BUTTON[prompt.permission]}
@@ -309,7 +309,7 @@ export function SessionRow({
         <div className="cleanup-confirm">
           <p className="cleanup-lead" style={{ whiteSpace: "pre-line" }}>{teardownConfirm.message}</p>
           <div className="issue-actions">
-            <button className="btn-ghost" onClick={onOpenInEditor}>Open in {host.name}</button>
+            <button className="btn-ghost" onClick={onOpenInEditor}>Open in {terminalHost.name}</button>
             {teardownConfirm.permission && (
               <button className="btn-ghost" onClick={() => onOpenPermissionSettings(teardownConfirm.permission!)}>
                 {PERMISSION_BUTTON[teardownConfirm.permission]}

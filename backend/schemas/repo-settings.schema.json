@@ -108,11 +108,11 @@
         }
       }
     },
-    "session_host": {
+    "terminal_host": {
       "type": ["string", "null"],
       "enum": ["vscode", "terminal_app", null],
       "default": "vscode",
-      "description": "The app each new session opens in: a VS Code window (`vscode`) or, on macOS, its own Terminal.app window (`terminal_app`). An existing worktree keeps the app it was spawned with."
+      "description": "The terminal host this repo's sessions run their agent in: a VS Code window (`vscode`) or, on macOS, its own Terminal.app window (`terminal_app`). Changing it moves the repo's existing sessions too, closing their open windows first (you're asked before any is closed)."
     },
     "hidden": {
       "type": ["object", "null"],

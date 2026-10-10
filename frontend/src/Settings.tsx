@@ -78,7 +78,7 @@ export function Settings() {
   // Default values (worktree prefix, AI prompts) read from the schema's
   // `default` keywords — shown by the custom renderers.
   const [repoFormDefaults, setRepoFormDefaults] = useState<RepoFormDefaults | null>(null);
-  // The OS the backend runs on: the repo form offers only its session hosts.
+  // The OS the backend runs on: the repo form offers only its terminal hosts.
   const [platform, setPlatform] = useState<Platform>("macos");
   useEffect(() => {
     api.platform().then(setPlatform).catch(() => {});
@@ -304,18 +304,19 @@ export function Settings() {
     () => ({
       showUnfocusedDescription: true as const,
       knownIdentities,
+      repo: loadedRepo?.repo ?? null,
       clonedRepoDir: loadedRepo?.settings.cloned_repo_dir ?? null,
       worktreePrefixDefault: repoFormDefaults?.worktreePrefixDefault ?? "",
       promptModelDefaults: repoFormDefaults?.promptModelDefaults ?? { claude: "", codex: "", antigravity: "", copilot: "" },
       remoteControlDefault: repoFormDefaults?.remoteControlDefault ?? true,
       platform,
-      sessionHostDefault: repoFormDefaults?.sessionHostDefault ?? "vscode",
+      terminalHostDefault: repoFormDefaults?.terminalHostDefault ?? "vscode",
       globalAgent,
       repoAgent,
       booleanDefaults: repoFormDefaults?.booleanDefaults ?? {},
       promptDefaults: repoFormDefaults?.promptDefaults ?? {},
     }),
-    [knownIdentities, loadedRepo?.settings.cloned_repo_dir, repoFormDefaults, platform, globalAgent, repoAgent],
+    [knownIdentities, loadedRepo?.repo, loadedRepo?.settings.cloned_repo_dir, repoFormDefaults, platform, globalAgent, repoAgent],
   );
 
   // Config the app-settings custom renderers read (the Tool paths status line,

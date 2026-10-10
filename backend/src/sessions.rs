@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::Agent;
-use crate::host::SessionHost;
+use crate::terminal_host::TerminalHost;
 use crate::repo_settings::HideState;
-use crate::terminal::TerminalHandle;
+use crate::terminal_app::TerminalAppWindow;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -48,16 +48,18 @@ pub struct Session {
     /// is pending exactly when this is `Some` (see [`Session::restart_pending`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor_agent: Option<Agent>,
-    /// The app the session runs in, recorded at spawn like `agent`, so changing
-    /// the repo's `session_host` never moves an existing worktree. Records
-    /// written before the field existed load as VS Code.
+    /// The terminal host the session runs in, recorded at spawn. Reopen,
+    /// restart and teardown follow it; switching the repo's `terminal_host`
+    /// moves it along (`terminal_host::repo_set_terminal_host`). Records written
+    /// before the field existed load as VS Code.
     #[serde(default)]
-    pub host: SessionHost,
-    /// The Terminal window the session last opened in (`host` = Terminal.app),
+    pub terminal_host: TerminalHost,
+    /// The Terminal window the session last opened in (`terminal_host` =
+    /// Terminal.app),
     /// so reopening can focus it and teardown can close it. Stale once that
     /// window closes; `terminal::probe` tells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_window: Option<TerminalHandle>,
+    pub terminal_app_window: Option<TerminalAppWindow>,
     /// Hide/snooze state for this work item. `None` = visible. Snooze expiry is
     /// resolved on the frontend at render time.
     #[serde(default)]

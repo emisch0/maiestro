@@ -1,4 +1,4 @@
-//! Terminal.app as a session host (macOS): open a session in its own window,
+//! Terminal.app as a terminal host (macOS): open a session in its own window,
 //! and later find, focus and close that window again.
 //!
 //! Everything goes through `osascript` with an **argument list**: the scripts
@@ -31,7 +31,7 @@ use crate::tools::shell_quote;
 /// Which Terminal window a session runs in: the window's AppleScript `id` and
 /// the `tty` of the session's tab (e.g. `/dev/ttys004`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminalHandle {
+pub struct TerminalAppWindow {
     pub window_id: i64,
     pub tty: String,
 }
@@ -123,7 +123,7 @@ end run"#;
 /// Open the session in a new Terminal window. `command` is the agent command
 /// line (already quoted for a POSIX shell); it runs after a `cd` into the
 /// worktree and an OSC 0 that also sets the window title from the shell.
-pub async fn launch(work_dir: &Path, command: &str, title: &str, color: &str) -> Result<TerminalHandle, String> {
+pub async fn launch(work_dir: &Path, command: &str, title: &str, color: &str) -> Result<TerminalAppWindow, String> {
     let line = format!(
         "cd {} && printf '\\033]0;%s\\007' {} && {command}",
         shell_quote(&work_dir.to_string_lossy()),
@@ -140,12 +140,12 @@ pub async fn launch(work_dir: &Path, command: &str, title: &str, color: &str) ->
 
 /// Focus the session's window. `Ok(false)` when it is gone (closed, or Terminal
 /// quit), so the caller can open a new one.
-pub async fn focus(handle: &TerminalHandle) -> Result<bool, String> {
+pub async fn focus(handle: &TerminalAppWindow) -> Result<bool, String> {
     window(handle, "focus").await
 }
 
 /// Whether the session's window is still open.
-pub async fn probe(handle: &TerminalHandle) -> Result<bool, String> {
+pub async fn probe(handle: &TerminalAppWindow) -> Result<bool, String> {
     window(handle, "probe").await
 }
 
@@ -158,7 +158,7 @@ pub async fn probe(handle: &TerminalHandle) -> Result<bool, String> {
 /// once its window closes, and must never take down someone else's shell.
 /// Without the Automation grant we can neither look nor close; then, as for
 /// VS Code, whatever still runs inside the worktree decides.
-pub async fn close_and_wait(handle: &TerminalHandle, work_dir: &Path) -> WindowClose {
+pub async fn close_and_wait(handle: &TerminalAppWindow, work_dir: &Path) -> WindowClose {
     match probe(handle).await {
         Ok(false) => return WindowClose::Closed,
         Ok(true) => {}
@@ -217,7 +217,7 @@ const AUTOMATION_SCRIPT: &str = r#"on run argv
 	return "ok"
 end run"#;
 
-async fn window(handle: &TerminalHandle, mode: &str) -> Result<bool, String> {
+async fn window(handle: &TerminalAppWindow, mode: &str) -> Result<bool, String> {
     let out = run(WINDOW_SCRIPT, &[handle.window_id.to_string(), handle.tty.clone(), mode.to_string()]).await?;
     Ok(out.trim() == "open")
 }
@@ -274,12 +274,12 @@ fn tty_name(tty: &str) -> Option<&str> {
 }
 
 /// Parse the launch script's `<window id>\n<tty>`.
-fn parse_handle(out: &str) -> Option<TerminalHandle> {
+fn parse_handle(out: &str) -> Option<TerminalAppWindow> {
     let mut lines = out.trim().lines();
     let window_id = lines.next()?.trim().parse().ok()?;
     let tty = lines.next()?.trim().to_string();
     tty_name(&tty)?;
-    Some(TerminalHandle { window_id, tty })
+    Some(TerminalAppWindow { window_id, tty })
 }
 
 /// Run an AppleScript with `args` as its `argv`, returning its stdout. A denied
@@ -315,7 +315,7 @@ mod tests {
     fn parses_the_launch_scripts_handle() {
         assert_eq!(
             parse_handle("4321\n/dev/ttys004\n"),
-            Some(TerminalHandle { window_id: 4321, tty: "/dev/ttys004".into() })
+            Some(TerminalAppWindow { window_id: 4321, tty: "/dev/ttys004".into() })
         );
         assert_eq!(parse_handle("missing value\n/dev/ttys004"), None);
         assert_eq!(parse_handle("4321"), None);

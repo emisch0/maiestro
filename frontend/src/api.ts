@@ -43,7 +43,14 @@ export interface AgentSettings {
 
 /** The app a session runs in: a VS Code window, or (macOS) a Terminal.app
  *  window. */
-export type SessionHost = "vscode" | "terminal_app";
+export type TerminalHost = "vscode" | "terminal_app";
+
+/** `repo_set_terminal_host`: switched (moving `moved` sessions), or a list of
+ *  open windows the switch would close, or a window that wouldn't close. */
+export type SetTerminalHostOutcome =
+  | { status: "done"; moved: number }
+  | { status: "needs_confirmation"; open: string[] }
+  | { status: "blocked_by_editor"; message: string; permission: WindowPermission | null };
 
 /** The macOS grant whose absence stopped mAIestro Code from closing a window. */
 export type WindowPermission = "accessibility" | "automation";
@@ -58,7 +65,7 @@ export interface RepoSettings {
   agent: Agent | null;
   agent_settings: AgentSettings;
   /** The app new sessions open in. null = the schema default (VS Code). */
-  session_host?: SessionHost | null;
+  terminal_host?: TerminalHost | null;
   identity_id: string | null;
   hidden: HideState | null;
   prompts: PromptOverrides;
@@ -202,8 +209,8 @@ export interface Session {
    *  `agent` (switched while open, not yet restarted). Absent otherwise. */
   editor_agent?: Agent | null;
   /** The app the session runs in, fixed at spawn. Absent on records written
-   *  before hosts existed, which are VS Code sessions. */
-  host?: SessionHost;
+   *  before terminal hosts existed, which are VS Code sessions. */
+  terminal_host?: TerminalHost;
   hidden: HideState | null;
   /** Something mAIestro Code changed in the worktree that the user should know
    *  about (e.g. an appended `.gitignore` line). Absent once dismissed. */
@@ -437,6 +444,11 @@ export const api = {
   /** Pin a repo's agent (the popover's repo-menu switcher, #214). */
   repoSetAgent: (repo: string, agent: Agent) =>
     invoke<void>("repo_set_agent", { repo, agent }),
+
+  /** Switch a repo's terminal host and move its existing sessions with it.
+   *  Unconfirmed, it only asks when that would close open windows. */
+  repoSetTerminalHost: (repo: string, terminalHost: TerminalHost | null, confirmed: boolean) =>
+    invoke<SetTerminalHostOutcome>("repo_set_terminal_host", { repo, terminalHost, confirmed }),
 
   /** The resolved global default agent, for repos whose own `agent` is `null`. */
   appAgentGet: () =>

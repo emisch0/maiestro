@@ -1,16 +1,18 @@
-//! Where a session runs: its **host**, the user-facing window the agent's
-//! terminal lives in — a VS Code window (`editor.rs`) or a Terminal.app window
-//! (`terminal.rs`). mAIestro Code launches the session into the host and never
-//! hosts it itself (see CLAUDE.md).
+//! Where a session runs: its **terminal host**, the user-facing app whose
+//! terminal the agent runs in — a VS Code window (`editor.rs`) or a Terminal.app
+//! window (`terminal_app.rs`). mAIestro Code launches the session into its
+//! terminal host and never hosts the conversation itself (see CLAUDE.md).
 //!
-//! A repo chooses the host for new sessions (`session_host`); each session
-//! records the host it was spawned with, like its agent, so changing the repo
-//! setting never moves an existing worktree. Everything that opens, focuses,
-//! probes or closes a session's window goes through the dispatch here, so the
-//! spawn, reopen, agent-switch and teardown paths stay host-agnostic.
+//! A repo chooses its terminal host (`terminal_host`); each session records the
+//! one it runs in. Switching the repo's terminal host moves every existing
+//! session of the repo along, closing their windows first (after asking, when
+//! any is open), so a repo never has sessions in two apps. Everything that
+//! opens, focuses, probes or closes a session's window goes through the
+//! dispatch here, so the spawn, reopen, agent-switch and teardown paths stay
+//! terminal-host-agnostic.
 //!
 //! The session command line itself ([`session_argv`]) lives here too: VS Code's
-//! folder-open task and a terminal host run exactly the same resolved-agent
+//! folder-open task and Terminal.app run exactly the same resolved-agent
 //! command.
 
 use std::path::{Path, PathBuf};
@@ -25,7 +27,7 @@ use crate::tools::shell_quote;
 /// The app a repo opens its sessions in.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionHost {
+pub enum TerminalHost {
     /// A VS Code window whose folder-open task starts the agent.
     #[default]
     Vscode,
@@ -33,39 +35,39 @@ pub enum SessionHost {
     TerminalApp,
 }
 
-impl SessionHost {
-    /// Whether this host exists on the OS mAIestro Code was built for.
+impl TerminalHost {
+    /// Whether this terminal host exists on the OS mAIestro Code was built for.
     pub fn supported_here(self) -> bool {
         match self {
-            SessionHost::Vscode => true,
-            SessionHost::TerminalApp => cfg!(target_os = "macos"),
+            TerminalHost::Vscode => true,
+            TerminalHost::TerminalApp => cfg!(target_os = "macos"),
         }
     }
 
     /// The app's name, for user-facing messages.
     pub fn app_name(self) -> &'static str {
         match self {
-            SessionHost::Vscode => "Visual Studio Code",
-            SessionHost::TerminalApp => "Terminal",
+            TerminalHost::Vscode => "Visual Studio Code",
+            TerminalHost::TerminalApp => "Terminal",
         }
     }
 
-    /// The macOS grant mAIestro Code needs to see and close this host's
+    /// The macOS grant mAIestro Code needs to see and close this terminal host's
     /// windows: Accessibility for VS Code (System Events), Automation for
     /// Terminal (its own Apple events).
     pub fn permission(self) -> Permission {
         match self {
-            SessionHost::Vscode => Permission::Accessibility,
-            SessionHost::TerminalApp => Permission::Automation,
+            TerminalHost::Vscode => Permission::Accessibility,
+            TerminalHost::TerminalApp => Permission::Automation,
         }
     }
 }
 
-impl std::fmt::Display for SessionHost {
+impl std::fmt::Display for TerminalHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            SessionHost::Vscode => "vscode",
-            SessionHost::TerminalApp => "terminal_app",
+            TerminalHost::Vscode => "vscode",
+            TerminalHost::TerminalApp => "terminal_app",
         })
     }
 }
@@ -114,7 +116,7 @@ impl LaunchOptions {
 
 /// The program and arguments that start a real, user-facing `agent` session:
 /// what VS Code's folder-open task runs in its integrated terminal, and what a
-/// terminal host types into its new window. Each argument carries whether the
+/// Terminal.app types into its new window. Each argument carries whether the
 /// POSIX shell form ([`shell_command`], macOS) quotes it; VS Code on Windows
 /// runs the argv directly as a `process` task.
 ///
@@ -134,8 +136,8 @@ impl LaunchOptions {
 /// session flags (`hooks::codex_hook_overrides`) — identical for every worktree,
 /// so the user's one-time Codex hook trust covers them all. No initial prompt:
 /// Codex has no `--name` or `/color`, and any prompt would start a real model
-/// turn, so the session carries no name or color of its own — the host window
-/// is still themed.
+/// turn, so the session carries no name or color of its own — the terminal host's
+/// window is still themed.
 ///
 /// **Antigravity:** the bare binary. Its status hooks live in the worktree's
 /// `.agents/hooks.json` (`hooks/antigravity.rs`), and it has no session-name flag or
@@ -205,7 +207,7 @@ pub fn launch_options(repo: &str) -> LaunchOptions {
     }
 }
 
-/// The title a terminal host gives the session's window: `<repo>: <session title>`.
+/// The title Terminal.app gives the session's window: `<repo>: <session title>`.
 fn terminal_title(session: &Session) -> String {
     let repo_name = session.repo.split('/').next_back().unwrap_or(&session.repo);
     format!("{repo_name}: {}", session.session_title)
@@ -213,19 +215,19 @@ fn terminal_title(session: &Session) -> String {
 
 // ── Dispatch ────────────────────────────────────────────────────────────────────
 
-/// Start the session in a fresh window of its host. For Terminal this records
+/// Start the session in a fresh window of its terminal host. For Terminal this records
 /// the new window's handle on the session, so focus and teardown can find it.
 pub async fn open(session: &Session) -> Result<(), String> {
     let work_dir = PathBuf::from(&session.work_dir);
-    match session.host {
-        SessionHost::Vscode => crate::editor::open_vscode(&work_dir),
-        SessionHost::TerminalApp => {
-            if !SessionHost::TerminalApp.supported_here() {
+    match session.terminal_host {
+        TerminalHost::Vscode => crate::editor::open_vscode(&work_dir),
+        TerminalHost::TerminalApp => {
+            if !TerminalHost::TerminalApp.supported_here() {
                 return Err("Terminal.app sessions are only available on macOS".into());
             }
             let (program, args) =
                 session_argv(session.agent, &session.color, &session.session_title, launch_options(&session.repo));
-            let handle = crate::terminal::launch(
+            let handle = crate::terminal_app::launch(
                 &work_dir,
                 &shell_command(&program, &args),
                 &terminal_title(session),
@@ -236,7 +238,7 @@ pub async fn open(session: &Session) -> Result<(), String> {
             // Re-read the record: it may have changed while the launch waited on
             // Terminal (or on the user answering its Automation prompt).
             let mut current = crate::sessions::get(&session.id).unwrap_or_else(|| session.clone());
-            current.terminal_window = Some(handle);
+            current.terminal_app_window = Some(handle);
             crate::sessions::save(&current).map_err(|e| format!("could not record the Terminal window: {e}"))
         }
     }
@@ -248,22 +250,22 @@ pub async fn open(session: &Session) -> Result<(), String> {
 /// window is gone — never a second window next to a live one, which would run
 /// a second agent in the same worktree.
 pub async fn reopen(session: &Session) -> Result<(), String> {
-    match session.host {
-        SessionHost::Vscode => crate::editor::open_vscode(Path::new(&session.work_dir)),
-        SessionHost::TerminalApp => focus_or_open(session).await,
+    match session.terminal_host {
+        TerminalHost::Vscode => crate::editor::open_vscode(Path::new(&session.work_dir)),
+        TerminalHost::TerminalApp => focus_or_open(session).await,
     }
 }
 
 /// Focus the session's window if it is open, otherwise open one.
 pub async fn focus_or_open(session: &Session) -> Result<(), String> {
-    match session.host {
-        SessionHost::Vscode => crate::editor::focus_or_open(Path::new(&session.work_dir)).await,
-        SessionHost::TerminalApp => {
-            if let Some(handle) = &session.terminal_window {
+    match session.terminal_host {
+        TerminalHost::Vscode => crate::editor::focus_or_open(Path::new(&session.work_dir)).await,
+        TerminalHost::TerminalApp => {
+            if let Some(handle) = &session.terminal_app_window {
                 // A probe we can't run (no Automation grant) is an error, not
                 // "absent": launching would fail the same way, and if it didn't
                 // it would start a second agent next to the live one.
-                if crate::terminal::focus(handle).await? {
+                if crate::terminal_app::focus(handle).await? {
                     return Ok(());
                 }
             }
@@ -277,11 +279,11 @@ pub async fn focus_or_open(session: &Session) -> Result<(), String> {
 /// that something is running inside the worktree.
 pub async fn window_open(session: &Session) -> bool {
     let work_dir = PathBuf::from(&session.work_dir);
-    match session.host {
-        SessionHost::Vscode => crate::editor::editor_window_open(&work_dir).await,
-        SessionHost::TerminalApp => match &session.terminal_window {
+    match session.terminal_host {
+        TerminalHost::Vscode => crate::editor::editor_window_open(&work_dir).await,
+        TerminalHost::TerminalApp => match &session.terminal_app_window {
             None => false,
-            Some(handle) => match crate::terminal::probe(handle).await {
+            Some(handle) => match crate::terminal_app::probe(handle).await {
                 Ok(open) => open,
                 Err(e) => {
                     tracing::warn!(error = %e, "could not probe the Terminal window; checking the worktree instead");
@@ -296,11 +298,11 @@ pub async fn window_open(session: &Session) -> bool {
 /// [`crate::editor::close_window_and_wait`] for why confirmation matters).
 pub async fn close_and_wait(session: &Session) -> WindowClose {
     let work_dir = PathBuf::from(&session.work_dir);
-    match session.host {
-        SessionHost::Vscode => crate::editor::close_window_and_wait(&work_dir).await,
-        SessionHost::TerminalApp => match &session.terminal_window {
+    match session.terminal_host {
+        TerminalHost::Vscode => crate::editor::close_window_and_wait(&work_dir).await,
+        TerminalHost::TerminalApp => match &session.terminal_app_window {
             None => WindowClose::Closed,
-            Some(handle) => crate::terminal::close_and_wait(handle, &work_dir).await,
+            Some(handle) => crate::terminal_app::close_and_wait(handle, &work_dir).await,
         },
     }
 }
@@ -309,23 +311,119 @@ pub async fn close_and_wait(session: &Session) -> WindowClose {
 /// down", "restart the session"), and the grant that would let mAIestro Code
 /// close it itself (`None` when the grant is there and the close just didn't
 /// take). `None` overall when the window is closed.
-pub fn blocked(host: SessionHost, close: WindowClose, action: &str) -> Option<(String, Option<Permission>)> {
-    let app = host.app_name();
+pub fn blocked(terminal_host: TerminalHost, close: WindowClose, action: &str) -> Option<(String, Option<Permission>)> {
+    let app = terminal_host.app_name();
     match close {
         WindowClose::Closed => None,
         WindowClose::InUse => Some((
             format!(
                 "I couldn't {action} because the {app} window is still open.\n\nYou have two options: \
                  close the window yourself, or {} so it can close the window for you.",
-                host.permission().grant_phrase()
+                terminal_host.permission().grant_phrase()
             ),
-            Some(host.permission()),
+            Some(terminal_host.permission()),
         )),
         WindowClose::StillOpen => Some((
             format!("I couldn't {action} because the {app} window is still open. Close its window, then try again."),
             None,
         )),
     }
+}
+
+// ── Switching a repo's terminal host ────────────────────────────────────────────
+
+/// Result of [`repo_set_terminal_host`]. Tagged (`status`) like teardown's.
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SetTerminalHostOutcome {
+    /// Saved; `moved` existing sessions now run in the new terminal host.
+    Done { moved: usize },
+    /// Some of the repo's sessions have a window open. Switching closes them,
+    /// ending their agents, so ask first; `open` names those sessions.
+    NeedsConfirmation { open: Vec<String> },
+    /// A window couldn't be closed. Nothing was changed.
+    BlockedByEditor { message: String, permission: Option<Permission> },
+}
+
+/// Switch a repo's terminal host (`None` = the schema default) and move every
+/// existing session of the repo over with it, so the repo never runs sessions
+/// in two apps at once. Moving a session closes its window — ending its agent;
+/// the conversation doesn't carry over — so when any is open this first returns
+/// `NeedsConfirmation` and does nothing until called again with `confirmed`.
+/// All windows are closed (and confirmed gone) **before** anything is written:
+/// one that won't close blocks the switch and leaves the setting and every
+/// session as they were. A moved session's next open launches its agent in the
+/// new terminal host. Emits `repo-settings-changed` so an open Settings form
+/// re-reads.
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(repo = %repo))]
+pub async fn repo_set_terminal_host(
+    app: tauri::AppHandle,
+    repo: String,
+    terminal_host: Option<TerminalHost>,
+    confirmed: bool,
+) -> Result<SetTerminalHostOutcome, String> {
+    crate::log_invoke!("repo_set_terminal_host", repo = %repo, terminal_host = ?terminal_host, confirmed);
+    let target = crate::repo_settings::resolve_terminal_host(terminal_host);
+    if !target.supported_here() {
+        return Err(format!("{} isn't available on this computer", target.app_name()));
+    }
+    let moving: Vec<Session> = crate::sessions::load_all()
+        .into_iter()
+        .filter(|s| s.repo == repo && s.terminal_host != target)
+        .collect();
+    if moving.iter().any(|s| crate::status::is_creating(&s.id)) {
+        return Err("A workspace in this repo is still being created. Try again once it's ready.".into());
+    }
+    if !confirmed {
+        let mut open = Vec::new();
+        for s in &moving {
+            if window_open(s).await {
+                open.push(s.session_title.clone());
+            }
+        }
+        if !open.is_empty() {
+            return Ok(SetTerminalHostOutcome::NeedsConfirmation { open });
+        }
+    }
+    for s in &moving {
+        let close = close_and_wait(s).await;
+        if let Some((message, permission)) = blocked(s.terminal_host, close, "switch the terminal host") {
+            return Ok(SetTerminalHostOutcome::BlockedByEditor { message, permission });
+        }
+    }
+    crate::repo_settings::set_terminal_host(&repo, terminal_host)?;
+    let moved = moving.len();
+    for s in moving {
+        move_session(s, target).await;
+    }
+    tracing::info!(terminal_host = %target, moved, "switched the repo's terminal host");
+    use tauri::Emitter;
+    let _ = app.emit("repo-settings-changed", &repo);
+    Ok(SetTerminalHostOutcome::Done { moved })
+}
+
+/// Move one session, whose window is already closed, to `target`: record it,
+/// forget the old window, and swap the generated VS Code files in or out.
+async fn move_session(mut session: Session, target: TerminalHost) {
+    let work_dir = PathBuf::from(&session.work_dir);
+    let from = session.terminal_host;
+    session.terminal_host = target;
+    session.terminal_app_window = None;
+    // The window that was running the old agent is gone.
+    session.editor_agent = None;
+    if let Err(e) = crate::sessions::save(&session) {
+        tracing::warn!(session = %session.id, error = %e, "could not record the session's new terminal host");
+        return;
+    }
+    // Its agent ended with the window; the next open's hooks report afresh.
+    crate::status::remove(&session.id);
+    if target == TerminalHost::Vscode {
+        crate::spawn::refresh_vscode_files(&work_dir, &session.id);
+    } else if from == TerminalHost::Vscode {
+        crate::editor::remove_session_task(&work_dir).await;
+    }
+    tracing::info!(session = %session.id, from = %from, to = %target, "moved the session to the repo's terminal host");
 }
 
 /// Open System Settings → Privacy & Security → Automation, where the user lets
@@ -349,11 +447,11 @@ mod tests {
 
     #[test]
     fn host_values_match_the_settings_schema() {
-        assert_eq!(serde_json::to_value(SessionHost::Vscode).unwrap(), "vscode");
-        assert_eq!(serde_json::to_value(SessionHost::TerminalApp).unwrap(), "terminal_app");
-        assert_eq!(SessionHost::TerminalApp.to_string(), "terminal_app");
+        assert_eq!(serde_json::to_value(TerminalHost::Vscode).unwrap(), "vscode");
+        assert_eq!(serde_json::to_value(TerminalHost::TerminalApp).unwrap(), "terminal_app");
+        assert_eq!(TerminalHost::TerminalApp.to_string(), "terminal_app");
         let schema = crate::repo_settings::repo_settings_schema();
-        let values: Vec<String> = schema["properties"]["session_host"]["enum"]
+        let values: Vec<String> = schema["properties"]["terminal_host"]["enum"]
             .as_array()
             .unwrap()
             .iter()
@@ -370,20 +468,54 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(terminal_title(&s), "widgets: 🍋 #243 — Terminal host");
-        assert_eq!(s.host, SessionHost::Vscode, "records without a host load as VS Code");
+        assert_eq!(s.terminal_host, TerminalHost::Vscode, "records without a terminal host load as VS Code");
+    }
+
+    /// Moving a session swaps the generated VS Code files out and back in, and
+    /// forgets the old window and any pending agent restart.
+    #[tokio::test]
+    async fn moving_a_session_swaps_its_vscode_task() {
+        let _home = crate::testutil::TempHome::new();
+        let wt = tempfile::tempdir().unwrap();
+        let mut s: Session = serde_json::from_value(serde_json::json!({
+            "id": "243-x", "repo": "acme/widgets", "issue_number": 243, "issue_url": "u", "branch": "b",
+            "work_dir": wt.path().display().to_string(), "cloned_repo_dir": "/c", "session_title": "t",
+            "color": "#ca8a04", "emoji": "🍋", "editor_agent": "codex",
+        }))
+        .unwrap();
+        crate::sessions::save(&s).unwrap();
+        crate::spawn::refresh_vscode_files(wt.path(), &s.id);
+        let tasks = wt.path().join(".vscode/tasks.json");
+        assert!(tasks.exists());
+
+        move_session(s.clone(), TerminalHost::TerminalApp).await;
+        let moved = crate::sessions::get(&s.id).unwrap();
+        assert_eq!(moved.terminal_host, TerminalHost::TerminalApp);
+        assert_eq!(moved.editor_agent, None);
+        assert!(!tasks.exists(), "a Terminal session keeps no folder-open task");
+        assert!(wt.path().join(".vscode/settings.json").exists(), "the theming stays");
+
+        s = moved;
+        s.terminal_app_window = Some(crate::terminal_app::TerminalAppWindow { window_id: 7, tty: "/dev/ttys007".into() });
+        crate::sessions::save(&s).unwrap();
+        move_session(s.clone(), TerminalHost::Vscode).await;
+        let back = crate::sessions::get(&s.id).unwrap();
+        assert_eq!(back.terminal_host, TerminalHost::Vscode);
+        assert_eq!(back.terminal_app_window, None);
+        assert!(tasks.exists(), "back in VS Code, the folder-open task returns");
     }
 
     #[test]
     fn blocked_names_the_host_and_its_grant() {
-        assert!(blocked(SessionHost::Vscode, WindowClose::Closed, "tear down").is_none());
-        let (msg, perm) = blocked(SessionHost::TerminalApp, WindowClose::InUse, "tear down").unwrap();
+        assert!(blocked(TerminalHost::Vscode, WindowClose::Closed, "tear down").is_none());
+        let (msg, perm) = blocked(TerminalHost::TerminalApp, WindowClose::InUse, "tear down").unwrap();
         assert!(msg.contains("Terminal window"), "{msg}");
         assert!(msg.contains("Automation"), "{msg}");
         assert_eq!(perm, Some(Permission::Automation));
-        let (msg, perm) = blocked(SessionHost::Vscode, WindowClose::InUse, "tear down").unwrap();
+        let (msg, perm) = blocked(TerminalHost::Vscode, WindowClose::InUse, "tear down").unwrap();
         assert!(msg.contains("Visual Studio Code window") && msg.contains("Accessibility"), "{msg}");
         assert_eq!(perm, Some(Permission::Accessibility));
-        let (_, perm) = blocked(SessionHost::Vscode, WindowClose::StillOpen, "tear down").unwrap();
+        let (_, perm) = blocked(TerminalHost::Vscode, WindowClose::StillOpen, "tear down").unwrap();
         assert_eq!(perm, None);
     }
 }

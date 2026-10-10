@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::Agent;
-use crate::host::SessionHost;
+use crate::terminal_host::TerminalHost;
 
 /// Hide/snooze state for a repo or a work item. The presence of this value means
 /// "hidden"; its absence means "visible".
@@ -130,9 +130,9 @@ pub struct RepoSettings {
     #[serde(default)]
     pub agent_settings: AgentSettings,
     /// The app new sessions open in. `None` uses the schema default (VS Code) —
-    /// see [`effective_session_host`]. A spawned session records its host.
+    /// see [`effective_terminal_host`]. A spawned session records its terminal host.
     #[serde(default)]
-    pub session_host: Option<SessionHost>,
+    pub terminal_host: Option<TerminalHost>,
     /// Repo-level hide/snooze state. `None` = visible. A hidden repo hides its
     /// work items too. Per-work-item state lives on the session record, not here.
     #[serde(default)]
@@ -158,7 +158,7 @@ impl RepoSettings {
             comment_on_spawn: None,
             agent: None,
             agent_settings: AgentSettings::default(),
-            session_host: None,
+            terminal_host: None,
             hidden: None,
             prompts: PromptOverrides::default(),
         }
@@ -211,12 +211,17 @@ pub fn effective_agent(settings: &RepoSettings) -> Agent {
     settings.agent.unwrap_or_else(crate::app_settings::agent)
 }
 
-/// The app a fresh spawn opens its session in: the repo's `session_host`, else
+/// The app a fresh spawn opens its session in: the repo's `terminal_host`, else
 /// the schema default. A spawned session records the result, so reopening and
-/// teardown read the record instead (see `sessions::Session::host`).
-pub fn effective_session_host(settings: &RepoSettings) -> SessionHost {
-    settings.session_host.unwrap_or_else(|| {
-        serde_json::from_value(serde_json::Value::String(schema_default("/properties/session_host/default")))
+/// teardown read the record instead (see `sessions::Session::terminal_host`).
+pub fn effective_terminal_host(settings: &RepoSettings) -> TerminalHost {
+    resolve_terminal_host(settings.terminal_host)
+}
+
+/// A `terminal_host` value as it applies: `None` is the schema default.
+pub fn resolve_terminal_host(configured: Option<TerminalHost>) -> TerminalHost {
+    configured.unwrap_or_else(|| {
+        serde_json::from_value(serde_json::Value::String(schema_default("/properties/terminal_host/default")))
             .unwrap_or_default()
     })
 }
@@ -472,6 +477,15 @@ pub fn repo_set_agent(app: tauri::AppHandle, repo: String, agent: Agent) -> Resu
     Ok(())
 }
 
+/// Set a repo's `terminal_host` (`None` = the schema default) as a partial
+/// write, like [`set_agent`]. Moving the repo's existing sessions over is the
+/// caller's job (`terminal_host::repo_set_terminal_host`).
+pub(crate) fn set_terminal_host(repo: &str, terminal_host: Option<TerminalHost>) -> Result<(), String> {
+    let mut settings = load_validated(repo)?;
+    settings.terminal_host = terminal_host;
+    save(repo, &settings).map_err(|e| e.to_string())
+}
+
 fn set_agent(repo: &str, agent: Agent) -> Result<(), String> {
     let mut settings = load_validated(repo)?;
     settings.agent = Some(agent);
@@ -646,7 +660,7 @@ mod tests {
                 antigravity: AgentCommonSettings { prompt_model: Some("gemini-3.1-pro-low".into()) },
                 copilot: AgentCommonSettings { prompt_model: Some("gpt-5-mini".into()) },
             },
-            session_host: Some(SessionHost::TerminalApp),
+            terminal_host: Some(TerminalHost::TerminalApp),
             hidden: Some(HideState { snooze_until: Some(1_717_372_800_000) }),
             prompts: PromptOverrides {
                 draft_issue: Some("Custom issue instruction".into()),
