@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, Agent, AvailableUpdate, ProviderQuota, SettingsProblem, DraftPreviewOutcome, HideState, IssueNode, PostSpawnChoice, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
+import { api, Agent, AvailableUpdate, ProviderQuota, SettingsProblem, DraftPreviewOutcome, HideState, IssueNode, PostSpawnChoice, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, TerminalHost, WorkState } from "./api";
 import {
   ActiveSessions,
   furtherPhase,
@@ -27,12 +27,11 @@ import { RepoAgentDialog } from "./components/RepoAgentDialog";
 import { RepoAgentButton } from "./components/RepoAgentButton";
 import { CodexHooksDialog } from "./components/CodexHooksDialog";
 import { PostSpawnConfirmDialog } from "./components/PostSpawnConfirmDialog";
-import { AgentPrompt, SessionRow, TeardownPrompt, PrCreateState, PrMergeState } from "./components/SessionRow";
+import { AgentPrompt, SessionRow, TeardownPrompt, PrCreateState, PrMergeState, TERMINAL_HOST_UI } from "./components/SessionRow";
 import { PickerOverlay, Picker, Preview, Expand } from "./components/PickerOverlay";
 import LogoIcon from "./icons/logo.svg?react";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
-import VSCodeIcon from "./icons/vscode.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
 import ChevronRightIcon from "./icons/chevron-right.svg?react";
 
@@ -127,6 +126,9 @@ export function MainView() {
   // The resolved global default agent, for repos whose own `agent` is `null`.
   // `null` until the first read lands; such repos are left out until then.
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
+  // The terminal host for repos whose own `terminal_host` is `null`: picks the
+  // repo row's open button. VS Code's until the first read lands.
+  const [defaultTerminalHost, setDefaultTerminalHost] = useState<TerminalHost>("vscode");
 
   const refreshSessions = useCallback(() => {
     api.sessionsList().then((list) => {
@@ -244,6 +246,7 @@ export function MainView() {
       }
     }).catch(() => {});
     api.appAgentGet().then(setDefaultAgent).catch(() => {});
+    api.terminalHostDefault().then(setDefaultTerminalHost).catch(() => {});
     refreshSessions();
     refreshStatuses();
     refreshUpdate();
@@ -852,6 +855,7 @@ export function MainView() {
               : "";
             const repoMenu = repoMenuOpen === repo;
             const repoAgent = repoSettings[repo] ? repoSettings[repo].agent ?? defaultAgent : null;
+            const repoHost = TERMINAL_HOST_UI[repoSettings[repo]?.terminal_host ?? defaultTerminalHost] ?? TERMINAL_HOST_UI.vscode;
             const repoUrl = repoGitHubUrl(repo);
             const visibleSessions = showHidden
               ? repoSessions
@@ -902,10 +906,10 @@ export function MainView() {
                           setOpenRepoErr((e) => ({ ...e, [repo]: String(err) }));
                         }
                       }}
-                      title="Open cloned repo in VS Code"
-                      aria-label="Open cloned repo in VS Code"
+                      title={`Open cloned repo in ${repoHost.name}`}
+                      aria-label={`Open cloned repo in ${repoHost.name}`}
                     >
-                      <VSCodeIcon />
+                      <repoHost.Icon />
                     </button>
                   </div>
                   <button className="btn-add" onClick={() => openStartWork(repo)}>

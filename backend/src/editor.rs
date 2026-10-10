@@ -354,15 +354,20 @@ pub async fn focus_or_open(path: &Path) -> Result<(), String> {
     open_vscode(path)
 }
 
-/// Open a tracked repo's main cloned repo directory in VS Code. Unlike
-/// `session_open_in_editor` this is a pure launch — no worktree, no session, no status —
-/// reusing the same `open_vscode` path logic as spawned worktrees.
+/// Open a tracked repo's main cloned repo directory in the repo's terminal
+/// host. Unlike `session_open_in_editor` this is a pure launch — no worktree,
+/// no session, no status, no agent: VS Code goes through the same `open_vscode`
+/// path as spawned worktrees, Terminal.app gets a plain shell window there
+/// (`terminal_app::open_folder`).
 #[tauri::command]
 pub async fn open_repo_in_editor(repo: String) -> Result<(), String> {
     crate::log_invoke!("open_repo_in_editor", repo = %repo);
     let settings = crate::repo_settings::repo_settings_get(repo)?;
     let cloned_repo = crate::repo_context::validated_cloned_repo(&settings)?;
-    open_vscode(&cloned_repo)
+    match crate::repo_settings::effective_terminal_host(&settings) {
+        crate::terminal_host::TerminalHost::Vscode => open_vscode(&cloned_repo),
+        crate::terminal_host::TerminalHost::TerminalApp => crate::terminal_app::open_folder(&cloned_repo),
+    }
 }
 
 // ── Teardown window control ─────────────────────────────────────────────────────

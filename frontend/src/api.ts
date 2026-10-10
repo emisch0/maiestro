@@ -454,6 +454,10 @@ export const api = {
   appAgentGet: () =>
     invoke<Agent>("app_agent_get"),
 
+  /** The terminal host for repos whose own `terminal_host` is `null`. */
+  terminalHostDefault: () =>
+    invoke<TerminalHost>("terminal_host_default"),
+
   /** Untrack a repo (delete its settings file). Worktrees and sessions are kept. */
   removeRepo: (repo: string) =>
     invoke<void>("repo_remove", { repo }),
@@ -528,6 +532,7 @@ export const api = {
   codexHooksReviewNeeded: (repo: string, sessionId?: string) =>
     invoke<boolean>("codex_hooks_review_needed", { repo, sessionId: sessionId ?? null }).catch(() => false),
 
+  /** Open the repo's cloned checkout in its terminal host (no agent). */
   openRepoInEditor: (repo: string) =>
     invoke<void>("open_repo_in_editor", { repo }),
 

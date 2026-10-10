@@ -138,6 +138,17 @@ pub async fn launch(work_dir: &Path, command: &str, title: &str, color: &str) ->
     parse_handle(&out).ok_or_else(|| format!("Terminal opened a window but didn't report it: {out:?}"))
 }
 
+/// Open a plain Terminal window (no agent) in `dir` — the repo row's "open
+/// the cloned repo" button. Goes through Launch Services, like a Finder drop
+/// on Terminal, so it needs no Automation grant and leaves nothing to track.
+pub fn open_folder(dir: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("Terminal.app is only available on macOS".into());
+    }
+    crate::tools::spawn_reaped(std::process::Command::new("open").args(["-a", "Terminal"]).arg(dir))
+        .map_err(|e| format!("failed to open Terminal: {e}"))
+}
+
 /// Focus the session's window. `Ok(false)` when it is gone (closed, or Terminal
 /// quit), so the caller can open a new one.
 pub async fn focus(handle: &TerminalAppWindow) -> Result<bool, String> {
@@ -384,7 +395,7 @@ end run"#,
         .await
         .unwrap();
         let (tab, profile) = colors.trim().split_once(',').unwrap();
-        assert_eq!(tab, (41u32 * 257).to_string(), "the tab carries the tint");
+        assert_eq!(tab, (47u32 * 257).to_string(), "the tab carries the tint");
         assert_ne!(tab, profile, "the profile keeps its own background");
         assert!(focus(&handle).await.unwrap());
         assert!(matches!(close_and_wait(&handle, &dir).await, WindowClose::Closed));

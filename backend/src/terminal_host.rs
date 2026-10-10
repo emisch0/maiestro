@@ -426,6 +426,15 @@ async fn move_session(mut session: Session, target: TerminalHost) {
     tracing::info!(session = %session.id, from = %from, to = %target, "moved the session to the repo's terminal host");
 }
 
+/// The terminal host a repo whose own `terminal_host` is `null` uses (the
+/// schema default), so the popover can pick the repo's open button without a
+/// hardcoded copy of the default.
+#[tauri::command]
+pub fn terminal_host_default() -> TerminalHost {
+    crate::log_invoke_debug!("terminal_host_default");
+    crate::repo_settings::resolve_terminal_host(None)
+}
+
 /// Open System Settings → Privacy & Security → Automation, where the user lets
 /// mAIestro Code control Terminal. Triggered only by an explicit user click.
 /// macOS only, like `editor::open_accessibility_settings`.
