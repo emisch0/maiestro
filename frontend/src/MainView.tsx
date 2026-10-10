@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, Agent, AvailableUpdate, ProviderQuota, SettingsProblem, DraftPreviewOutcome, HideState, IssueNode, PostSpawnChoice, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, WorkState } from "./api";
+import { api, Agent, AvailableUpdate, ProviderQuota, SettingsProblem, DraftPreviewOutcome, HideState, IssueNode, PostSpawnChoice, PrChecks, PrLink, RepoSettings, Session, SpawnEdits, SpawnPlan, StatusRecord, TerminalHost, WorkState } from "./api";
 import {
   ActiveSessions,
   furtherPhase,
@@ -27,12 +27,11 @@ import { RepoAgentDialog } from "./components/RepoAgentDialog";
 import { RepoAgentButton } from "./components/RepoAgentButton";
 import { CodexHooksDialog } from "./components/CodexHooksDialog";
 import { PostSpawnConfirmDialog } from "./components/PostSpawnConfirmDialog";
-import { AgentPrompt, SessionRow, TeardownPrompt, PrCreateState, PrMergeState } from "./components/SessionRow";
+import { AgentPrompt, SessionRow, TeardownPrompt, PrCreateState, PrMergeState, TERMINAL_HOST_UI } from "./components/SessionRow";
 import { PickerOverlay, Picker, Preview, Expand } from "./components/PickerOverlay";
 import LogoIcon from "./icons/logo.svg?react";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
-import VSCodeIcon from "./icons/vscode.svg?react";
 import GitHubIcon from "./icons/github.svg?react";
 import ChevronRightIcon from "./icons/chevron-right.svg?react";
 
@@ -66,7 +65,7 @@ export function MainView() {
   // Session id whose inline command strip is expanded (only one at a time).
   const [commandsOpen, setCommandsOpen] = useState<string | null>(null);
   // Pending Tear Down prompt for a session: either a warnings confirmation, or a
-  // "VS Code still open" block that can offer the Accessibility shortcut.
+  // "window still open" block that can offer the Accessibility/Automation shortcut.
   const [teardownConfirm, setTeardownConfirm] = useState<TeardownPrompt | null>(null);
   // Session ids whose teardown call is currently in flight, so the triggering
   // button glows while the backend removes the worktree.
@@ -127,6 +126,9 @@ export function MainView() {
   // The resolved global default agent, for repos whose own `agent` is `null`.
   // `null` until the first read lands; such repos are left out until then.
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
+  // The terminal host for repos whose own `terminal_host` is `null`: picks the
+  // repo row's open button. VS Code's until the first read lands.
+  const [defaultTerminalHost, setDefaultTerminalHost] = useState<TerminalHost>("vscode");
 
   const refreshSessions = useCallback(() => {
     api.sessionsList().then((list) => {
@@ -244,6 +246,7 @@ export function MainView() {
       }
     }).catch(() => {});
     api.appAgentGet().then(setDefaultAgent).catch(() => {});
+    api.terminalHostDefault().then(setDefaultTerminalHost).catch(() => {});
     refreshSessions();
     refreshStatuses();
     refreshUpdate();
@@ -649,7 +652,7 @@ export function MainView() {
   }, [popoverOpen, pollChecks]);
 
   // Run teardown and route its outcome to the right prompt: a warnings
-  // confirmation, a "VS Code still open" block, or success (dismiss + refresh).
+  // confirmation, a "window still open" block, or success (dismiss + refresh).
   // `confirmed` skips the work-state checks; `force` skips closing the editor.
   async function runTeardown(id: string, confirmed: boolean, force: boolean) {
     setTeardownBusy((prev) => ({ ...prev, [id]: true }));
@@ -658,7 +661,7 @@ export function MainView() {
       if (res.status === "needs_confirmation") {
         setTeardownConfirm({ id, kind: "confirm", warnings: res.warnings });
       } else if (res.status === "blocked_by_editor") {
-        setTeardownConfirm({ id, kind: "blocked", message: res.message, accessibility: res.accessibility });
+        setTeardownConfirm({ id, kind: "blocked", message: res.message, permission: res.permission });
       } else {
         setTeardownConfirm(null);
         setCommandsOpen((open) => (open === id ? null : open));
@@ -787,7 +790,7 @@ export function MainView() {
         const res = await api.restartSessionEditor(s.id);
         setAgentPrompt(
           res.status === "blocked_by_editor"
-            ? { id: s.id, kind: "blocked", message: res.message, accessibility: res.accessibility }
+            ? { id: s.id, kind: "blocked", message: res.message, permission: res.permission }
             : null,
         );
       } catch (e) {
@@ -852,6 +855,7 @@ export function MainView() {
               : "";
             const repoMenu = repoMenuOpen === repo;
             const repoAgent = repoSettings[repo] ? repoSettings[repo].agent ?? defaultAgent : null;
+            const repoHost = TERMINAL_HOST_UI[repoSettings[repo]?.terminal_host ?? defaultTerminalHost] ?? TERMINAL_HOST_UI.vscode;
             const repoUrl = repoGitHubUrl(repo);
             const visibleSessions = showHidden
               ? repoSessions
@@ -902,10 +906,10 @@ export function MainView() {
                           setOpenRepoErr((e) => ({ ...e, [repo]: String(err) }));
                         }
                       }}
-                      title="Open cloned repo in VS Code"
-                      aria-label="Open cloned repo in VS Code"
+                      title={`Open cloned repo in ${repoHost.name}`}
+                      aria-label={`Open cloned repo in ${repoHost.name}`}
                     >
-                      <VSCodeIcon />
+                      <repoHost.Icon />
                     </button>
                   </div>
                   <button className="btn-add" onClick={() => openStartWork(repo)}>
@@ -996,7 +1000,8 @@ export function MainView() {
                             onOpenInEditor={() => openSessionInEditor(s.id, s.repo)}
                             onOpenPath={() => revealSessionPath(s.id, s.work_dir)}
                             onOpenUrl={(url) => api.openUrl(url)}
-                            onOpenAccessibilitySettings={() => api.openAccessibilitySettings()}
+                            onOpenPermissionSettings={(p) =>
+                              p === "automation" ? api.openAutomationSettings() : api.openAccessibilitySettings()}
                             onCreatePr={() => { setCommandsOpen(null); createPr(s); }}
                             onStartMerge={() => { setCommandsOpen(null); startMerge(s); }}
                             onTearDown={() => { setCommandsOpen(null); tearDown(s); }}

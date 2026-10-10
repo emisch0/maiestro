@@ -1,9 +1,10 @@
-//! Switching an existing session's agent (Claude, Codex, Antigravity) without re-spawning
-//! its worktree (issue #186), and the VS Code restart that applies it.
+//! Switching an existing session's agent (Claude, Codex, Antigravity, Copilot)
+//! without re-spawning its worktree, and the window restart that applies it.
 //!
-//! The agent session only changes when VS Code opens the folder fresh — the
-//! generated `.vscode/tasks.json` runs on `folderOpen` — so a switch rewrites the
-//! worktree's launch files and hooks, and when the worktree's window is already
+//! The agent session only changes when its terminal host opens a fresh window — VS
+//! Code's generated `.vscode/tasks.json` runs on `folderOpen`, and a Terminal
+//! window runs the command it was opened with — so a switch rewrites the
+//! worktree's launch files and hooks, and when the session's window is already
 //! open it records the agent that window is still running
 //! (`Session::editor_agent`) until mAIestro Code restarts it. The worktree's
 //! theme, title, and branch never change; the old agent's conversation does not
@@ -12,7 +13,7 @@
 use std::path::PathBuf;
 
 use crate::agent::Agent;
-use crate::editor::{close_window_and_wait, editor_window_open, focus_or_open, open_vscode, WindowClose};
+use crate::terminal_host::Permission;
 use crate::sessions::Session;
 
 #[derive(serde::Serialize)]
@@ -41,7 +42,7 @@ pub enum RestartOutcome {
     Restarted,
     /// The window couldn't be closed — same shape and meaning as teardown's
     /// `BlockedByEditor`, so the UI renders it the same way.
-    BlockedByEditor { message: String, accessibility: bool },
+    BlockedByEditor { message: String, permission: Option<Permission> },
 }
 
 /// The record after switching `s` to `agent`. With the window open, it keeps
@@ -68,7 +69,7 @@ pub async fn session_set_agent(session_id: String, agent: Agent) -> Result<SetAg
     if session.agent != agent {
         let work_dir = PathBuf::from(&session.work_dir);
         let from = session.agent;
-        let window_open = editor_window_open(&work_dir).await;
+        let window_open = crate::terminal_host::window_open(&session).await;
 
         let notice = crate::hooks::write_session_hooks(&work_dir, &session_id, agent).await?;
         match from {
@@ -100,8 +101,8 @@ fn outcome(s: &Session) -> SetAgentOutcome {
     SetAgentOutcome { restart_needed: s.restart_pending(), editor_agent: s.editor_agent.filter(|_| s.restart_pending()) }
 }
 
-/// Open a session's worktree in VS Code: focus its window if open, else launch
-/// one. While a switch is pending and the window is still open, returns
+/// Open a session in its terminal host (VS Code or Terminal): focus its window if open,
+/// else launch one. While a switch is pending and the window is still open, returns
 /// `RestartRequired` instead of focusing the old agent. A pending switch whose
 /// window has since closed just clears — the fresh window runs the new agent.
 ///
@@ -113,58 +114,41 @@ pub async fn session_open_in_editor(session_id: String, focus_existing: Option<b
     let focus_existing = focus_existing.unwrap_or(false);
     crate::log_invoke!("session_open_in_editor", session = %session_id, focus_existing);
     let mut session = crate::sessions::get(&session_id).ok_or_else(|| format!("session not found: {session_id}"))?;
-    let work_dir = PathBuf::from(&session.work_dir);
     if focus_existing {
-        focus_or_open(&work_dir).await?;
+        crate::terminal_host::focus_or_open(&session).await?;
         return Ok(OpenOutcome::Opened);
     }
     if let Some(editor_agent) = session.editor_agent {
-        if session.restart_pending() && editor_window_open(&work_dir).await {
+        if session.restart_pending() && crate::terminal_host::window_open(&session).await {
             return Ok(OpenOutcome::RestartRequired { agent: session.agent, editor_agent });
         }
         session.editor_agent = None;
         crate::sessions::save(&session).map_err(|e| e.to_string())?;
-        open_vscode(&work_dir)?;
+        crate::terminal_host::open(&session).await?;
         return Ok(OpenOutcome::Opened);
     }
-    focus_or_open(&work_dir).await?;
+    crate::terminal_host::focus_or_open(&session).await?;
     Ok(OpenOutcome::Opened)
 }
 
-/// Restart a session's VS Code window so it launches the recorded agent: close
-/// the window and confirm it's gone (as teardown does), clear the old agent's
-/// status, then open the worktree fresh.
+/// Restart a session's window (VS Code or Terminal) so it launches the
+/// recorded agent: close the window and confirm it's gone (as teardown does),
+/// clear the old agent's status, then open the session fresh.
 #[tauri::command]
 #[tracing::instrument(skip_all, fields(session = %session_id))]
 pub async fn session_restart_editor(session_id: String) -> Result<RestartOutcome, String> {
     crate::log_invoke!("session_restart_editor");
     let mut session = crate::sessions::get(&session_id).ok_or_else(|| format!("session not found: {session_id}"))?;
-    let work_dir = PathBuf::from(&session.work_dir);
-    match close_window_and_wait(&work_dir).await {
-        WindowClose::Closed => {}
-        WindowClose::InUse => {
-            return Ok(RestartOutcome::BlockedByEditor {
-                message: "I couldn't restart VS Code because I can't close its window.\n\nClose the \
-                          window yourself and open it again, or enable Accessibility for mAIestro \
-                          Code so it can restart the window for you."
-                    .to_string(),
-                accessibility: true,
-            });
-        }
-        WindowClose::StillOpen => {
-            return Ok(RestartOutcome::BlockedByEditor {
-                message: "The Visual Studio Code window didn't close. Close it, then open it again."
-                    .to_string(),
-                accessibility: false,
-            });
-        }
+    let close = crate::terminal_host::close_and_wait(&session).await;
+    if let Some((message, permission)) = crate::terminal_host::blocked(session.terminal_host, close, "restart the session") {
+        return Ok(RestartOutcome::BlockedByEditor { message, permission });
     }
     // The old agent's pill would otherwise linger until the new agent's first hook.
     crate::status::remove(&session_id);
     session.editor_agent = None;
     crate::sessions::save(&session).map_err(|e| e.to_string())?;
-    open_vscode(&work_dir)?;
-    tracing::info!(agent = %session.agent, "restarted VS Code for the session's agent");
+    crate::terminal_host::open(&session).await?;
+    tracing::info!(agent = %session.agent, terminal_host = %session.terminal_host, "restarted the session's window for its agent");
     Ok(RestartOutcome::Restarted)
 }
 

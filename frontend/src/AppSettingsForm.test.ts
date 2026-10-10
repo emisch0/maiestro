@@ -29,4 +29,14 @@ describe("extractAppFormDefaults", () => {
     expect(extractAppFormDefaults({ properties: { agent: { default: "gemini" } } }).agentDefault).toBe("claude");
     expect(extractAppFormDefaults({}).agentDefault).toBe("claude");
   });
+
+  // The Default terminal host control selects the schema default when the
+  // setting is null; anything unknown degrades to VS Code.
+  it("reads the terminal host default, falling back to VS Code", () => {
+    expect(extractAppFormDefaults({ properties: { terminal_host: { default: "terminal_app" } } }).terminalHostDefault).toBe(
+      "terminal_app",
+    );
+    expect(extractAppFormDefaults({ properties: { terminal_host: { default: "vscode" } } }).terminalHostDefault).toBe("vscode");
+    expect(extractAppFormDefaults({}).terminalHostDefault).toBe("vscode");
+  });
 });

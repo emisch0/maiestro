@@ -32,6 +32,8 @@ mod spawn;
 mod status;
 #[cfg(test)]
 mod testutil;
+mod terminal_app;
+mod terminal_host;
 mod theming;
 mod tools;
 mod tray_visibility;
@@ -507,6 +509,10 @@ fn main() {
             editor::open_repo_in_editor,
             spawn::teardown,
             editor::open_accessibility_settings,
+            terminal_host::open_automation_settings,
+            terminal_host::repo_set_terminal_host,
+            terminal_host::app_set_terminal_host,
+            terminal_host::terminal_host_default,
             pr::session_pr,
             pr::session_create_pr,
             pr::session_pr_checks,

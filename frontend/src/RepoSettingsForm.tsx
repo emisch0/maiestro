@@ -19,10 +19,13 @@ import {
 } from "@jsonforms/core";
 import { withJsonFormsControlProps } from "@jsonforms/react";
 import { vanillaRenderers, vanillaCells } from "@jsonforms/vanilla-renderers";
-import { Agent, AgentSettings, api } from "./api";
+import { Agent, AgentSettings, Platform, TerminalHost, api } from "./api";
 import { AGENTS, AGENT_PRODUCTS, asAgent } from "./lib/agents";
 import { PathField, RevealButton, usePathExists } from "./PathField";
 import { ToggleSwitch } from "./components/ToggleSwitch";
+import { TerminalHostSwitch, terminalHostOptions } from "./components/TerminalHostSwitch";
+
+export { terminalHostOptions };
 
 /** Field order, with `repo` and `hidden` deliberately omitted (the latter is
  *  managed from the popover, not this form). */
@@ -36,6 +39,7 @@ export const repoSettingsUISchema = {
     { type: "Control", scope: "#/properties/post_spawn_commands", label: "Post-spawn commands" },
     { type: "Control", scope: "#/properties/comment_on_spawn", label: "Comment on the issue when spawning" },
     { type: "Control", scope: "#/properties/delete_remote_on_teardown", label: "Delete remote branch on teardown" },
+    { type: "Control", scope: "#/properties/terminal_host", label: "Terminal host" },
     { type: "Control", scope: "#/properties/agent", label: "Agentic Coding CLI" },
     { type: "Control", scope: "#/properties/agent_settings" },
     { type: "Control", scope: "#/properties/prompts" },
@@ -60,6 +64,14 @@ export interface RepoFormConfig {
   promptModelDefaults: Record<Agent, string>;
   /** `agent_settings.claude.remote_control`'s schema default. */
   remoteControlDefault: boolean;
+  /** The repo being edited: the terminal-host select switches it directly. */
+  repo: string | null;
+  /** The OS the app runs on: the terminal-host select offers only its terminal hosts. */
+  platform: Platform;
+  /** The global default terminal host (Preferences, else its schema default):
+   *  what a repo whose own `terminal_host` is null uses, named in the select's
+   *  default option. */
+  terminalHostDefault: TerminalHost;
 }
 
 // ── Identity select ─────────────────────────────────────────────────────────
@@ -217,6 +229,42 @@ function AgentControl(props: ControlProps) {
 
 export const agentTester = rankWith(20, scopeEndsWith("agent"));
 export const AgentRenderer = withJsonFormsControlProps(AgentControl);
+
+// ── Terminal host select ─────────────────────────────────────────────────────
+// Offers only the terminal hosts the running OS has; null means the schema
+// default, named in the first option like the agent select's global default.
+// A change goes through `repo_set_terminal_host` (which moves the repo's
+// sessions too) rather than the autosave — see `TerminalHostSwitch`.
+
+function TerminalHostControl(props: ControlProps) {
+  const { data, handleChange, path, label, description, config } = props;
+  const platform: Platform = config?.platform ?? "macos";
+  const fallback: TerminalHost = config?.terminalHostDefault ?? "vscode";
+  const repo: string | null = config?.repo ?? null;
+  const available = terminalHostOptions(platform, null);
+  // Nothing to choose where VS Code is the only terminal host — unless the
+  // file names another one, which the select must then show.
+  if (available.length < 2 && !data) return null;
+  return (
+    <div className="control jsf-control">
+      <FieldHeading label={label} description={description} />
+      <TerminalHostSwitch
+        value={data ?? null}
+        options={terminalHostOptions(platform, data)}
+        available={available}
+        fallback={fallback}
+        onSwitch={(next, confirmed) =>
+          repo ? api.repoSetTerminalHost(repo, next, confirmed) : Promise.reject(new Error("no repo selected"))}
+        onSaved={(next) => handleChange(path, next)}
+        onOpenPermissionSettings={(p) =>
+          p === "automation" ? api.openAutomationSettings() : api.openAccessibilitySettings()}
+      />
+    </div>
+  );
+}
+
+export const terminalHostTester = rankWith(20, scopeEndsWith("terminal_host"));
+export const TerminalHostRenderer = withJsonFormsControlProps(TerminalHostControl);
 
 // ── Agent settings ───────────────────────────────────────────────────────────
 // Settings that belong to one agentic coding CLI, stored per agent
@@ -617,6 +665,7 @@ export const repoSettingsRenderers = [
   { tester: worktreePrefixTester, renderer: WorktreePrefixRenderer },
   { tester: envFilesTester, renderer: EnvFilesRenderer },
   { tester: postSpawnCommandsTester, renderer: PostSpawnCommandsRenderer },
+  { tester: terminalHostTester, renderer: TerminalHostRenderer },
   { tester: agentTester, renderer: AgentRenderer },
   { tester: agentSettingsTester, renderer: AgentSettingsRenderer },
   { tester: promptsTester, renderer: PromptsRenderer },

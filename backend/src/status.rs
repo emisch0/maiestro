@@ -303,6 +303,13 @@ fn next_last_error(
 /// returns. Deliberately failure-tolerant: a hook must never block or crash the
 /// user's Claude session, so every error is swallowed.
 pub fn run_hook_cli(args: &[String]) {
+    run_hook(args, &mut std::io::stdin());
+}
+
+/// [`run_hook_cli`] with the payload read from `input` rather than stdin, so
+/// tests never read the test process's own stdin (which blocks until EOF when
+/// it's a terminal or an open pipe).
+fn run_hook(args: &[String], input: &mut impl Read) {
     // args = ["<state>", "--workspace", "<ws-id>"] (order-tolerant for the flag).
     // Codex hooks pass only the state: they must be identical for every worktree
     // (see `hooks/codex.rs`), so the workspace comes from the payload's `cwd` instead.
@@ -315,7 +322,7 @@ pub fn run_hook_cli(args: &[String]) {
     // Best-effort stdin parse: the agent sends a JSON event, but we still record
     // a status even if it's empty or malformed.
     let mut buf = String::new();
-    let _ = std::io::stdin().read_to_string(&mut buf);
+    let _ = input.read_to_string(&mut buf);
     let payload: serde_json::Value = serde_json::from_str(&buf).unwrap_or(serde_json::Value::Null);
     let state_arg = normalize_verb(raw_arg, &payload);
 
@@ -613,9 +620,14 @@ pub fn write_creating(ws: &str) {
 /// since this runs before the editor opens — belt and braces) is never clobbered.
 /// The watcher then emits `ended`, clearing the pill until Claude's first hook.
 pub fn clear_creating(ws: &str) {
-    if read_record(ws).map(|r| r.state == "creating").unwrap_or(false) {
+    if is_creating(ws) {
         remove(ws);
     }
+}
+
+/// Whether the workspace is still being built in the background.
+pub fn is_creating(ws: &str) -> bool {
+    read_record(ws).map(|r| r.state == "creating").unwrap_or(false)
 }
 
 /// Record a failed background spawn as a surfaced `last_error` on the workspace's
@@ -1065,7 +1077,7 @@ mod tests {
         assert_eq!(err.message, "git worktree add failed");
     }
 
-    // run_hook_cli end-to-end: the read-merge-write cycle preserves a pending
+    // run_hook end-to-end: the read-merge-write cycle preserves a pending
     // error across a carrying event, exactly as the hook helper does live.
     #[test]
     fn hook_cli_merges_prior_error_forward() {
@@ -1082,12 +1094,12 @@ mod tests {
         write_record_atomic(&seed).unwrap();
 
         // A `busy` (PreToolUse) event carries the pending error forward.
-        run_hook_cli(&["busy".into(), "--workspace".into(), "12-merge".into()]);
+        run_hook(&["busy".into(), "--workspace".into(), "12-merge".into()], &mut std::io::empty());
         let after = read_record("12-merge").expect("record after hook");
         assert!(after.last_error.is_some(), "pending error carried forward on busy");
 
         // A `prompt` (new turn) clears it.
-        run_hook_cli(&["prompt".into(), "--workspace".into(), "12-merge".into()]);
+        run_hook(&["prompt".into(), "--workspace".into(), "12-merge".into()], &mut std::io::empty());
         let cleared = read_record("12-merge").expect("record after prompt");
         assert!(cleared.last_error.is_none(), "new turn clears the error");
     }
@@ -1156,12 +1168,12 @@ mod tests {
     #[test]
     fn gated_hook_lifecycle_on_disk() {
         let _home = TempHome::new();
-        run_hook_cli(&["gated".into(), "--workspace".into(), "208-x".into()]);
+        run_hook(&["gated".into(), "--workspace".into(), "208-x".into()], &mut std::io::empty());
         let gated = read_record("208-x").expect("record after gated");
         assert_eq!(gated.state, "busy");
         assert!(gated.prompt_after.is_some(), "gated sets a deadline");
 
-        run_hook_cli(&["tool_done".into(), "--workspace".into(), "208-x".into()]);
+        run_hook(&["tool_done".into(), "--workspace".into(), "208-x".into()], &mut std::io::empty());
         let after = read_record("208-x").expect("record after tool_done");
         assert!(after.prompt_after.is_none(), "a later hook clears the deadline");
 
@@ -1251,7 +1263,7 @@ mod tests {
         assert!(!session_start_is_late(None, &start));
 
         // Without a payload the helper can't tell it's late, so it records it.
-        run_hook_cli(&["session_start".into(), "--workspace".into(), "203-late".into()]);
+        run_hook(&["session_start".into(), "--workspace".into(), "203-late".into()], &mut std::io::empty());
         assert_eq!(read_record("203-late").unwrap().state, "running");
     }
 
@@ -1261,14 +1273,14 @@ mod tests {
     fn copilot_error_occurred_is_surfaced() {
         let _home = TempHome::new();
         write_record_atomic(&record("203-err", "busy")).unwrap();
-        run_hook_cli(&["error".into(), "--workspace".into(), "203-err".into()]);
+        run_hook(&["error".into(), "--workspace".into(), "203-err".into()], &mut std::io::empty());
         let after = read_record("203-err").unwrap();
         let err = after.last_error.expect("error recorded");
         assert!(err.surfaced);
         assert_eq!(err.message, "The agent reported an error");
-        run_hook_cli(&["idle".into(), "--workspace".into(), "203-err".into()]);
+        run_hook(&["idle".into(), "--workspace".into(), "203-err".into()], &mut std::io::empty());
         assert!(read_record("203-err").unwrap().last_error.is_some_and(|e| e.surfaced));
-        run_hook_cli(&["prompt".into(), "--workspace".into(), "203-err".into()]);
+        run_hook(&["prompt".into(), "--workspace".into(), "203-err".into()], &mut std::io::empty());
         assert!(read_record("203-err").unwrap().last_error.is_none());
     }
 

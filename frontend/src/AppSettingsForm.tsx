@@ -21,10 +21,11 @@ import {
 } from "@jsonforms/core";
 import { withJsonFormsControlProps } from "@jsonforms/react";
 import { vanillaRenderers, vanillaCells } from "@jsonforms/vanilla-renderers";
-import { Agent, ResolvedTool, Theme } from "./api";
+import { Agent, Platform, ResolvedTool, TerminalHost, Theme, api } from "./api";
 import { AGENTS, AGENT_PRODUCTS, asAgent } from "./lib/agents";
 import { RevealButton, PathMissingHint, usePathExists } from "./PathField";
 import { ToggleSwitch } from "./components/ToggleSwitch";
+import { TerminalHostSwitch, terminalHostOptions } from "./components/TerminalHostSwitch";
 
 /** Field order; `window`/`settings_window`/`onboarding_completed`/`update_check`
  *  are deliberately omitted (machine-managed). */
@@ -33,6 +34,7 @@ export const appSettingsUISchema = {
   elements: [
     { type: "Control", scope: "#/properties/theme", label: "Theme" },
     { type: "Control", scope: "#/properties/agent", label: "Default Agentic Coding CLI" },
+    { type: "Control", scope: "#/properties/terminal_host", label: "Default terminal host" },
     { type: "Control", scope: "#/properties/terminal_font_family", label: "Terminal font" },
     { type: "Control", scope: "#/properties/launch_at_login", label: "Launch at login" },
     { type: "Control", scope: "#/properties/tool_paths", label: "Tool paths" },
@@ -48,6 +50,10 @@ export interface AppFormConfig {
   terminalFontDefault: string;
   /** The `agent` schema default, selected when the setting is null. */
   agentDefault: Agent;
+  /** The `terminal_host` schema default, selected when the setting is null. */
+  terminalHostDefault: TerminalHost;
+  /** The OS the app runs on: the terminal-host select offers only its hosts. */
+  platform: Platform;
 }
 
 /** Defaults the form displays, read from the schema's `default` keywords — the
@@ -57,6 +63,7 @@ export interface AppFormConfig {
 export interface AppFormDefaults {
   terminalFontDefault: string;
   agentDefault: Agent;
+  terminalHostDefault: TerminalHost;
 }
 
 export function extractAppFormDefaults(
@@ -67,6 +74,7 @@ export function extractAppFormDefaults(
   return {
     terminalFontDefault: typeof def === "string" ? def : "",
     agentDefault: asAgent(props.agent?.default, "claude"),
+    terminalHostDefault: props.terminal_host?.default === "terminal_app" ? "terminal_app" : "vscode",
   };
 }
 
@@ -150,6 +158,46 @@ function AgentControl(props: ControlProps) {
 
 export const agentTester = rankWith(20, scopeEndsWith("agent"));
 export const AgentRenderer = withJsonFormsControlProps(AgentControl);
+
+// ── Default terminal host ───────────────────────────────────────────────────
+// The global default for repos whose own `terminal_host` is null; null here
+// shows as the schema default. A change goes through `app_set_terminal_host`,
+// which moves those repos' sessions (asking first when that closes windows),
+// never through the autosave — see `TerminalHostSwitch`.
+
+function TerminalHostControl(props: ControlProps) {
+  const { data, handleChange, path, label, description, config } = props;
+  const platform: Platform = config?.platform ?? "macos";
+  const fallback: TerminalHost = config?.terminalHostDefault ?? "vscode";
+  const available = terminalHostOptions(platform, null);
+  // Nothing to choose where VS Code is the only terminal host — unless the
+  // file names another one, which the select must then show.
+  if (available.length < 2 && !data) return null;
+  return (
+    <div className="control jsf-control">
+      <label className="jsf-label">{label}</label>
+      {description && <div className="jsf-help">{description}</div>}
+      <TerminalHostSwitch
+        value={data ?? null}
+        options={terminalHostOptions(platform, data)}
+        available={available}
+        fallback={fallback}
+        defaultOption={false}
+        scope="the existing sessions of every repo that uses the default"
+        onSwitch={(next, confirmed) => api.appSetTerminalHost(next, confirmed)}
+        onSaved={(next) => handleChange(path, next)}
+        onOpenPermissionSettings={(p) =>
+          p === "automation" ? api.openAutomationSettings() : api.openAccessibilitySettings()}
+      />
+      <p className="session-hint" style={{ paddingTop: 2 }}>
+        Each repo can override this in its own settings.
+      </p>
+    </div>
+  );
+}
+
+export const terminalHostTester = rankWith(20, scopeEndsWith("terminal_host"));
+export const TerminalHostRenderer = withJsonFormsControlProps(TerminalHostControl);
 
 // ── Launch at login (segmented on/off switch) ────────────────────────────────
 // Stored value is boolean | null; null is treated as false (issue #98).
@@ -336,6 +384,7 @@ export const ToolPathsRenderer = withJsonFormsControlProps(ToolPathsControl);
 export const appSettingsRenderers = [
   { tester: themeTester, renderer: ThemeRenderer },
   { tester: agentTester, renderer: AgentRenderer },
+  { tester: terminalHostTester, renderer: TerminalHostRenderer },
   { tester: launchAtLoginTester, renderer: LaunchAtLoginRenderer },
   { tester: terminalFontTester, renderer: TerminalFontRenderer },
   { tester: toolPathsTester, renderer: ToolPathsRenderer },

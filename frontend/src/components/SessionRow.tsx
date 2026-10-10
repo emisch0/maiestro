@@ -1,4 +1,4 @@
-import { Agent, PrChecks, PrLink, Session, StatusRecord } from "../api";
+import { Agent, PrChecks, PrLink, Session, TerminalHost, StatusRecord, WindowPermission } from "../api";
 import { AGENT_NAMES } from "../lib/agents";
 import { accentColor, checkLabel, PR_STATE_ICONS, PrOpenIcon } from "../lib/lifecycle";
 import { effectiveHidden, formatSnoozeRemaining } from "../lib/snooze";
@@ -8,21 +8,36 @@ import { HideCommandButton, SnoozeLabel } from "./HideControls";
 import GitHubIcon from "../icons/github.svg?react";
 import FolderIcon from "../icons/folder.svg?react";
 import VSCodeIcon from "../icons/vscode.svg?react";
+import TerminalIcon from "../icons/terminal.svg?react";
 import ChevronRightIcon from "../icons/chevron-right.svg?react";
 
-// A pending Tear Down prompt: a warnings confirmation, or a "VS Code still open"
-// block (which may offer the Accessibility shortcut so mAIestro Code can close it).
+// A pending Tear Down prompt: a warnings confirmation, or a "window still open"
+// block (which may offer the Accessibility or Automation shortcut so mAIestro
+// Code can close it).
 export type TeardownPrompt =
   | { id: string; kind: "confirm"; warnings: string[] }
-  | { id: string; kind: "blocked"; message: string; accessibility: boolean };
+  | { id: string; kind: "blocked"; message: string; permission: WindowPermission | null };
 
-// A pending agent-switch prompt (issue #186): the worktree's VS Code window still
+/** How each terminal host is named in the row: the open button, the restart
+ *  prompt, and the blocked prompts. */
+export const TERMINAL_HOST_UI: Record<TerminalHost, { name: string; Icon: typeof VSCodeIcon }> = {
+  vscode: { name: "VS Code", Icon: VSCodeIcon },
+  terminal_app: { name: "Terminal", Icon: TerminalIcon },
+};
+
+/** The button that opens System Settings at a missing grant. */
+const PERMISSION_BUTTON: Record<WindowPermission, string> = {
+  accessibility: "Open Accessibility Options",
+  automation: "Open Automation Options",
+};
+
+// A pending agent-switch prompt: the session's window (VS Code or Terminal) still
 // runs `editorAgent` after a switch to `agent` (offered right after the switch, or
 // when opening the window later), a restart that couldn't close the window, or a
 // failed switch/restart.
 export type AgentPrompt =
   | { id: string; kind: "restart"; reason: "switched" | "open"; agent: Agent; editorAgent: Agent }
-  | { id: string; kind: "blocked"; message: string; accessibility: boolean }
+  | { id: string; kind: "blocked"; message: string; permission: WindowPermission | null }
   | { id: string; kind: "error"; message: string };
 
 export type PrCreateState = { creating?: boolean; requestId?: string; error?: string };
@@ -49,7 +64,7 @@ export interface SessionRowProps {
   onOpenInEditor: () => void;
   onOpenPath: () => void;
   onOpenUrl: (url: string) => void;
-  onOpenAccessibilitySettings: () => void;
+  onOpenPermissionSettings: (permission: WindowPermission) => void;
   onCreatePr: () => void;
   onStartMerge: () => void;
   onTearDown: () => void;
@@ -71,7 +86,7 @@ export interface SessionRowProps {
 export function SessionRow({
   session: s, status, pr, checks, prCreate: prc, prMerge: pm, teardownBusy, teardownConfirm, agentPrompt, agentBusy,
   cmdOpen, repoHidden, now, openErr, busyCls, busyRingCls,
-  onToggleCommands, onOpenInEditor, onOpenPath, onOpenUrl, onOpenAccessibilitySettings,
+  onToggleCommands, onOpenInEditor, onOpenPath, onOpenUrl, onOpenPermissionSettings,
   onCreatePr, onStartMerge, onTearDown, onChooseAgent, onFocusEditor, onRestartEditor, onDismissAgentPrompt, onRunTeardown, onHide, onUnhide,
   onCancelTeardownConfirm, onDismissPrCreateError, onDismissPrMergeError, onDismissToolError, onDismissOpenError, onDismissNotice,
 }: SessionRowProps) {
@@ -91,6 +106,8 @@ export function SessionRow({
   // the feedback visible after the command strip collapses on click; mirrors the
   // command buttons' busy flags so it clears on completion or failure.
   const agent = s.agent ?? "claude";
+  // The app the session runs in, recorded at spawn (older records: VS Code).
+  const terminalHost = TERMINAL_HOST_UI[s.terminal_host ?? "vscode"] ?? TERMINAL_HOST_UI.vscode;
   // Switching mid-PR-create/merge or mid-teardown would fight over the window.
   const switchBusy = creating || teardownBusy || !!prc?.creating || (!!pm?.intent && pr?.state !== "merged");
   const prompt = agentPrompt?.id === s.id ? agentPrompt : null;
@@ -159,10 +176,10 @@ export function SessionRow({
             className="pill-btn"
             onClick={onOpenInEditor}
             disabled={creating}
-            title={creating ? "Still creating this workspace…" : "Open in VS Code"}
-            aria-label="Open in VS Code"
+            title={creating ? "Still creating this workspace…" : `Open in ${terminalHost.name}`}
+            aria-label={`Open in ${terminalHost.name}`}
           >
-            <VSCodeIcon style={{ color: accentColor(s.color) }} />
+            <terminalHost.Icon style={{ color: accentColor(s.color) }} />
           </button>
         </div>
         <button
@@ -242,13 +259,13 @@ export function SessionRow({
         <div className="cleanup-confirm">
           <p className="cleanup-lead">
             {prompt.reason === "open"
-              ? `This session was switched to ${AGENT_NAMES[prompt.agent]}, but its VS Code window is still running ${AGENT_NAMES[prompt.editorAgent]}.`
-              : `VS Code is still running ${AGENT_NAMES[prompt.editorAgent]} in this worktree.`}{" "}
+              ? `This session was switched to ${AGENT_NAMES[prompt.agent]}, but its ${terminalHost.name} window is still running ${AGENT_NAMES[prompt.editorAgent]}.`
+              : `${terminalHost.name} is still running ${AGENT_NAMES[prompt.editorAgent]} in this worktree.`}{" "}
             Restart the window to start {AGENT_NAMES[prompt.agent]}? The {AGENT_NAMES[prompt.editorAgent]} conversation won't carry over.
           </p>
           <div className="issue-actions">
             <button className={`btn-save ${agentBusy ? "btn-busy" : ""}`} disabled={agentBusy} onClick={onRestartEditor}>
-              Restart VS Code
+              Restart {terminalHost.name}
             </button>
             <button className="btn-ghost" onClick={onDismissAgentPrompt}>Later</button>
           </div>
@@ -258,9 +275,11 @@ export function SessionRow({
         <div className="cleanup-confirm">
           <p className="cleanup-lead" style={{ whiteSpace: "pre-line" }}>{prompt.message}</p>
           <div className="issue-actions">
-            <button className="btn-ghost" onClick={onFocusEditor}>Open VS Code</button>
-            {prompt.accessibility && (
-              <button className="btn-ghost" onClick={onOpenAccessibilitySettings}>Open Accessibility Options</button>
+            <button className="btn-ghost" onClick={onFocusEditor}>Open {terminalHost.name}</button>
+            {prompt.permission && (
+              <button className="btn-ghost" onClick={() => onOpenPermissionSettings(prompt.permission!)}>
+                {PERMISSION_BUTTON[prompt.permission]}
+              </button>
             )}
             <button className="btn-ghost" onClick={onDismissAgentPrompt}>Cancel</button>
           </div>
@@ -290,9 +309,11 @@ export function SessionRow({
         <div className="cleanup-confirm">
           <p className="cleanup-lead" style={{ whiteSpace: "pre-line" }}>{teardownConfirm.message}</p>
           <div className="issue-actions">
-            <button className="btn-ghost" onClick={onOpenInEditor}>Open in VS Code</button>
-            {teardownConfirm.accessibility && (
-              <button className="btn-ghost" onClick={onOpenAccessibilitySettings}>Open Accessibility Options</button>
+            <button className="btn-ghost" onClick={onOpenInEditor}>Open in {terminalHost.name}</button>
+            {teardownConfirm.permission && (
+              <button className="btn-ghost" onClick={() => onOpenPermissionSettings(teardownConfirm.permission!)}>
+                {PERMISSION_BUTTON[teardownConfirm.permission]}
+              </button>
             )}
             <button
               className={`btn-danger ${teardownBusy ? "btn-busy" : ""}`}

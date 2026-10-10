@@ -108,6 +108,11 @@
         }
       }
     },
+    "terminal_host": {
+      "type": ["string", "null"],
+      "enum": ["vscode", "terminal_app", null],
+      "description": "The terminal host this repo's sessions run their agent in: a VS Code window (`vscode`) or, on macOS, its own Terminal.app window (`terminal_app`). null = use the global default. Changing it moves the repo's existing sessions too, closing their open windows first (you're asked before any is closed)."
+    },
     "hidden": {
       "type": ["object", "null"],
       "title": "HideState",

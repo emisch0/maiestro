@@ -41,6 +41,20 @@ export interface AgentSettings {
   copilot?: AgentCommonSettings;
 }
 
+/** The app a session runs in: a VS Code window, or (macOS) a Terminal.app
+ *  window. */
+export type TerminalHost = "vscode" | "terminal_app";
+
+/** `repo_set_terminal_host`: switched (moving `moved` sessions), or a list of
+ *  open windows the switch would close, or a window that wouldn't close. */
+export type SetTerminalHostOutcome =
+  | { status: "done"; moved: number }
+  | { status: "needs_confirmation"; open: string[] }
+  | { status: "blocked_by_editor"; message: string; permission: WindowPermission | null };
+
+/** The macOS grant whose absence stopped mAIestro Code from closing a window. */
+export type WindowPermission = "accessibility" | "automation";
+
 export interface RepoSettings {
   repo: string;
   cloned_repo_dir: string | null;
@@ -50,6 +64,8 @@ export interface RepoSettings {
   /** null = use the global `agent` setting. */
   agent: Agent | null;
   agent_settings: AgentSettings;
+  /** The app new sessions open in. null = the schema default (VS Code). */
+  terminal_host?: TerminalHost | null;
   identity_id: string | null;
   hidden: HideState | null;
   prompts: PromptOverrides;
@@ -133,7 +149,7 @@ export type PostSpawnChoice =
 export type TeardownOutcome =
   | { status: "done" }
   | { status: "needs_confirmation"; warnings: string[] }
-  | { status: "blocked_by_editor"; message: string; accessibility: boolean };
+  | { status: "blocked_by_editor"; message: string; permission: WindowPermission | null };
 
 /** `session_set_agent`: whether the open window still runs the other agent. */
 export interface SetAgentOutcome {
@@ -150,7 +166,7 @@ export type OpenOutcome =
 /** `session_restart_editor`: same blocked shape as teardown's. */
 export type RestartOutcome =
   | { status: "restarted" }
-  | { status: "blocked_by_editor"; message: string; accessibility: boolean };
+  | { status: "blocked_by_editor"; message: string; permission: WindowPermission | null };
 
 /** One rate-limit window of an agent account's subscription quota (#205). */
 export interface QuotaWindow {
@@ -189,9 +205,12 @@ export interface Session {
   /** The agent this worktree launches: fixed at spawn, changed only by an
    *  explicit per-session switch (`setSessionAgent`). */
   agent: Agent;
-  /** Set while the worktree's VS Code window still runs a different agent than
+  /** Set while the session's window still runs a different agent than
    *  `agent` (switched while open, not yet restarted). Absent otherwise. */
   editor_agent?: Agent | null;
+  /** The app the session runs in, fixed at spawn. Absent on records written
+   *  before terminal hosts existed, which are VS Code sessions. */
+  terminal_host?: TerminalHost;
   hidden: HideState | null;
   /** Something mAIestro Code changed in the worktree that the user should know
    *  about (e.g. an appended `.gitignore` line). Absent once dismissed. */
@@ -292,6 +311,9 @@ export interface AppSettings {
   theme?: Theme | null;
   /** Default agent for repos that don't pick one. null = the schema default. */
   agent?: Agent | null;
+  /** Default terminal host for repos that don't pick one. null = the schema
+   *  default. Changed only through `appSetTerminalHost`, never the autosave. */
+  terminal_host?: TerminalHost | null;
   tool_paths?: ToolPaths | null;
   /** Font stack for a spawned worktree's VS Code terminal
    *  (`terminal.integrated.fontFamily`). null/empty = the schema default. */
@@ -426,9 +448,24 @@ export const api = {
   repoSetAgent: (repo: string, agent: Agent) =>
     invoke<void>("repo_set_agent", { repo, agent }),
 
+  /** Switch a repo's terminal host and move its existing sessions with it.
+   *  Unconfirmed, it only asks when that would close open windows. */
+  repoSetTerminalHost: (repo: string, terminalHost: TerminalHost | null, confirmed: boolean) =>
+    invoke<SetTerminalHostOutcome>("repo_set_terminal_host", { repo, terminalHost, confirmed }),
+
   /** The resolved global default agent, for repos whose own `agent` is `null`. */
   appAgentGet: () =>
     invoke<Agent>("app_agent_get"),
+
+  /** Switch the global default terminal host and move the sessions of every
+   *  repo that follows it. Unconfirmed, it only asks when that would close
+   *  open windows. */
+  appSetTerminalHost: (terminalHost: TerminalHost | null, confirmed: boolean) =>
+    invoke<SetTerminalHostOutcome>("app_set_terminal_host", { terminalHost, confirmed }),
+
+  /** The terminal host for repos whose own `terminal_host` is `null`. */
+  terminalHostDefault: () =>
+    invoke<TerminalHost>("terminal_host_default"),
 
   /** Untrack a repo (delete its settings file). Worktrees and sessions are kept. */
   removeRepo: (repo: string) =>
@@ -484,7 +521,7 @@ export const api = {
   revealPath: (path: string) =>
     invoke<void>("reveal_path", { path }),
 
-  /** Focus or open a session's VS Code window, unless a pending agent switch
+  /** Focus or open a session's window (VS Code or Terminal), unless a pending agent switch
    *  means it must restart first. `focusExisting` skips that check and just
    *  brings the (old agent's) window to the front. */
   openInEditor: (sessionId: string, focusExisting = false) =>
@@ -494,7 +531,7 @@ export const api = {
   setSessionAgent: (sessionId: string, agent: Agent) =>
     invoke<SetAgentOutcome>("session_set_agent", { sessionId, agent }),
 
-  /** Close and reopen a session's VS Code window so it runs the recorded agent. */
+  /** Close and reopen a session's window so it runs the recorded agent. */
   restartSessionEditor: (sessionId: string) =>
     invoke<RestartOutcome>("session_restart_editor", { sessionId }),
 
@@ -504,6 +541,7 @@ export const api = {
   codexHooksReviewNeeded: (repo: string, sessionId?: string) =>
     invoke<boolean>("codex_hooks_review_needed", { repo, sessionId: sessionId ?? null }).catch(() => false),
 
+  /** Open the repo's cloned checkout in its terminal host (no agent). */
   openRepoInEditor: (repo: string) =>
     invoke<void>("open_repo_in_editor", { repo }),
 
@@ -542,6 +580,10 @@ export const api = {
 
   openAccessibilitySettings: () =>
     invoke<void>("open_accessibility_settings"),
+
+  /** System Settings → Privacy & Security → Automation (controlling Terminal). */
+  openAutomationSettings: () =>
+    invoke<void>("open_automation_settings"),
 
   sessionPr: (sessionId: string) =>
     invoke<PrLink | null>("session_pr", { sessionId }),
