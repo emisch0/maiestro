@@ -17,7 +17,7 @@ function props(over: Partial<SessionRowProps> = {}): SessionRowProps {
     cmdOpen: true, repoHidden: false, now: 0, openErr: undefined,
     busyCls: () => "", busyRingCls: () => "",
     onToggleCommands: noop, onOpenInEditor: noop, onOpenPath: noop, onOpenUrl: noop,
-    onOpenAccessibilitySettings: noop, onCreatePr: noop, onStartMerge: noop, onTearDown: noop,
+    onOpenPermissionSettings: noop, onCreatePr: noop, onStartMerge: noop, onTearDown: noop,
     onChooseAgent: noop, onFocusEditor: noop, onRestartEditor: noop, onDismissAgentPrompt: noop, onRunTeardown: noop,
     onHide: noop, onUnhide: noop, onCancelTeardownConfirm: noop, onDismissPrCreateError: noop,
     onDismissPrMergeError: noop, onDismissToolError: noop, onDismissOpenError: noop, onDismissNotice: noop,
@@ -69,7 +69,7 @@ describe("SessionRow agent switch (#186)", () => {
     render(
       <SessionRow
         {...props({
-          agentPrompt: { id: "186-x", kind: "blocked", message: "The Visual Studio Code window didn't close.", accessibility: false },
+          agentPrompt: { id: "186-x", kind: "blocked", message: "The Visual Studio Code window didn't close.", permission: null },
           onFocusEditor,
         })}
       />,
@@ -90,5 +90,59 @@ describe("SessionRow notice (#185)", () => {
     expect(onDismissNotice).toHaveBeenCalled();
     rerender(<SessionRow {...props()} />);
     expect(screen.queryByText("mAIestro Code changed this worktree")).toBeNull();
+  });
+});
+
+describe("SessionRow session host", () => {
+  it("shows the VS Code button for VS Code sessions and records without a host", () => {
+    render(<SessionRow {...props()} />);
+    expect(screen.getByRole("button", { name: "Open in VS Code" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open in Terminal" })).toBeNull();
+  });
+
+  it("shows a Terminal button for Terminal sessions", () => {
+    const onOpenInEditor = vi.fn();
+    render(<SessionRow {...props({ session: { ...session, host: "terminal_app" }, onOpenInEditor })} />);
+    expect(screen.queryByRole("button", { name: "Open in VS Code" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open in Terminal" }));
+    expect(onOpenInEditor).toHaveBeenCalled();
+  });
+
+  it("names Terminal in the restart prompt", () => {
+    render(
+      <SessionRow
+        {...props({
+          session: { ...session, host: "terminal_app", agent: "codex" },
+          agentPrompt: { id: "186-x", kind: "restart", reason: "open", agent: "codex", editorAgent: "claude" },
+        })}
+      />,
+    );
+    expect(screen.getByText(/its Terminal window is still running Claude/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restart Terminal" })).toBeInTheDocument();
+  });
+
+  it("offers the grant a blocked teardown needs", () => {
+    const onOpenPermissionSettings = vi.fn();
+    const { rerender } = render(
+      <SessionRow
+        {...props({
+          session: { ...session, host: "terminal_app" },
+          teardownConfirm: { id: "186-x", kind: "blocked", message: "The Terminal window is still open.", permission: "automation" },
+          onOpenPermissionSettings,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open Automation Options" }));
+    expect(onOpenPermissionSettings).toHaveBeenCalledWith("automation");
+    rerender(
+      <SessionRow
+        {...props({
+          teardownConfirm: { id: "186-x", kind: "blocked", message: "The VS Code window is still open.", permission: "accessibility" },
+          onOpenPermissionSettings,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open Accessibility Options" }));
+    expect(onOpenPermissionSettings).toHaveBeenCalledWith("accessibility");
   });
 });

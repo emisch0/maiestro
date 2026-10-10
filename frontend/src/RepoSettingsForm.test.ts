@@ -5,6 +5,7 @@ import {
   prefixParentDir,
   resolveEnvFile,
   promptModelPlaceholder,
+  sessionHostOptions,
 } from "./RepoSettingsForm";
 
 // A trimmed shape of the real repo-settings schema, enough to exercise default
@@ -155,5 +156,25 @@ describe("promptModelPlaceholder", () => {
     expect(promptModelPlaceholder("codex", "")).toBe("Codex's configured default");
     expect(promptModelPlaceholder("codex", "gpt-5-codex")).toBe("gpt-5-codex");
     expect(promptModelPlaceholder("copilot", "")).toBe("Chosen by Copilot");
+  });
+});
+
+describe("session host", () => {
+  it("offers Terminal.app only on macOS", () => {
+    expect(sessionHostOptions("macos", null)).toEqual(["vscode", "terminal_app"]);
+    expect(sessionHostOptions("windows", null)).toEqual(["vscode"]);
+  });
+
+  it("keeps a host the file names even where it isn't available", () => {
+    expect(sessionHostOptions("windows", "terminal_app")).toEqual(["vscode", "terminal_app"]);
+    expect(sessionHostOptions("macos", "terminal_app")).toEqual(["vscode", "terminal_app"]);
+  });
+
+  it("reads the default host from the schema", () => {
+    expect(extractFormDefaults({ properties: { session_host: { default: "vscode" } } }).sessionHostDefault).toBe("vscode");
+    expect(extractFormDefaults({ properties: { session_host: { default: "terminal_app" } } }).sessionHostDefault).toBe(
+      "terminal_app",
+    );
+    expect(extractFormDefaults({}).sessionHostDefault).toBe("vscode");
   });
 });

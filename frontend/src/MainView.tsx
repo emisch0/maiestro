@@ -66,7 +66,7 @@ export function MainView() {
   // Session id whose inline command strip is expanded (only one at a time).
   const [commandsOpen, setCommandsOpen] = useState<string | null>(null);
   // Pending Tear Down prompt for a session: either a warnings confirmation, or a
-  // "VS Code still open" block that can offer the Accessibility shortcut.
+  // "window still open" block that can offer the Accessibility/Automation shortcut.
   const [teardownConfirm, setTeardownConfirm] = useState<TeardownPrompt | null>(null);
   // Session ids whose teardown call is currently in flight, so the triggering
   // button glows while the backend removes the worktree.
@@ -649,7 +649,7 @@ export function MainView() {
   }, [popoverOpen, pollChecks]);
 
   // Run teardown and route its outcome to the right prompt: a warnings
-  // confirmation, a "VS Code still open" block, or success (dismiss + refresh).
+  // confirmation, a "window still open" block, or success (dismiss + refresh).
   // `confirmed` skips the work-state checks; `force` skips closing the editor.
   async function runTeardown(id: string, confirmed: boolean, force: boolean) {
     setTeardownBusy((prev) => ({ ...prev, [id]: true }));
@@ -658,7 +658,7 @@ export function MainView() {
       if (res.status === "needs_confirmation") {
         setTeardownConfirm({ id, kind: "confirm", warnings: res.warnings });
       } else if (res.status === "blocked_by_editor") {
-        setTeardownConfirm({ id, kind: "blocked", message: res.message, accessibility: res.accessibility });
+        setTeardownConfirm({ id, kind: "blocked", message: res.message, permission: res.permission });
       } else {
         setTeardownConfirm(null);
         setCommandsOpen((open) => (open === id ? null : open));
@@ -787,7 +787,7 @@ export function MainView() {
         const res = await api.restartSessionEditor(s.id);
         setAgentPrompt(
           res.status === "blocked_by_editor"
-            ? { id: s.id, kind: "blocked", message: res.message, accessibility: res.accessibility }
+            ? { id: s.id, kind: "blocked", message: res.message, permission: res.permission }
             : null,
         );
       } catch (e) {
@@ -996,7 +996,8 @@ export function MainView() {
                             onOpenInEditor={() => openSessionInEditor(s.id, s.repo)}
                             onOpenPath={() => revealSessionPath(s.id, s.work_dir)}
                             onOpenUrl={(url) => api.openUrl(url)}
-                            onOpenAccessibilitySettings={() => api.openAccessibilitySettings()}
+                            onOpenPermissionSettings={(p) =>
+                              p === "automation" ? api.openAutomationSettings() : api.openAccessibilitySettings()}
                             onCreatePr={() => { setCommandsOpen(null); createPr(s); }}
                             onStartMerge={() => { setCommandsOpen(null); startMerge(s); }}
                             onTearDown={() => { setCommandsOpen(null); tearDown(s); }}

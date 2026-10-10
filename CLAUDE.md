@@ -29,7 +29,7 @@ The detailed how-it-works for each subsystem lives in `docs/`. **Read the releva
 | Per-repo or global settings, their JSON Schemas, the Settings window forms, launch at login / onboarding, the About block | `docs/settings.md` |
 | The Check Health diagnostics (`health.rs`) | `docs/health-check.md` |
 | Session status pills, the hook helper (`hooks/`), `last_error`, the `creating` state | `docs/session-status.md` |
-| Worktree colors/emoji, the Claude session color, the generated `.vscode` files | `docs/theming.md` |
+| Worktree colors/emoji, the Claude session color, the generated `.vscode` files, Terminal.app sessions (`host.rs`, `terminal.rs`) | `docs/theming.md` |
 | How the `claude` / `git` / `code` binaries are found, `tool_paths` overrides (`tools.rs`) | `docs/tool-resolution.md` |
 | The background update check and the popover's update banner (`update_check.rs`) | `docs/update-check.md` |
 | The popover's quota strip, the `statusline` helper, Codex/Copilot quota reads (`quota.rs`) | `docs/provider-quotas.md` |
@@ -43,12 +43,14 @@ The detailed how-it-works for each subsystem lives in `docs/`. **Read the releva
 The spawn subsystem is split along its natural seams so each file owns one responsibility (and the logging/testing conventions stay uniform). Where the pieces live:
 
 - **`spawn.rs`** — spawn core (`do_spawn`/`finish_spawn`), the preview commands (`prepare_spawn`/`draft_spawn_preview`/`confirm_spawn`), and `teardown`.
-- **`theming.rs`** — worktree color/emoji picking (`pick_theme`) and the palette → Claude-session-color mapping (`claude_color`).
+- **`theming.rs`** — worktree color/emoji picking (`pick_theme`), the palette → Claude-session-color mapping (`claude_color`), and the Terminal background tint (`dark_tint`).
 - **`hooks/`** — the agent status-hook subsystem (write, merge, reconcile) — see "Live per-session status". `mod.rs` holds what the agents share (`HookShell`, the `write_session_hooks`/`reconcile_*` dispatch, the stable hook wrapper, `info/exclude`); each agent's hook format is in its own file: `claude.rs` (with the quota status line), `codex.rs` (the session-flag overrides and the hook-trust check), `antigravity.rs` (with the `.gitignore` handling) and `copilot.rs`.
+- **`host.rs`** — the session host (`SessionHost`: VS Code or Terminal.app, recorded on the session at spawn), the shared session command line (`session_argv`/`LaunchOptions`), and the dispatch that opens, focuses, probes and closes a session's window for whichever host it runs in.
 - **`editor.rs`** — VS Code workspace-file generation, launch/focus, and the teardown window control (AppleScript/`lsof` on macOS, Win32 `EnumWindows`/`WM_CLOSE` on Windows).
+- **`terminal.rs`** — Terminal.app as a session host (macOS): argv-based `osascript` to open a tinted, titled window, focus it, and end + close it on teardown. Never modifies Terminal's profiles.
 - **`drafting.rs`** — the AI-drafting calls (`agent_text`, which dispatches to `claude -p`, `codex exec`, headless `agy` or headless `copilot`; issue/short-label drafting; `AgentActivity`).
 - **`agent.rs`** — the `Agent` enum (`claude` / `codex` / `antigravity` / `copilot`; Antigravity's binary is `agy` — resolve via `Agent::tool()`); `repo_settings::effective_agent` resolves a repo's agent. A session records its agent at spawn, so changing the repo setting never switches an existing worktree; only the explicit per-session switch does.
-- **`session_agent.rs`** — switching an existing session's agent (`session_set_agent`), the session-aware `session_open_in_editor`, and the VS Code restart that applies a switch (`session_restart_editor`).
+- **`session_agent.rs`** — switching an existing session's agent (`session_set_agent`), the session-aware `session_open_in_editor`, and the window restart that applies a switch (`session_restart_editor`).
 - **`pr.rs`** — the PR lifecycle commands (`session_pr`, `session_create_pr`, `session_pr_checks`, `session_work_state`, `session_merge_pr`).
 - **`health.rs`** — the Check Health diagnostics; **`update_check.rs`** — the background newer-release poll; **`quota.rs`** — the per-agent subscription quota reads and the `statusline` helper; **`tools.rs`** — external tool resolution; **`tray_visibility.rs`** — whether the Windows tray icon is hidden in the taskbar overflow (a read-only registry check, for onboarding); **`models.rs`** — asking an agent's CLI which models it offers (the drafting-model suggestions); **`app_settings.rs`** / **`repo_settings.rs`** — the two settings files and their schemas; **`approvals.rs`** — the append-only post-spawn approvals files; **`about.rs`** — version/build info.
 - **Shared helpers**: `gitops.rs` (`git()` / `local_branch_exists()`), `naming.rs` (slug/label helpers), `repo_context.rs` (the settings→identity→GitHub-client resolution + `validated_cloned_repo`), and `tools::{snippet, shell_quote}`.
@@ -59,7 +61,7 @@ mAIestro Code is a **launcher and dashboard**, not a session host. The popover l
 
 Hosting the conversation in the popover — running `claude` headlessly with its stdio piped to the backend, with editors attaching to that running session — is explicitly not the design and should not be attempted: there is no headless `claude` subprocess, no stdio piping, and no `SessionRegistry` owning live conversations.
 
-Instead, starting work creates the worktree and **launches the repo's agent (`claude`, `codex`, `agy` or `copilot`) with the right command-line arguments into a real, user-facing session** — either a VSCode window or a standalone terminal (selected per-repo). The conversation lives in that terminal/editor and the user interacts with it directly.
+Instead, starting work creates the worktree and **launches the repo's agent (`claude`, `codex`, `agy` or `copilot`) with the right command-line arguments into a real, user-facing session** — either a VS Code window or, on macOS, its own Terminal.app window (the per-repo `session_host`, recorded on the session at spawn; `host.rs` dispatches on it). The conversation lives in that terminal/editor and the user interacts with it directly. A Terminal session is themed through per-tab AppleScript properties only — **Terminal's profiles and preferences are never modified** — and the first Apple event raises macOS's Automation prompt, whose denial (`-1743`) surfaces as an actionable error. Details: `docs/theming.md` ("Terminal.app sessions").
 
 Consequence: because mAIestro Code does not own the process or its stdio, it cannot directly observe a session's live working/waiting state. That state comes from a separate, out-of-band mechanism instead — see "Live per-session status via agent hooks".
 
@@ -116,7 +118,7 @@ Conventions:
 
 ### One color per worktree, all the way to the session
 
-A spawned worktree gets a deterministic color and emoji from `theming::pick_theme`, and that one color is applied in the popover row, VS Code's title/status/activity bars, and (for Claude) the session's own UI; Codex, Antigravity and Copilot have no `/color`, so their sessions carry no color of their own. `PALETTE` is sized and ordered to match Claude Code's eight session colors one-for-one, so `theming::claude_color` is a **bijection** — a unit test enforces it, so adding a ninth palette entry fails the build. The color reaches the session as a `/color <name>` initial prompt on the launch command (not `--agent-color`, which is silently ignored outside teammate sessions). Reopening a worktree (or switching its agent) regenerates its `.vscode` files from the **session record** — it must never re-theme the worktree, and hand edits to those generated files do not survive. Details: `docs/theming.md`.
+A spawned worktree gets a deterministic color and emoji from `theming::pick_theme`, and that one color is applied in the popover row, VS Code's title/status/activity bars (or, for a Terminal.app session, a dark tint of it as the tab's background), and (for Claude) the session's own UI; Codex, Antigravity and Copilot have no `/color`, so their sessions carry no color of their own. `PALETTE` is sized and ordered to match Claude Code's eight session colors one-for-one, so `theming::claude_color` is a **bijection** — a unit test enforces it, so adding a ninth palette entry fails the build. The color reaches the session as a `/color <name>` initial prompt on the launch command (not `--agent-color`, which is silently ignored outside teammate sessions). Reopening a worktree (or switching its agent) regenerates its `.vscode` files from the **session record** — it must never re-theme the worktree, and hand edits to those generated files do not survive. Details: `docs/theming.md`.
 
 ### Live per-session status via agent hooks
 

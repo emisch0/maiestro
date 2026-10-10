@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::Agent;
+use crate::host::SessionHost;
 
 /// Hide/snooze state for a repo or a work item. The presence of this value means
 /// "hidden"; its absence means "visible".
@@ -128,6 +129,10 @@ pub struct RepoSettings {
     /// and, before it, the single `prompt_model`, migrated in `parse_and_validate`.
     #[serde(default)]
     pub agent_settings: AgentSettings,
+    /// The app new sessions open in. `None` uses the schema default (VS Code) —
+    /// see [`effective_session_host`]. A spawned session records its host.
+    #[serde(default)]
+    pub session_host: Option<SessionHost>,
     /// Repo-level hide/snooze state. `None` = visible. A hidden repo hides its
     /// work items too. Per-work-item state lives on the session record, not here.
     #[serde(default)]
@@ -153,6 +158,7 @@ impl RepoSettings {
             comment_on_spawn: None,
             agent: None,
             agent_settings: AgentSettings::default(),
+            session_host: None,
             hidden: None,
             prompts: PromptOverrides::default(),
         }
@@ -203,6 +209,16 @@ pub fn bool_or_default(configured: Option<bool>, pointer: &str) -> bool {
 /// the record instead (see `sessions::Session::agent`).
 pub fn effective_agent(settings: &RepoSettings) -> Agent {
     settings.agent.unwrap_or_else(crate::app_settings::agent)
+}
+
+/// The app a fresh spawn opens its session in: the repo's `session_host`, else
+/// the schema default. A spawned session records the result, so reopening and
+/// teardown read the record instead (see `sessions::Session::host`).
+pub fn effective_session_host(settings: &RepoSettings) -> SessionHost {
+    settings.session_host.unwrap_or_else(|| {
+        serde_json::from_value(serde_json::Value::String(schema_default("/properties/session_host/default")))
+            .unwrap_or_default()
+    })
 }
 
 /// Whether the Claude session launches with `--remote-control`: the repo's
@@ -630,6 +646,7 @@ mod tests {
                 antigravity: AgentCommonSettings { prompt_model: Some("gemini-3.1-pro-low".into()) },
                 copilot: AgentCommonSettings { prompt_model: Some("gpt-5-mini".into()) },
             },
+            session_host: Some(SessionHost::TerminalApp),
             hidden: Some(HideState { snooze_until: Some(1_717_372_800_000) }),
             prompts: PromptOverrides {
                 draft_issue: Some("Custom issue instruction".into()),

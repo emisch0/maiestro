@@ -14,27 +14,9 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::agent::Agent;
-use crate::tools::shell_quote;
+use crate::host::{session_argv, shell_command, LaunchOptions};
 
 // ── VS Code workspace files ─────────────────────────────────────────────────────
-
-/// Per-repo launch preferences for the session command, read from the repo's
-/// **current** settings each time the task is written (spawn, reopen, agent
-/// switch) — unlike the color and agent, which come from the session record,
-/// these are preferences rather than part of the worktree's identity. See
-/// [`session_argv`] for which agent honors which.
-#[derive(Debug, Clone, Copy)]
-pub struct LaunchOptions {
-    /// Claude: pass `--remote-control` (`agent_settings.claude.remote_control`).
-    pub remote_control: bool,
-}
-
-impl LaunchOptions {
-    /// The launch options `settings` asks for.
-    pub fn from_settings(settings: &crate::repo_settings::RepoSettings) -> Self {
-        Self { remote_control: crate::repo_settings::claude_remote_control(settings) }
-    }
-}
 
 /// Write the worktree's `.vscode/{settings,tasks}.json`: title-bar theming keyed
 /// to `color`, a `window.title` marker teardown finds the window by, and a
@@ -112,85 +94,6 @@ pub fn write_vscode_files(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
-}
-
-/// The program and arguments the folder-open task runs to start a real,
-/// user-facing `agent` session in the integrated terminal. Each argument
-/// carries whether the POSIX shell form ([`shell_command`], macOS) quotes it;
-/// Windows runs the argv directly as a `process` task.
-///
-/// **Claude:** `--remote-control` (unless the repo turned it off, see
-/// [`LaunchOptions`]) lets the user drive the session remotely; mAIestro Code
-/// still only launches it, it does not host it. `--name` gives the
-/// session the same display name mAIestro Code tracks it by, and the trailing
-/// `/color <name>` prompt carries the worktree's theme into the session UI so it
-/// matches the dashboard row and the title bar. The color goes through the
-/// initial *prompt* rather than a flag because Claude Code's `--agent-color` is
-/// only honored alongside `--agent-id`/`--agent-name`/`--team-name` (teammate
-/// sessions); passing it on its own is silently ignored. A leading-slash initial
-/// prompt is dispatched as a command, so it costs one line in the transcript and
-/// no model call.
-///
-/// **Codex:** the binary plus mAIestro Code's status hooks as `-c hooks.…`
-/// session flags (`hooks::codex_hook_overrides`) — identical for every worktree,
-/// so the user's one-time Codex hook trust covers them all. No initial prompt:
-/// Codex has no `--name` or `/color`, and any prompt would start a real model
-/// turn, so the session carries no name or color of its own — the VS Code bars
-/// are still themed.
-///
-/// **Antigravity:** the bare binary. Its status hooks live in the worktree's
-/// `.agents/hooks.json` (`hooks/antigravity.rs`), and it has no session-name flag or
-/// `/color`; an initial prompt (`-i`) would start a real model turn. Antigravity
-/// asks the user to trust each new worktree folder at startup — its own prompt.
-///
-/// **Copilot:** the binary plus `--name <session title>`, as Claude gets. Its
-/// status hooks live in the worktree's `.github/hooks/maiestro-status.json`
-/// (`hooks/copilot.rs`), loaded once the user answers Copilot's own "Do you trust the
-/// files in this folder?" prompt. No initial prompt: `-i` would start a real
-/// model turn (a premium request), and Copilot has no `/color` anyway. No
-/// `--no-auto-update` either — updating the interactive CLI is the user's call.
-///
-/// Whatever the agent, the binary is the **resolved** agent path (`tools::resolve_tool`),
-/// not a bare name left to PATH (issue #134). The task runs in VS Code's
-/// integrated terminal, whose PATH is whatever the VS Code process inherited —
-/// and when mAIestro Code launched that VS Code from the packaged bundle at login,
-/// that can be the minimal Launch Services PATH with no agent on it. The same
-/// `tool_paths` override that pins mAIestro Code's own drafting calls therefore
-/// also decides which binary the session starts with. When nothing concrete
-/// resolves, `resolve_tool` yields the bare name, i.e. exactly the previous
-/// behavior.
-fn session_argv(agent: Agent, color: &str, session_title: &str, launch: LaunchOptions) -> (String, Vec<(String, bool)>) {
-    let bin = crate::tools::resolve_tool(agent.tool()).to_string_lossy().into_owned();
-    let flag = |s: &str| (s.to_string(), false);
-    let value = |s: String| (s, true);
-    let args = match agent {
-        Agent::Claude => launch
-            .remote_control
-            .then(|| flag("--remote-control"))
-            .into_iter()
-            .chain([
-                flag("--name"),
-                value(session_title.to_string()),
-                value(format!("/color {}", crate::theming::claude_color(color))),
-            ])
-            .collect(),
-        Agent::Codex => crate::hooks::codex_hook_overrides()
-            .into_iter()
-            .flat_map(|o| [flag("-c"), value(o)])
-            .collect(),
-        Agent::Antigravity => Vec::new(),
-        Agent::Copilot => vec![flag("--name"), value(session_title.to_string())],
-    };
-    (bin, args)
-}
-
-/// The POSIX shell form of [`session_argv`]: the program and every value
-/// argument single-quoted, flags bare.
-fn shell_command(program: &str, args: &[(String, bool)]) -> String {
-    std::iter::once(shell_quote(program))
-        .chain(args.iter().map(|(a, quote)| if *quote { shell_quote(a) } else { a.clone() }))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 // ── Launch / focus ──────────────────────────────────────────────────────────────
@@ -628,7 +531,8 @@ pub fn open_accessibility_settings() {
 mod tests {
     #[cfg(not(target_os = "windows"))]
     use super::path_at_or_under;
-    use super::{is_editor_window, write_vscode_files, LaunchOptions};
+    use super::{is_editor_window, write_vscode_files};
+    use crate::host::LaunchOptions;
 
     /// The default launch: remote control on, as the schema default has it.
     const ON: LaunchOptions = LaunchOptions { remote_control: true };
@@ -669,7 +573,7 @@ mod tests {
                 (a, quote)
             })
             .collect();
-        super::shell_command(command, &args)
+        crate::host::shell_command(command, &args)
     }
 
     fn read_task(dir: &std::path::Path) -> serde_json::Value {

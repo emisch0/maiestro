@@ -41,6 +41,13 @@ export interface AgentSettings {
   copilot?: AgentCommonSettings;
 }
 
+/** The app a session runs in: a VS Code window, or (macOS) a Terminal.app
+ *  window. */
+export type SessionHost = "vscode" | "terminal_app";
+
+/** The macOS grant whose absence stopped mAIestro Code from closing a window. */
+export type WindowPermission = "accessibility" | "automation";
+
 export interface RepoSettings {
   repo: string;
   cloned_repo_dir: string | null;
@@ -50,6 +57,8 @@ export interface RepoSettings {
   /** null = use the global `agent` setting. */
   agent: Agent | null;
   agent_settings: AgentSettings;
+  /** The app new sessions open in. null = the schema default (VS Code). */
+  session_host?: SessionHost | null;
   identity_id: string | null;
   hidden: HideState | null;
   prompts: PromptOverrides;
@@ -133,7 +142,7 @@ export type PostSpawnChoice =
 export type TeardownOutcome =
   | { status: "done" }
   | { status: "needs_confirmation"; warnings: string[] }
-  | { status: "blocked_by_editor"; message: string; accessibility: boolean };
+  | { status: "blocked_by_editor"; message: string; permission: WindowPermission | null };
 
 /** `session_set_agent`: whether the open window still runs the other agent. */
 export interface SetAgentOutcome {
@@ -150,7 +159,7 @@ export type OpenOutcome =
 /** `session_restart_editor`: same blocked shape as teardown's. */
 export type RestartOutcome =
   | { status: "restarted" }
-  | { status: "blocked_by_editor"; message: string; accessibility: boolean };
+  | { status: "blocked_by_editor"; message: string; permission: WindowPermission | null };
 
 /** One rate-limit window of an agent account's subscription quota (#205). */
 export interface QuotaWindow {
@@ -189,9 +198,12 @@ export interface Session {
   /** The agent this worktree launches: fixed at spawn, changed only by an
    *  explicit per-session switch (`setSessionAgent`). */
   agent: Agent;
-  /** Set while the worktree's VS Code window still runs a different agent than
+  /** Set while the session's window still runs a different agent than
    *  `agent` (switched while open, not yet restarted). Absent otherwise. */
   editor_agent?: Agent | null;
+  /** The app the session runs in, fixed at spawn. Absent on records written
+   *  before hosts existed, which are VS Code sessions. */
+  host?: SessionHost;
   hidden: HideState | null;
   /** Something mAIestro Code changed in the worktree that the user should know
    *  about (e.g. an appended `.gitignore` line). Absent once dismissed. */
@@ -484,7 +496,7 @@ export const api = {
   revealPath: (path: string) =>
     invoke<void>("reveal_path", { path }),
 
-  /** Focus or open a session's VS Code window, unless a pending agent switch
+  /** Focus or open a session's window (VS Code or Terminal), unless a pending agent switch
    *  means it must restart first. `focusExisting` skips that check and just
    *  brings the (old agent's) window to the front. */
   openInEditor: (sessionId: string, focusExisting = false) =>
@@ -494,7 +506,7 @@ export const api = {
   setSessionAgent: (sessionId: string, agent: Agent) =>
     invoke<SetAgentOutcome>("session_set_agent", { sessionId, agent }),
 
-  /** Close and reopen a session's VS Code window so it runs the recorded agent. */
+  /** Close and reopen a session's window so it runs the recorded agent. */
   restartSessionEditor: (sessionId: string) =>
     invoke<RestartOutcome>("session_restart_editor", { sessionId }),
 
@@ -542,6 +554,10 @@ export const api = {
 
   openAccessibilitySettings: () =>
     invoke<void>("open_accessibility_settings"),
+
+  /** System Settings → Privacy & Security → Automation (controlling Terminal). */
+  openAutomationSettings: () =>
+    invoke<void>("open_automation_settings"),
 
   sessionPr: (sessionId: string) =>
     invoke<PrLink | null>("session_pr", { sessionId }),

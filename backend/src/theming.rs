@@ -90,6 +90,21 @@ pub fn claude_color(hex: &str) -> &'static str {
     }
 }
 
+/// A subtle dark tint of a palette hex, for a terminal window's background: a
+/// near-black neutral with a hint of the color, so near-white text stays
+/// readable on every palette entry while the hue still names the worktree. `None` for anything that
+/// isn't `#rrggbb`.
+pub fn dark_tint(hex: &str) -> Option<[u8; 3]> {
+    let digits = hex.strip_prefix('#').filter(|d| d.len() == 6 && d.is_ascii())?;
+    let channel = |i: usize| u8::from_str_radix(&digits[i..i + 2], 16).ok();
+    let rgb = [channel(0)?, channel(2)?, channel(4)?];
+    // A near-black neutral with just a hint (7%) of the color mixed in: a
+    // terminal background that reads as "dark, slightly tinted", so the hue
+    // names the worktree without competing with what the session draws.
+    const BASE: i32 = 28;
+    Some(rgb.map(|c| (BASE + (i32::from(c) - BASE) * 7 / 100) as u8))
+}
+
 /// Deterministic index into a list of `len`, derived from `s` and a `salt`.
 /// DefaultHasher::new() is fixed-seeded, so the same name always themes the same.
 fn hash_index(s: &str, salt: u64, len: usize) -> usize {
@@ -105,6 +120,26 @@ fn hash_index(s: &str, salt: u64, len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every palette entry tints to a distinct, dark background (near-white text
+    /// stays readable), and anything that isn't `#rrggbb` gets no tint.
+    #[test]
+    fn dark_tint_darkens_each_palette_color() {
+        let tints: Vec<[u8; 3]> = PALETTE.iter().map(|hex| dark_tint(hex).unwrap()).collect();
+        for (hex, tint) in PALETTE.iter().zip(&tints) {
+            // Relative luminance well under mid-grey.
+            let luma = 0.2126 * f64::from(tint[0]) + 0.7152 * f64::from(tint[1]) + 0.0722 * f64::from(tint[2]);
+            assert!(luma < 45.0, "{hex} tints too strongly: {tint:?}");
+        }
+        let mut unique = tints.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), tints.len(), "two palette colors tint the same");
+        assert_eq!(dark_tint("#dc2626"), Some([41, 28, 28]));
+        assert_eq!(dark_tint("dc2626"), None);
+        assert_eq!(dark_tint("#zz2626"), None);
+        assert_eq!(dark_tint("#fff"), None);
+    }
 
     /// The eight names Claude Code's `/color` accepts (plus `default`).
     const CLAUDE_COLORS: &[&str] =

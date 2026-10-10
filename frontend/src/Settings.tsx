@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Agent, api, AppSettings, AppVersion, CredentialScope, CredentialTypeDto, GHRepo, HealthCheck, RepoSettings, ResolvedTool } from "./api";
+import { Agent, api, AppSettings, AppVersion, CredentialScope, CredentialTypeDto, GHRepo, HealthCheck, Platform, RepoSettings, ResolvedTool } from "./api";
 import { JsonForms } from "@jsonforms/react";
 import {
   repoSettingsRenderers,
@@ -78,6 +78,11 @@ export function Settings() {
   // Default values (worktree prefix, AI prompts) read from the schema's
   // `default` keywords — shown by the custom renderers.
   const [repoFormDefaults, setRepoFormDefaults] = useState<RepoFormDefaults | null>(null);
+  // The OS the backend runs on: the repo form offers only its session hosts.
+  const [platform, setPlatform] = useState<Platform>("macos");
+  useEffect(() => {
+    api.platform().then(setPlatform).catch(() => {});
+  }, []);
   // Set when the backend rejects a repo's settings file on load (bad JSON or a
   // schema violation); shown as a banner instead of a form full of defaults.
   const [repoLoadError, setRepoLoadError] = useState<string | null>(null);
@@ -303,12 +308,14 @@ export function Settings() {
       worktreePrefixDefault: repoFormDefaults?.worktreePrefixDefault ?? "",
       promptModelDefaults: repoFormDefaults?.promptModelDefaults ?? { claude: "", codex: "", antigravity: "", copilot: "" },
       remoteControlDefault: repoFormDefaults?.remoteControlDefault ?? true,
+      platform,
+      sessionHostDefault: repoFormDefaults?.sessionHostDefault ?? "vscode",
       globalAgent,
       repoAgent,
       booleanDefaults: repoFormDefaults?.booleanDefaults ?? {},
       promptDefaults: repoFormDefaults?.promptDefaults ?? {},
     }),
-    [knownIdentities, loadedRepo?.settings.cloned_repo_dir, repoFormDefaults, globalAgent, repoAgent],
+    [knownIdentities, loadedRepo?.settings.cloned_repo_dir, repoFormDefaults, platform, globalAgent, repoAgent],
   );
 
   // Config the app-settings custom renderers read (the Tool paths status line,

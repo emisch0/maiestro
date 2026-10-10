@@ -19,7 +19,7 @@ import {
 } from "@jsonforms/core";
 import { withJsonFormsControlProps } from "@jsonforms/react";
 import { vanillaRenderers, vanillaCells } from "@jsonforms/vanilla-renderers";
-import { Agent, AgentSettings, api } from "./api";
+import { Agent, AgentSettings, Platform, SessionHost, api } from "./api";
 import { AGENTS, AGENT_PRODUCTS, asAgent } from "./lib/agents";
 import { PathField, RevealButton, usePathExists } from "./PathField";
 import { ToggleSwitch } from "./components/ToggleSwitch";
@@ -36,6 +36,7 @@ export const repoSettingsUISchema = {
     { type: "Control", scope: "#/properties/post_spawn_commands", label: "Post-spawn commands" },
     { type: "Control", scope: "#/properties/comment_on_spawn", label: "Comment on the issue when spawning" },
     { type: "Control", scope: "#/properties/delete_remote_on_teardown", label: "Delete remote branch on teardown" },
+    { type: "Control", scope: "#/properties/session_host", label: "Open sessions in" },
     { type: "Control", scope: "#/properties/agent", label: "Agentic Coding CLI" },
     { type: "Control", scope: "#/properties/agent_settings" },
     { type: "Control", scope: "#/properties/prompts" },
@@ -60,6 +61,10 @@ export interface RepoFormConfig {
   promptModelDefaults: Record<Agent, string>;
   /** `agent_settings.claude.remote_control`'s schema default. */
   remoteControlDefault: boolean;
+  /** The OS the app runs on: the session-host select offers only its hosts. */
+  platform: Platform;
+  /** `session_host`'s schema default, named in the select's default option. */
+  sessionHostDefault: SessionHost;
 }
 
 // ── Identity select ─────────────────────────────────────────────────────────
@@ -217,6 +222,56 @@ function AgentControl(props: ControlProps) {
 
 export const agentTester = rankWith(20, scopeEndsWith("agent"));
 export const AgentRenderer = withJsonFormsControlProps(AgentControl);
+
+// ── Session host select ──────────────────────────────────────────────────────
+// Offers only the hosts the running OS has; null means the schema default,
+// named in the first option like the agent select's global default.
+
+/** Product names for the session hosts. */
+export const SESSION_HOST_PRODUCTS: Record<SessionHost, string> = {
+  vscode: "Visual Studio Code",
+  terminal_app: "Terminal.app",
+};
+
+/** The hosts to offer on `platform`. A host the file already names stays
+ *  listed even where it isn't available (a settings file synced from a Mac),
+ *  so the select shows the real value rather than a blank. */
+export function sessionHostOptions(platform: Platform, current: SessionHost | null | undefined): SessionHost[] {
+  const hosts: SessionHost[] = platform === "macos" ? ["vscode", "terminal_app"] : ["vscode"];
+  if (current && !hosts.includes(current)) hosts.push(current);
+  return hosts;
+}
+
+function SessionHostControl(props: ControlProps) {
+  const { data, handleChange, path, label, description, config } = props;
+  const platform: Platform = config?.platform ?? "macos";
+  const fallback: SessionHost = config?.sessionHostDefault ?? "vscode";
+  const available = sessionHostOptions(platform, null);
+  // Nothing to choose where VS Code is the only host — unless the file names
+  // another one, which the select must then show.
+  if (available.length < 2 && !data) return null;
+  return (
+    <div className="control jsf-control">
+      <FieldHeading label={label} description={description} />
+      <select
+        className="text-input profile-select"
+        value={data ?? ""}
+        onChange={(e) => handleChange(path, e.target.value === "" ? null : e.target.value)}
+      >
+        <option value="">Default ({SESSION_HOST_PRODUCTS[fallback]})</option>
+        {sessionHostOptions(platform, data).map((h) => (
+          <option key={h} value={h}>
+            {SESSION_HOST_PRODUCTS[h]}
+            {available.includes(h) ? "" : " (not available on this computer)"}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+export const sessionHostTester = rankWith(20, scopeEndsWith("session_host"));
+export const SessionHostRenderer = withJsonFormsControlProps(SessionHostControl);
 
 // ── Agent settings ───────────────────────────────────────────────────────────
 // Settings that belong to one agentic coding CLI, stored per agent
@@ -617,6 +672,7 @@ export const repoSettingsRenderers = [
   { tester: worktreePrefixTester, renderer: WorktreePrefixRenderer },
   { tester: envFilesTester, renderer: EnvFilesRenderer },
   { tester: postSpawnCommandsTester, renderer: PostSpawnCommandsRenderer },
+  { tester: sessionHostTester, renderer: SessionHostRenderer },
   { tester: agentTester, renderer: AgentRenderer },
   { tester: agentSettingsTester, renderer: AgentSettingsRenderer },
   { tester: promptsTester, renderer: PromptsRenderer },
@@ -663,6 +719,8 @@ export interface RepoFormDefaults {
    *  generically so a boolean added to the schema needs no change here. */
   booleanDefaults: Record<string, boolean>;
   promptDefaults: Record<PromptKey, string>;
+  /** `session_host`'s default (VS Code when absent or unrecognized). */
+  sessionHostDefault: SessionHost;
 }
 
 export function extractFormDefaults(
@@ -688,6 +746,7 @@ export function extractFormDefaults(
       copilot: str(agentDefault("copilot", "prompt_model")),
     },
     remoteControlDefault: agentDefault("claude", "remote_control") !== false,
+    sessionHostDefault: props.session_host?.default === "terminal_app" ? "terminal_app" : "vscode",
     booleanDefaults,
     promptDefaults: {
       draft_issue: str(promptProps.draft_issue?.default),
