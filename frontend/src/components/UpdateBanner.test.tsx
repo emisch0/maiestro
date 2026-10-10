@@ -16,9 +16,9 @@ describe("UpdateBanner (#182)", () => {
     const onDismiss = vi.fn();
 
     render(<UpdateBanner update={update} onDismiss={onDismiss} />);
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "A new version of mAIestro Code (v0.4.0) is available",
-    );
+    // The product name is the wordmark SVG, so it is in the accessible name, not the text.
+    expect(screen.getByRole("status")).toHaveTextContent("A new version of (v0.4.0) is available");
+    expect(screen.getByRole("img", { name: "mAIestro Code" })).toBeInTheDocument();
 
     const open = { cmd: "open_url", args: { url: update.release_url } };
     screen.getByRole("button", { name: "View Release" }).click();

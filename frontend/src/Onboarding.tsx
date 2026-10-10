@@ -19,6 +19,7 @@ import { useEffect, useState } from "react";
 import { Agent, Platform, ResolvedTool, api } from "./api";
 import { GITHUB_PAT_SETUP_URL } from "./components/CredRows";
 import { TrayDragDemo } from "./components/TrayDragDemo";
+import { Wordmark } from "./components/Wordmark";
 import { AGENTS, AGENT_MARKS, AGENT_PRODUCTS, AGENT_TOOLS, asAgent } from "./lib/agents";
 import LogoIcon from "./icons/logo.svg?react";
 
@@ -139,7 +140,7 @@ export function Onboarding() {
         <div className="onboarding-brand">
           <LogoIcon className="onboarding-logo" aria-hidden="true" />
           <h1 className="onboarding-title">
-            m<span className="ai">AI</span>estro Code
+            <Wordmark />
           </h1>
         </div>
         {hasIdentities !== null && steps.length > 1 && (

@@ -29,6 +29,7 @@ import { CodexHooksDialog } from "./components/CodexHooksDialog";
 import { PostSpawnConfirmDialog } from "./components/PostSpawnConfirmDialog";
 import { AgentPrompt, SessionRow, TeardownPrompt, PrCreateState, PrMergeState, TERMINAL_HOST_UI } from "./components/SessionRow";
 import { PickerOverlay, Picker, Preview, Expand } from "./components/PickerOverlay";
+import { Wordmark } from "./components/Wordmark";
 import LogoIcon from "./icons/logo.svg?react";
 import GearIcon from "./icons/gear.svg?react";
 import EyeIcon from "./icons/eye.svg?react";
@@ -818,7 +819,7 @@ export function MainView() {
       <ResizeGrips />
       <header className="panel-header">
         <LogoIcon className="panel-logo" aria-hidden="true" />
-        <h1>m<span className="ai">AI</span>estro Code</h1>
+        <h1><Wordmark /></h1>
         <button
           className={`icon-btn panel-header-center ${showHidden ? "icon-btn--active" : ""}`}
           onClick={() => setShowHidden((v) => !v)}

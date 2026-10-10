@@ -6,6 +6,7 @@
 // (see backend/src/about.rs), so it renders as plain markup after the form.
 
 import { api, AppVersion } from "../api";
+import { Wordmark } from "./Wordmark";
 
 export function AboutSection({ info }: { info: AppVersion }) {
   // A dev build carries the *last released* version, so showing a bare "0.2.3"
@@ -19,7 +20,7 @@ export function AboutSection({ info }: { info: AppVersion }) {
       <div className="about-row">
         <div className="about-lines">
           <p className="about-version">
-            m<span className="ai">AI</span>estro Code {label}
+            <Wordmark /> {label}
             {info.dev_build && <span className="about-dev-badge">dev build</span>}
           </p>
           <p className="session-hint">
