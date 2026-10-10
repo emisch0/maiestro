@@ -1,5 +1,5 @@
 //! Resolving the external CLIs mAIestro Code invokes **directly** — the agent CLIs
-//! `claude`, `codex`, `agy` (Antigravity) and `copilot` (GitHub Copilot), `git`, and the VS Code `code` CLI — robustly, even when the app is launched from the
+//! `claude`, `codex`, `agy` (Antigravity) and `copilot` (GitHub Copilot), `git`, the VS Code `code` CLI and the `cmux` CLI — robustly, even when the app is launched from the
 //! packaged bundle (`/Applications/mAIestro Code.app/…`).
 //!
 //! The problem: at login, macOS Launch Services starts the app with a **minimal
@@ -261,6 +261,11 @@ fn fallbacks(name: &str) -> Vec<PathBuf> {
             PathBuf::from("/usr/local/bin/code"),
             PathBuf::from("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"),
         ],
+        // The CLI bundled inside cmux.app; cmux installs nothing on PATH itself.
+        "cmux" => vec![
+            PathBuf::from("/Applications/cmux.app/Contents/Resources/bin/cmux"),
+            home().join("Applications/cmux.app/Contents/Resources/bin/cmux"),
+        ],
         _ => Vec::new(),
     }
 }
@@ -306,6 +311,13 @@ pub fn find_tool(name: &str) -> Option<PathBuf> {
     if let Some(over) = crate::app_settings::tool_path_override(name) {
         let p = expand_tilde(&over);
         return p.is_file().then_some(p);
+    }
+    // cmux's own CLI lives in its app bundle; a `cmux` on PATH may be an
+    // unrelated tool of the same name, so the bundle is probed first.
+    if name == "cmux" {
+        if let Some(p) = fallbacks(name).into_iter().find(|p| p.is_file()) {
+            return Some(p);
+        }
     }
     // 2. No override: the enriched (login-shell) PATH.
     if let Some(p) = which_on(&enriched_path(), name) {
@@ -492,7 +504,7 @@ pub fn shell_quote(s: &str) -> String {
 /// The directly-invoked tools whose resolution the Settings UI surfaces.
 /// Every agent is listed so any can be pinned; nothing *resolves* an agent's
 /// binary for real work unless a repo actually uses that agent.
-const TOOLS: &[&str] = &["claude", "codex", "agy", "copilot", "git", "code"];
+const TOOLS: &[&str] = &["claude", "codex", "agy", "copilot", "git", "code", "cmux"];
 
 /// One tool's resolution result, for the Settings "Tool paths" status line.
 #[derive(serde::Serialize)]

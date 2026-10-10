@@ -76,6 +76,9 @@ pub struct ToolPaths {
     /// Path to the VS Code `code` CLI (open worktrees). `None`/empty = auto-resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// Path to the `cmux` CLI (cmux sessions). `None`/empty = auto-resolve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmux: Option<String>,
 }
 
 /// Persisted state of the background update check (`crate::update_check`).
@@ -119,6 +122,11 @@ pub struct AppSettings {
     /// `terminal_host::app_set_terminal_host`, which moves the affected sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_host: Option<crate::terminal_host::TerminalHost>,
+    /// How a terminal host that groups sessions (cmux) arranges them. `None`
+    /// (absent) means the schema `default`. See [`terminal_layout`]. Owned by
+    /// the form: it applies to new sessions only, so nothing has to move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_layout: Option<crate::terminal_host::TerminalLayout>,
     /// Per-tool CLI path overrides. `None` (absent) means all tools auto-resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_paths: Option<ToolPaths>,
@@ -144,7 +152,7 @@ pub struct AppSettings {
 }
 
 /// The user's explicit path override for a directly-invoked tool
-/// (`claude`/`codex`/`agy`/`copilot`/`git`/`code`), if set and non-empty. Read by `crate::tools`. An
+/// (`claude`/`codex`/`agy`/`copilot`/`git`/`code`/`cmux`), if set and non-empty. Read by `crate::tools`. An
 /// unknown tool name or an empty/whitespace value yields `None` (auto-resolve).
 pub fn tool_path_override(name: &str) -> Option<String> {
     let tp = load().tool_paths?;
@@ -155,6 +163,7 @@ pub fn tool_path_override(name: &str) -> Option<String> {
         "copilot" => tp.copilot,
         "git" => tp.git,
         "code" => tp.code,
+        "cmux" => tp.cmux,
         _ => None,
     };
     v.filter(|s| !s.trim().is_empty())
@@ -183,6 +192,15 @@ pub fn terminal_host_schema_default() -> crate::terminal_host::TerminalHost {
         .unwrap_or_default()
 }
 
+/// How new cmux sessions are arranged: the user's `terminal_layout`, else the
+/// schema `default`.
+pub fn terminal_layout() -> crate::terminal_host::TerminalLayout {
+    load().terminal_layout.unwrap_or_else(|| {
+        serde_json::from_value(serde_json::Value::String(schema_default("/properties/terminal_layout/default")))
+            .unwrap_or_default()
+    })
+}
+
 /// The font stack to write as `terminal.integrated.fontFamily` into a spawned
 /// worktree's `.vscode/settings.json`. The user's setting when they've set a
 /// non-empty one, otherwise the schema's `default` — which is the single source
@@ -202,7 +220,7 @@ pub fn terminal_font_family() -> String {
 /// `app_settings_schema` command need no file at runtime.
 const SCHEMA_JSON: &str = include_str!("../schemas/app-settings.schema.json");
 
-fn schema_value() -> serde_json::Value {
+pub(crate) fn schema_value() -> serde_json::Value {
     crate::schema::parse(SCHEMA_JSON, "app-settings")
 }
 
@@ -378,6 +396,7 @@ pub fn app_settings_set(app: tauri::AppHandle, settings: AppSettings) -> Result<
         theme_changed = current.theme != settings.theme;
         current.theme = settings.theme;
         current.agent = settings.agent;
+        current.terminal_layout = settings.terminal_layout;
         current.tool_paths = settings.tool_paths.clone();
         current.terminal_font_family = settings.terminal_font_family.clone();
         current.launch_at_login = settings.launch_at_login;
@@ -579,6 +598,7 @@ mod tests {
             theme: Some(Theme::Dark),
             agent: Some(crate::agent::Agent::Codex),
             terminal_host: Some(crate::terminal_host::TerminalHost::TerminalApp),
+            terminal_layout: Some(crate::terminal_host::TerminalLayout::Tabs),
             tool_paths: Some(ToolPaths {
                 claude: Some("/opt/homebrew/bin/claude".into()),
                 codex: Some("/opt/homebrew/bin/codex".into()),
@@ -586,6 +606,7 @@ mod tests {
                 copilot: Some("/opt/homebrew/bin/copilot".into()),
                 git: Some("/opt/homebrew/bin/git".into()),
                 code: Some("/usr/local/bin/code".into()),
+                cmux: Some("/Applications/cmux.app/Contents/Resources/bin/cmux".into()),
             }),
             terminal_font_family: Some("Menlo, monospace".into()),
             launch_at_login: Some(true),
@@ -714,7 +735,7 @@ mod tests {
     /// An empty/whitespace override reads as "auto-resolve" (None).
     #[test]
     fn blank_override_is_none() {
-        let tp = ToolPaths { claude: Some("  ".into()), codex: None, agy: None, copilot: None, git: Some("".into()), code: None };
+        let tp = ToolPaths { claude: Some("  ".into()), codex: None, agy: None, copilot: None, git: Some("".into()), code: None, cmux: None };
         // Exercise the same filter `tool_path_override` applies.
         assert!(tp.claude.as_deref().filter(|s| !s.trim().is_empty()).is_none());
         assert!(tp.git.as_deref().filter(|s| !s.trim().is_empty()).is_none());

@@ -42,8 +42,11 @@ export interface AgentSettings {
 }
 
 /** The app a session runs in: a VS Code window, or (macOS) a Terminal.app
- *  window. */
-export type TerminalHost = "vscode" | "terminal_app";
+ *  window or a cmux workspace. */
+export type TerminalHost = "vscode" | "terminal_app" | "cmux";
+
+/** How a terminal host that groups sessions (cmux) arranges new ones. */
+export type TerminalLayout = "windows" | "per-repo" | "tabs";
 
 /** `repo_set_terminal_host`: switched (moving `moved` sessions), or a list of
  *  open windows the switch would close, or a window that wouldn't close. */
@@ -301,6 +304,7 @@ export interface ToolPaths {
   copilot?: string | null;
   git?: string | null;
   code?: string | null;
+  cmux?: string | null;
 }
 
 /** Global, app-wide settings (`~/.maiestro/settings.json`). `window` /
@@ -314,6 +318,8 @@ export interface AppSettings {
   /** Default terminal host for repos that don't pick one. null = the schema
    *  default. Changed only through `appSetTerminalHost`, never the autosave. */
   terminal_host?: TerminalHost | null;
+  /** How new cmux sessions are arranged. null = the schema default. */
+  terminal_layout?: TerminalLayout | null;
   tool_paths?: ToolPaths | null;
   /** Font stack for a spawned worktree's VS Code terminal
    *  (`terminal.integrated.fontFamily`). null/empty = the schema default. */

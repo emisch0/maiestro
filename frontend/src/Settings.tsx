@@ -120,7 +120,7 @@ export function Settings() {
   const [appSaveError, setAppSaveError] = useState<string | null>(null);
   // How each directly-invoked CLI currently resolves, for the Tool paths status line.
   const [resolvedTools, setResolvedTools] = useState<ResolvedTool[]>([]);
-  const [appFormDefaults, setAppFormDefaults] = useState<AppFormDefaults>({ terminalFontDefault: "", agentDefault: "claude", terminalHostDefault: "vscode" });
+  const [appFormDefaults, setAppFormDefaults] = useState<AppFormDefaults>({ terminalFontDefault: "", agentDefault: "claude", terminalHostDefault: "vscode", terminalLayoutDefault: "per-repo" });
   // Version + build metadata for the About block under the Preferences form
   // (#126). Read-only, so a failed fetch just hides the block.
   const [appVersion, setAppVersion] = useState<AppVersion | null>(null);

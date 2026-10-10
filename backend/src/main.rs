@@ -4,6 +4,7 @@
 mod about;
 mod agent;
 mod app_settings;
+mod cmux;
 mod approvals;
 mod credentials;
 mod drafting;

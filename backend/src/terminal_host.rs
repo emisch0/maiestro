@@ -1,6 +1,6 @@
 //! Where a session runs: its **terminal host**, the user-facing app whose
 //! terminal the agent runs in — a VS Code window (`editor.rs`) or a Terminal.app
-//! window (`terminal_app.rs`). mAIestro Code launches the session into its
+//! window (`terminal_app.rs`) or a cmux workspace (`cmux.rs`). mAIestro Code launches the session into its
 //! terminal host and never hosts the conversation itself (see CLAUDE.md).
 //!
 //! A repo chooses its terminal host (`terminal_host`); each session records the
@@ -33,6 +33,8 @@ pub enum TerminalHost {
     Vscode,
     /// A Terminal.app window (macOS only).
     TerminalApp,
+    /// A cmux workspace (macOS only).
+    Cmux,
 }
 
 impl TerminalHost {
@@ -40,7 +42,7 @@ impl TerminalHost {
     pub fn supported_here(self) -> bool {
         match self {
             TerminalHost::Vscode => true,
-            TerminalHost::TerminalApp => cfg!(target_os = "macos"),
+            TerminalHost::TerminalApp | TerminalHost::Cmux => cfg!(target_os = "macos"),
         }
     }
 
@@ -49,16 +51,36 @@ impl TerminalHost {
         match self {
             TerminalHost::Vscode => "Visual Studio Code",
             TerminalHost::TerminalApp => "Terminal",
+            TerminalHost::Cmux => "cmux",
+        }
+    }
+
+    /// What a session's window is called in this terminal host's messages.
+    pub fn window_noun(self) -> &'static str {
+        match self {
+            TerminalHost::Cmux => "workspace",
+            TerminalHost::Vscode | TerminalHost::TerminalApp => "window",
         }
     }
 
     /// The macOS grant mAIestro Code needs to see and close this terminal host's
     /// windows: Accessibility for VS Code (System Events), Automation for
-    /// Terminal (its own Apple events).
-    pub fn permission(self) -> Permission {
+    /// Terminal (its own Apple events). `None` for cmux, whose gate is its own
+    /// socket control mode rather than a macOS privacy grant.
+    pub fn permission(self) -> Option<Permission> {
         match self {
-            TerminalHost::Vscode => Permission::Accessibility,
-            TerminalHost::TerminalApp => Permission::Automation,
+            TerminalHost::Vscode => Some(Permission::Accessibility),
+            TerminalHost::TerminalApp => Some(Permission::Automation),
+            TerminalHost::Cmux => None,
+        }
+    }
+
+    /// How to ask the user to let mAIestro Code close a window itself,
+    /// completing "…, or <this> so it can close the window for you."
+    fn grant_phrase(self) -> &'static str {
+        match self.permission() {
+            Some(p) => p.grant_phrase(),
+            None => "set cmux's Settings → Automation → Socket Control Mode to Automation or Password",
         }
     }
 }
@@ -68,8 +90,24 @@ impl std::fmt::Display for TerminalHost {
         f.write_str(match self {
             TerminalHost::Vscode => "vscode",
             TerminalHost::TerminalApp => "terminal_app",
+            TerminalHost::Cmux => "cmux",
         })
     }
+}
+
+/// How a terminal host that can group sessions (cmux) arranges them. Global
+/// (`app_settings::terminal_layout`), read at spawn; Terminal.app and VS Code
+/// ignore it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalLayout {
+    /// A window of its own for every session.
+    Windows,
+    /// One window per repo, its sessions as tabs.
+    #[default]
+    PerRepo,
+    /// Every session as a tab in one shared window.
+    Tabs,
 }
 
 /// A macOS privacy grant the UI can open System Settings at, when its absence
@@ -241,6 +279,59 @@ pub async fn open(session: &Session) -> Result<(), String> {
             current.terminal_app_window = Some(handle);
             crate::sessions::save(&current).map_err(|e| format!("could not record the Terminal window: {e}"))
         }
+        TerminalHost::Cmux => {
+            if !TerminalHost::Cmux.supported_here() {
+                return Err("cmux sessions are only available on macOS".into());
+            }
+            // The bare agent name, not the resolved path: cmux's per-surface
+            // shims on the terminal's PATH (its Claude wrapper adds cmux's own
+            // hooks) then catch it, and cmux decides which binary runs.
+            let (_, args) =
+                session_argv(session.agent, &session.color, &session.session_title, launch_options(&session.repo));
+            let layout = crate::app_settings::terminal_layout();
+            let handle = crate::cmux::launch(
+                &work_dir,
+                &shell_command(session.agent.tool(), &args),
+                &terminal_title(session),
+                &session.color,
+                layout,
+                &cmux_siblings(session, layout),
+            )
+            .await?;
+            tracing::info!(workspace = %handle.workspace_id, window = %handle.window_id, layout = ?layout, "opened the session in cmux");
+            let mut current = crate::sessions::get(&session.id).unwrap_or_else(|| session.clone());
+            current.cmux_workspace = Some(handle);
+            crate::sessions::save(&current).map_err(|e| format!("could not record the cmux workspace: {e}"))
+        }
+    }
+}
+
+/// The recorded cmux workspaces whose window a new workspace of `session` may
+/// join under `layout`: the repo's other cmux sessions for `per-repo`, every
+/// cmux session for `tabs`, none for `windows`.
+fn cmux_siblings(session: &Session, layout: TerminalLayout) -> Vec<crate::cmux::CmuxWorkspace> {
+    if layout == TerminalLayout::Windows {
+        return Vec::new();
+    }
+    crate::sessions::load_all()
+        .into_iter()
+        .filter(|s| s.id != session.id && s.terminal_host == TerminalHost::Cmux)
+        .filter(|s| layout == TerminalLayout::Tabs || s.repo == session.repo)
+        .filter_map(|s| s.cmux_workspace)
+        .collect()
+}
+
+/// Record the session's cmux workspace as it is now, when it moved to another
+/// window since it was recorded.
+fn note_cmux_window(session: &Session, current: &crate::cmux::CmuxWorkspace) {
+    if session.cmux_workspace.as_ref() == Some(current) {
+        return;
+    }
+    if let Some(mut s) = crate::sessions::get(&session.id) {
+        s.cmux_workspace = Some(current.clone());
+        if let Err(e) = crate::sessions::save(&s) {
+            tracing::warn!(error = %e, "could not record the cmux workspace's new window");
+        }
     }
 }
 
@@ -252,7 +343,7 @@ pub async fn open(session: &Session) -> Result<(), String> {
 pub async fn reopen(session: &Session) -> Result<(), String> {
     match session.terminal_host {
         TerminalHost::Vscode => crate::editor::open_vscode(Path::new(&session.work_dir)),
-        TerminalHost::TerminalApp => focus_or_open(session).await,
+        TerminalHost::TerminalApp | TerminalHost::Cmux => focus_or_open(session).await,
     }
 }
 
@@ -266,6 +357,17 @@ pub async fn focus_or_open(session: &Session) -> Result<(), String> {
                 // "absent": launching would fail the same way, and if it didn't
                 // it would start a second agent next to the live one.
                 if crate::terminal_app::focus(handle).await? {
+                    return Ok(());
+                }
+            }
+            open(session).await
+        }
+        TerminalHost::Cmux => {
+            if let Some(handle) = &session.cmux_workspace {
+                // As for Terminal: a lookup we can't make is an error, never
+                // "absent", which would start a second agent next to a live one.
+                if let Some(current) = crate::cmux::focus(handle).await.map_err(|e| e.message())? {
+                    note_cmux_window(session, &current);
                     return Ok(());
                 }
             }
@@ -291,6 +393,16 @@ pub async fn window_open(session: &Session) -> bool {
                 }
             },
         },
+        TerminalHost::Cmux => match &session.cmux_workspace {
+            None => false,
+            Some(handle) => match crate::cmux::locate(handle).await {
+                Ok(current) => current.is_some(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not look up the cmux workspace; checking the worktree instead");
+                    crate::editor::worktree_in_use(&work_dir).await
+                }
+            },
+        },
     }
 }
 
@@ -304,6 +416,10 @@ pub async fn close_and_wait(session: &Session) -> WindowClose {
             None => WindowClose::Closed,
             Some(handle) => crate::terminal_app::close_and_wait(handle, &work_dir).await,
         },
+        TerminalHost::Cmux => match &session.cmux_workspace {
+            None => WindowClose::Closed,
+            Some(handle) => crate::cmux::close_and_wait(handle, &work_dir).await,
+        },
     }
 }
 
@@ -313,18 +429,19 @@ pub async fn close_and_wait(session: &Session) -> WindowClose {
 /// take). `None` overall when the window is closed.
 pub fn blocked(terminal_host: TerminalHost, close: WindowClose, action: &str) -> Option<(String, Option<Permission>)> {
     let app = terminal_host.app_name();
+    let noun = terminal_host.window_noun();
     match close {
         WindowClose::Closed => None,
         WindowClose::InUse => Some((
             format!(
-                "I couldn't {action} because the {app} window is still open.\n\nYou have two options: \
-                 close the window yourself, or {} so it can close the window for you.",
-                terminal_host.permission().grant_phrase()
+                "I couldn't {action} because the {app} {noun} is still open.\n\nYou have two options: \
+                 close the {noun} yourself, or {} so it can close the {noun} for you.",
+                terminal_host.grant_phrase()
             ),
-            Some(terminal_host.permission()),
+            terminal_host.permission(),
         )),
         WindowClose::StillOpen => Some((
-            format!("I couldn't {action} because the {app} window is still open. Close its window, then try again."),
+            format!("I couldn't {action} because the {app} {noun} is still open. Close its {noun}, then try again."),
             None,
         )),
     }
@@ -448,6 +565,7 @@ async fn move_session(mut session: Session, target: TerminalHost) {
     let from = session.terminal_host;
     session.terminal_host = target;
     session.terminal_app_window = None;
+    session.cmux_workspace = None;
     // The window that was running the old agent is gone.
     session.editor_agent = None;
     if let Err(e) = crate::sessions::save(&session) {
@@ -504,7 +622,61 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect();
-        assert_eq!(values, ["vscode", "terminal_app"]);
+        assert_eq!(values, ["vscode", "terminal_app", "cmux"]);
+        assert_eq!(serde_json::to_value(TerminalHost::Cmux).unwrap(), "cmux");
+        assert_eq!(TerminalHost::Cmux.to_string(), "cmux");
+    }
+
+    #[test]
+    fn layout_values_match_the_settings_schema() {
+        let schema = crate::app_settings::schema_value();
+        let values: Vec<String> = schema["properties"]["terminal_layout"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        let ours: Vec<String> = [TerminalLayout::Windows, TerminalLayout::PerRepo, TerminalLayout::Tabs]
+            .iter()
+            .map(|l| serde_json::to_value(l).unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(values, ours);
+        assert_eq!(crate::app_settings::schema_value()["properties"]["terminal_layout"]["default"], "per-repo");
+    }
+
+    /// Which recorded workspaces a new cmux session may share a window with.
+    #[test]
+    fn cmux_siblings_follow_the_layout() {
+        let _home = crate::testutil::TempHome::new();
+        let mk = |id: &str, repo: &str, host: &str, ws: Option<&str>| -> Session {
+            let mut v = serde_json::json!({
+                "id": id, "repo": repo, "issue_number": 1, "issue_url": "u", "branch": "b",
+                "work_dir": "/w", "cloned_repo_dir": "/c", "session_title": "t", "color": "#ca8a04", "emoji": "🍋",
+                "terminal_host": host,
+            });
+            if let Some(ws) = ws {
+                v["cmux_workspace"] = serde_json::json!({ "workspace_id": ws, "window_id": "win" });
+            }
+            serde_json::from_value(v).unwrap()
+        };
+        let me = mk("1-me", "acme/widgets", "cmux", None);
+        for s in [
+            me.clone(),
+            mk("2-same-repo", "acme/widgets", "cmux", Some("ws-2")),
+            mk("3-other-repo", "acme/gadgets", "cmux", Some("ws-3")),
+            mk("4-terminal", "acme/widgets", "terminal_app", None),
+            mk("5-not-opened", "acme/widgets", "cmux", None),
+        ] {
+            crate::sessions::save(&s).unwrap();
+        }
+        let ids = |layout| {
+            let mut v: Vec<String> = cmux_siblings(&me, layout).into_iter().map(|w| w.workspace_id).collect();
+            v.sort();
+            v
+        };
+        assert!(ids(TerminalLayout::Windows).is_empty());
+        assert_eq!(ids(TerminalLayout::PerRepo), ["ws-2"]);
+        assert_eq!(ids(TerminalLayout::Tabs), ["ws-2", "ws-3"]);
     }
 
     #[test]
@@ -564,5 +736,8 @@ mod tests {
         assert_eq!(perm, Some(Permission::Accessibility));
         let (_, perm) = blocked(TerminalHost::Vscode, WindowClose::StillOpen, "tear down").unwrap();
         assert_eq!(perm, None);
+        let (msg, perm) = blocked(TerminalHost::Cmux, WindowClose::InUse, "tear down").unwrap();
+        assert!(msg.contains("cmux workspace") && msg.contains("Socket Control Mode"), "{msg}");
+        assert_eq!(perm, None, "cmux's gate isn't a macOS privacy grant");
     }
 }
