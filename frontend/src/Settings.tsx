@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Agent, api, AppSettings, AppVersion, CredentialScope, CredentialTypeDto, GHRepo, HealthCheck, Platform, RepoSettings, ResolvedTool } from "./api";
+import { Agent, api, AppSettings, AppVersion, CredentialScope, CredentialTypeDto, GHRepo, HealthCheck, Platform, RepoSettings, ResolvedTool, TerminalHost } from "./api";
 import { JsonForms } from "@jsonforms/react";
 import {
   repoSettingsRenderers,
@@ -120,7 +120,7 @@ export function Settings() {
   const [appSaveError, setAppSaveError] = useState<string | null>(null);
   // How each directly-invoked CLI currently resolves, for the Tool paths status line.
   const [resolvedTools, setResolvedTools] = useState<ResolvedTool[]>([]);
-  const [appFormDefaults, setAppFormDefaults] = useState<AppFormDefaults>({ terminalFontDefault: "", agentDefault: "claude" });
+  const [appFormDefaults, setAppFormDefaults] = useState<AppFormDefaults>({ terminalFontDefault: "", agentDefault: "claude", terminalHostDefault: "vscode" });
   // Version + build metadata for the About block under the Preferences form
   // (#126). Read-only, so a failed fetch just hides the block.
   const [appVersion, setAppVersion] = useState<AppVersion | null>(null);
@@ -299,6 +299,8 @@ export function Settings() {
   // The global agent a repo with no `agent` of its own falls back to; the repo
   // form names it and picks which agent's settings to edit from it.
   const globalAgent: Agent = appSettings?.agent ?? appFormDefaults.agentDefault;
+  // Likewise the global terminal host a repo with no `terminal_host` uses.
+  const globalTerminalHost: TerminalHost = appSettings?.terminal_host ?? appFormDefaults.terminalHostDefault;
   const repoAgent: Agent = loadedRepo?.settings.agent ?? globalAgent;
   const repoFormConfig = useMemo(
     () => ({
@@ -310,20 +312,20 @@ export function Settings() {
       promptModelDefaults: repoFormDefaults?.promptModelDefaults ?? { claude: "", codex: "", antigravity: "", copilot: "" },
       remoteControlDefault: repoFormDefaults?.remoteControlDefault ?? true,
       platform,
-      terminalHostDefault: repoFormDefaults?.terminalHostDefault ?? "vscode",
+      terminalHostDefault: globalTerminalHost,
       globalAgent,
       repoAgent,
       booleanDefaults: repoFormDefaults?.booleanDefaults ?? {},
       promptDefaults: repoFormDefaults?.promptDefaults ?? {},
     }),
-    [knownIdentities, loadedRepo?.repo, loadedRepo?.settings.cloned_repo_dir, repoFormDefaults, platform, globalAgent, repoAgent],
+    [knownIdentities, loadedRepo?.repo, loadedRepo?.settings.cloned_repo_dir, repoFormDefaults, platform, globalAgent, globalTerminalHost, repoAgent],
   );
 
   // Config the app-settings custom renderers read (the Tool paths status line,
   // the Terminal font placeholder).
   const appFormConfig = useMemo(
-    () => ({ showUnfocusedDescription: true as const, resolvedTools, ...appFormDefaults }),
-    [resolvedTools, appFormDefaults],
+    () => ({ showUnfocusedDescription: true as const, resolvedTools, platform, ...appFormDefaults }),
+    [resolvedTools, platform, appFormDefaults],
   );
 
   // Autosave on change, debounced, skipped while ajv reports errors. JsonForms

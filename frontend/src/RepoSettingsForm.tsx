@@ -23,7 +23,9 @@ import { Agent, AgentSettings, Platform, TerminalHost, api } from "./api";
 import { AGENTS, AGENT_PRODUCTS, asAgent } from "./lib/agents";
 import { PathField, RevealButton, usePathExists } from "./PathField";
 import { ToggleSwitch } from "./components/ToggleSwitch";
-import { TerminalHostSwitch } from "./components/TerminalHostSwitch";
+import { TerminalHostSwitch, terminalHostOptions } from "./components/TerminalHostSwitch";
+
+export { terminalHostOptions };
 
 /** Field order, with `repo` and `hidden` deliberately omitted (the latter is
  *  managed from the popover, not this form). */
@@ -66,7 +68,9 @@ export interface RepoFormConfig {
   repo: string | null;
   /** The OS the app runs on: the terminal-host select offers only its terminal hosts. */
   platform: Platform;
-  /** `terminal_host`'s schema default, named in the select's default option. */
+  /** The global default terminal host (Preferences, else its schema default):
+   *  what a repo whose own `terminal_host` is null uses, named in the select's
+   *  default option. */
   terminalHostDefault: TerminalHost;
 }
 
@@ -231,15 +235,6 @@ export const AgentRenderer = withJsonFormsControlProps(AgentControl);
 // default, named in the first option like the agent select's global default.
 // A change goes through `repo_set_terminal_host` (which moves the repo's
 // sessions too) rather than the autosave — see `TerminalHostSwitch`.
-
-/** The terminal hosts to offer on `platform`. One the file already names stays
- *  listed even where it isn't available (a settings file synced from a Mac),
- *  so the select shows the real value rather than a blank. */
-export function terminalHostOptions(platform: Platform, current: TerminalHost | null | undefined): TerminalHost[] {
-  const hosts: TerminalHost[] = platform === "macos" ? ["vscode", "terminal_app"] : ["vscode"];
-  if (current && !hosts.includes(current)) hosts.push(current);
-  return hosts;
-}
 
 function TerminalHostControl(props: ControlProps) {
   const { data, handleChange, path, label, description, config } = props;
@@ -717,8 +712,6 @@ export interface RepoFormDefaults {
    *  generically so a boolean added to the schema needs no change here. */
   booleanDefaults: Record<string, boolean>;
   promptDefaults: Record<PromptKey, string>;
-  /** `terminal_host`'s default (VS Code when absent or unrecognized). */
-  terminalHostDefault: TerminalHost;
 }
 
 export function extractFormDefaults(
@@ -744,7 +737,6 @@ export function extractFormDefaults(
       copilot: str(agentDefault("copilot", "prompt_model")),
     },
     remoteControlDefault: agentDefault("claude", "remote_control") !== false,
-    terminalHostDefault: props.terminal_host?.default === "terminal_app" ? "terminal_app" : "vscode",
     booleanDefaults,
     promptDefaults: {
       draft_issue: str(promptProps.draft_issue?.default),

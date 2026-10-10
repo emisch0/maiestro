@@ -34,6 +34,12 @@
       "default": "claude",
       "description": "The agentic coding CLI repos use unless they choose their own. It runs the session in each spawned worktree and mAIestro Code's own AI drafting (issues, labels, PRs). Only the agentic coding CLI in use needs to be installed."
     },
+    "terminal_host": {
+      "type": ["string", "null"],
+      "enum": ["vscode", "terminal_app", null],
+      "default": "vscode",
+      "description": "The terminal host repos run their sessions' agent in unless they choose their own: a VS Code window (`vscode`) or, on macOS, its own Terminal.app window (`terminal_app`). Changing it moves those repos' existing sessions too, closing their open windows first (you're asked before any is closed)."
+    },
     "tool_paths": {
       "type": ["object", "null"],
       "title": "ToolPaths",

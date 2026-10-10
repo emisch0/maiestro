@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { SetTerminalHostOutcome, TerminalHost, WindowPermission } from "../api";
+import { Platform, SetTerminalHostOutcome, TerminalHost, WindowPermission } from "../api";
 
 // The repo form's terminal-host select. Changing it moves the repo's existing
 // sessions too, which closes their open windows (ending their agents), so the
@@ -13,6 +13,15 @@ export const TERMINAL_HOST_PRODUCTS: Record<TerminalHost, string> = {
   vscode: "Visual Studio Code",
   terminal_app: "Terminal.app",
 };
+
+/** The terminal hosts to offer on `platform`. One the file already names stays
+ *  listed even where it isn't available (a settings file synced from a Mac),
+ *  so the select shows the real value rather than a blank. */
+export function terminalHostOptions(platform: Platform, current: TerminalHost | null | undefined): TerminalHost[] {
+  const hosts: TerminalHost[] = platform === "macos" ? ["vscode", "terminal_app"] : ["vscode"];
+  if (current && !hosts.includes(current)) hosts.push(current);
+  return hosts;
+}
 
 const PERMISSION_BUTTON: Record<WindowPermission, string> = {
   accessibility: "Open Accessibility Options",
@@ -33,6 +42,11 @@ export interface TerminalHostSwitchProps {
   available: TerminalHost[];
   /** What null resolves to, named in the default option. */
   fallback: TerminalHost;
+  /** Offer a "Default (…)" option for null (a repo following the global
+   *  default). Off for the global setting itself, which shows `fallback`. */
+  defaultOption?: boolean;
+  /** Who else moves, completing "Switching to X moves …". */
+  scope?: string;
   /** Calls `repo_set_terminal_host`. */
   onSwitch: (value: TerminalHost | null, confirmed: boolean) => Promise<SetTerminalHostOutcome>;
   /** The switch is saved; mirror it into the form. */
@@ -41,7 +55,8 @@ export interface TerminalHostSwitchProps {
 }
 
 export function TerminalHostSwitch({
-  value, options, available, fallback, onSwitch, onSaved, onOpenPermissionSettings,
+  value, options, available, fallback, defaultOption = true, scope = "this repo's existing sessions too", onSwitch,
+  onSaved, onOpenPermissionSettings,
 }: TerminalHostSwitchProps) {
   const [pending, setPending] = useState<Pending | null>(null);
   const [busy, setBusy] = useState(false);
@@ -72,11 +87,11 @@ export function TerminalHostSwitch({
       <select
         className={`text-input profile-select ${busy ? "btn-busy" : ""}`}
         aria-label="Terminal host"
-        value={value ?? ""}
+        value={value ?? (defaultOption ? "" : fallback)}
         disabled={busy || pending?.kind === "confirm"}
         onChange={(e) => run(e.target.value === "" ? null : (e.target.value as TerminalHost), false)}
       >
-        <option value="">Default ({TERMINAL_HOST_PRODUCTS[fallback]})</option>
+        {defaultOption && <option value="">Default ({TERMINAL_HOST_PRODUCTS[fallback]})</option>}
         {options.map((h) => (
           <option key={h} value={h}>
             {TERMINAL_HOST_PRODUCTS[h]}
@@ -87,8 +102,8 @@ export function TerminalHostSwitch({
       {pending?.kind === "confirm" && (
         <div className="cleanup-confirm">
           <p className="cleanup-lead">
-            Switching to {name(pending.value)} moves this repo's existing sessions too. These windows will close, ending
-            their agents (the conversations won't carry over):
+            Switching to {name(pending.value)} moves {scope}. These windows will close, ending their agents (the
+            conversations won't carry over):
           </p>
           <ul className="cleanup-warnings">
             {pending.open.map((t) => (

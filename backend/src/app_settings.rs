@@ -113,6 +113,12 @@ pub struct AppSettings {
     /// #162). `None` (absent) means the schema `default`. See [`agent`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<crate::agent::Agent>,
+    /// The default terminal host for repos that don't pick their own. `None`
+    /// (absent) means the schema `default`. See [`terminal_host`]. Not owned by
+    /// the Settings form's autosave: it changes only through
+    /// `terminal_host::app_set_terminal_host`, which moves the affected sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_host: Option<crate::terminal_host::TerminalHost>,
     /// Per-tool CLI path overrides. `None` (absent) means all tools auto-resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_paths: Option<ToolPaths>,
@@ -162,6 +168,19 @@ pub fn agent() -> crate::agent::Agent {
     load().agent.unwrap_or_else(|| {
         crate::agent::Agent::parse(&schema_default("/properties/agent/default")).unwrap_or_default()
     })
+}
+
+/// The global default terminal host: the user's `terminal_host` setting, else
+/// the schema `default`. Per-repo resolution layers on top of this in
+/// `repo_settings::resolve_terminal_host`.
+pub fn terminal_host() -> crate::terminal_host::TerminalHost {
+    load().terminal_host.unwrap_or_else(terminal_host_schema_default)
+}
+
+/// The `terminal_host` schema default: what a `null` global setting means.
+pub fn terminal_host_schema_default() -> crate::terminal_host::TerminalHost {
+    serde_json::from_value(serde_json::Value::String(schema_default("/properties/terminal_host/default")))
+        .unwrap_or_default()
 }
 
 /// The font stack to write as `terminal.integrated.fontFamily` into a spawned
@@ -363,7 +382,9 @@ pub fn app_settings_set(app: tauri::AppHandle, settings: AppSettings) -> Result<
         current.terminal_font_family = settings.terminal_font_family.clone();
         current.launch_at_login = settings.launch_at_login;
         // onboarding_completed / window / settings_window / update_check are
-        // deliberately kept from disk (machine-managed).
+        // deliberately kept from disk (machine-managed), and so is
+        // terminal_host: switching it moves sessions, so only
+        // `terminal_host::app_set_terminal_host` writes it.
     })
     .map_err(|e| e.to_string())?;
 
@@ -557,6 +578,7 @@ mod tests {
             settings_window: Some(WindowSize { width: 720.0, height: 520.0 }),
             theme: Some(Theme::Dark),
             agent: Some(crate::agent::Agent::Codex),
+            terminal_host: Some(crate::terminal_host::TerminalHost::TerminalApp),
             tool_paths: Some(ToolPaths {
                 claude: Some("/opt/homebrew/bin/claude".into()),
                 codex: Some("/opt/homebrew/bin/codex".into()),
@@ -646,6 +668,21 @@ mod tests {
         assert_eq!(schema_default("/properties/agent/default"), "claude");
         update(|s| s.agent = Some(crate::agent::Agent::Codex)).unwrap();
         assert_eq!(agent(), crate::agent::Agent::Codex);
+    }
+
+    /// The global terminal host defaults to VS Code, and a repo with no
+    /// terminal host of its own follows the global one; the form's autosave
+    /// never writes it (only `app_set_terminal_host` does).
+    #[test]
+    fn terminal_host_defaults_and_repos_follow_it() {
+        use crate::terminal_host::TerminalHost;
+        let _home = crate::testutil::TempHome::new();
+        assert_eq!(terminal_host(), TerminalHost::Vscode);
+        assert_eq!(crate::repo_settings::resolve_terminal_host(None), TerminalHost::Vscode);
+        update(|s| s.terminal_host = Some(TerminalHost::TerminalApp)).unwrap();
+        assert_eq!(terminal_host(), TerminalHost::TerminalApp);
+        assert_eq!(crate::repo_settings::resolve_terminal_host(None), TerminalHost::TerminalApp);
+        assert_eq!(crate::repo_settings::resolve_terminal_host(Some(TerminalHost::Vscode)), TerminalHost::Vscode);
     }
 
     /// A partial file (only `theme`) validates — every field is optional.

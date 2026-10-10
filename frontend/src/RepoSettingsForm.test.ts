@@ -169,12 +169,4 @@ describe("terminal host", () => {
     expect(terminalHostOptions("windows", "terminal_app")).toEqual(["vscode", "terminal_app"]);
     expect(terminalHostOptions("macos", "terminal_app")).toEqual(["vscode", "terminal_app"]);
   });
-
-  it("reads the default terminal host from the schema", () => {
-    expect(extractFormDefaults({ properties: { terminal_host: { default: "vscode" } } }).terminalHostDefault).toBe("vscode");
-    expect(extractFormDefaults({ properties: { terminal_host: { default: "terminal_app" } } }).terminalHostDefault).toBe(
-      "terminal_app",
-    );
-    expect(extractFormDefaults({}).terminalHostDefault).toBe("vscode");
-  });
 });

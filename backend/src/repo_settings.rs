@@ -211,19 +211,17 @@ pub fn effective_agent(settings: &RepoSettings) -> Agent {
     settings.agent.unwrap_or_else(crate::app_settings::agent)
 }
 
-/// The app a fresh spawn opens its session in: the repo's `terminal_host`, else
-/// the schema default. A spawned session records the result, so reopening and
+/// The terminal host a fresh spawn opens its session in: the repo's
+/// `terminal_host`, else the global default (see [`resolve_terminal_host`]). A spawned session records the result, so reopening and
 /// teardown read the record instead (see `sessions::Session::terminal_host`).
 pub fn effective_terminal_host(settings: &RepoSettings) -> TerminalHost {
     resolve_terminal_host(settings.terminal_host)
 }
 
-/// A `terminal_host` value as it applies: `None` is the schema default.
+/// A repo's `terminal_host` value as it applies: `None` is the global default
+/// (`app_settings::terminal_host`, else its schema default).
 pub fn resolve_terminal_host(configured: Option<TerminalHost>) -> TerminalHost {
-    configured.unwrap_or_else(|| {
-        serde_json::from_value(serde_json::Value::String(schema_default("/properties/terminal_host/default")))
-            .unwrap_or_default()
-    })
+    configured.unwrap_or_else(crate::app_settings::terminal_host)
 }
 
 /// Whether the Claude session launches with `--remote-control`: the repo's

@@ -65,4 +65,20 @@ describe("TerminalHostSwitch", () => {
     expect(p.onOpenPermissionSettings).toHaveBeenCalledWith("automation");
     expect(p.onSaved).not.toHaveBeenCalled();
   });
+
+  it("as the global default, shows the resolved host and names who moves", async () => {
+    const p = props({
+      value: null,
+      fallback: "terminal_app",
+      defaultOption: false,
+      scope: "the existing sessions of every repo that uses the default",
+      onSwitch: vi.fn().mockResolvedValue({ status: "needs_confirmation", open: ["t"] }),
+    });
+    render(<TerminalHostSwitch {...p} />);
+    const select = screen.getByRole("combobox", { name: "Terminal host" }) as HTMLSelectElement;
+    expect(select.value).toBe("terminal_app");
+    expect(screen.queryByRole("option", { name: /Default/ })).toBeNull();
+    choose("vscode");
+    expect(await screen.findByText(/moves the existing sessions of every repo that uses the default/)).toBeInTheDocument();
+  });
 });

@@ -345,16 +345,10 @@ pub enum SetTerminalHostOutcome {
     BlockedByEditor { message: String, permission: Option<Permission> },
 }
 
-/// Switch a repo's terminal host (`None` = the schema default) and move every
+/// Switch a repo's terminal host (`None` = the global default) and move every
 /// existing session of the repo over with it, so the repo never runs sessions
-/// in two apps at once. Moving a session closes its window — ending its agent;
-/// the conversation doesn't carry over — so when any is open this first returns
-/// `NeedsConfirmation` and does nothing until called again with `confirmed`.
-/// All windows are closed (and confirmed gone) **before** anything is written:
-/// one that won't close blocks the switch and leaves the setting and every
-/// session as they were. A moved session's next open launches its agent in the
-/// new terminal host. Emits `repo-settings-changed` so an open Settings form
-/// re-reads.
+/// in two apps at once. See [`switch_sessions`] for the confirm/close/move
+/// sequence. Emits `repo-settings-changed` so an open Settings form re-reads.
 #[tauri::command]
 #[tracing::instrument(skip_all, fields(repo = %repo))]
 pub async fn repo_set_terminal_host(
@@ -365,15 +359,61 @@ pub async fn repo_set_terminal_host(
 ) -> Result<SetTerminalHostOutcome, String> {
     crate::log_invoke!("repo_set_terminal_host", repo = %repo, terminal_host = ?terminal_host, confirmed);
     let target = crate::repo_settings::resolve_terminal_host(terminal_host);
+    let sessions: Vec<Session> = crate::sessions::load_all().into_iter().filter(|s| s.repo == repo).collect();
+    let outcome =
+        switch_sessions(sessions, target, confirmed, || crate::repo_settings::set_terminal_host(&repo, terminal_host))
+            .await?;
+    if matches!(outcome, SetTerminalHostOutcome::Done { .. }) {
+        use tauri::Emitter;
+        let _ = app.emit("repo-settings-changed", &repo);
+    }
+    Ok(outcome)
+}
+
+/// Switch the global default terminal host (`None` = its schema default) and
+/// move the existing sessions of every repo that follows the default (its own
+/// `terminal_host` is `null`) over with it. Same sequence as
+/// [`repo_set_terminal_host`]. The Settings form's autosave never writes this
+/// setting, so the sessions can't be left behind.
+#[tauri::command]
+pub async fn app_set_terminal_host(
+    terminal_host: Option<TerminalHost>,
+    confirmed: bool,
+) -> Result<SetTerminalHostOutcome, String> {
+    crate::log_invoke!("app_set_terminal_host", terminal_host = ?terminal_host, confirmed);
+    let target = terminal_host.unwrap_or_else(crate::app_settings::terminal_host_schema_default);
+    // A repo whose settings can't be read is left alone rather than guessed at.
+    let follows_default = |repo: &str| {
+        crate::repo_settings::repo_settings_get(repo.to_string()).is_ok_and(|s| s.terminal_host.is_none())
+    };
+    let sessions: Vec<Session> = crate::sessions::load_all().into_iter().filter(|s| follows_default(&s.repo)).collect();
+    switch_sessions(sessions, target, confirmed, || {
+        crate::app_settings::update(|s| s.terminal_host = terminal_host).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Move `sessions` (those not already there) to `target` and `save` the
+/// setting that put them there. Moving a session closes its window — ending its
+/// agent; the conversation doesn't carry over — so when any is open this first
+/// returns `NeedsConfirmation` and changes nothing until called again with
+/// `confirmed`. All windows are closed (and confirmed gone) **before** anything
+/// is written: one that won't close blocks the switch and leaves the setting
+/// and every session as they were. A moved session's next open launches its
+/// agent in the new terminal host. A workspace still being created refuses the
+/// switch until it's ready.
+async fn switch_sessions(
+    sessions: Vec<Session>,
+    target: TerminalHost,
+    confirmed: bool,
+    save: impl FnOnce() -> Result<(), String>,
+) -> Result<SetTerminalHostOutcome, String> {
     if !target.supported_here() {
         return Err(format!("{} isn't available on this computer", target.app_name()));
     }
-    let moving: Vec<Session> = crate::sessions::load_all()
-        .into_iter()
-        .filter(|s| s.repo == repo && s.terminal_host != target)
-        .collect();
+    let moving: Vec<Session> = sessions.into_iter().filter(|s| s.terminal_host != target).collect();
     if moving.iter().any(|s| crate::status::is_creating(&s.id)) {
-        return Err("A workspace in this repo is still being created. Try again once it's ready.".into());
+        return Err("A workspace is still being created. Try again once it's ready.".into());
     }
     if !confirmed {
         let mut open = Vec::new();
@@ -392,14 +432,12 @@ pub async fn repo_set_terminal_host(
             return Ok(SetTerminalHostOutcome::BlockedByEditor { message, permission });
         }
     }
-    crate::repo_settings::set_terminal_host(&repo, terminal_host)?;
+    save()?;
     let moved = moving.len();
     for s in moving {
         move_session(s, target).await;
     }
-    tracing::info!(terminal_host = %target, moved, "switched the repo's terminal host");
-    use tauri::Emitter;
-    let _ = app.emit("repo-settings-changed", &repo);
+    tracing::info!(terminal_host = %target, moved, "switched the terminal host");
     Ok(SetTerminalHostOutcome::Done { moved })
 }
 
@@ -427,8 +465,8 @@ async fn move_session(mut session: Session, target: TerminalHost) {
 }
 
 /// The terminal host a repo whose own `terminal_host` is `null` uses (the
-/// schema default), so the popover can pick the repo's open button without a
-/// hardcoded copy of the default.
+/// global default, else its schema default), so the popover can pick the
+/// repo's open button without a hardcoded copy of the default.
 #[tauri::command]
 pub fn terminal_host_default() -> TerminalHost {
     crate::log_invoke_debug!("terminal_host_default");

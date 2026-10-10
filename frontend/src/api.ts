@@ -311,6 +311,9 @@ export interface AppSettings {
   theme?: Theme | null;
   /** Default agent for repos that don't pick one. null = the schema default. */
   agent?: Agent | null;
+  /** Default terminal host for repos that don't pick one. null = the schema
+   *  default. Changed only through `appSetTerminalHost`, never the autosave. */
+  terminal_host?: TerminalHost | null;
   tool_paths?: ToolPaths | null;
   /** Font stack for a spawned worktree's VS Code terminal
    *  (`terminal.integrated.fontFamily`). null/empty = the schema default. */
@@ -453,6 +456,12 @@ export const api = {
   /** The resolved global default agent, for repos whose own `agent` is `null`. */
   appAgentGet: () =>
     invoke<Agent>("app_agent_get"),
+
+  /** Switch the global default terminal host and move the sessions of every
+   *  repo that follows it. Unconfirmed, it only asks when that would close
+   *  open windows. */
+  appSetTerminalHost: (terminalHost: TerminalHost | null, confirmed: boolean) =>
+    invoke<SetTerminalHostOutcome>("app_set_terminal_host", { terminalHost, confirmed }),
 
   /** The terminal host for repos whose own `terminal_host` is `null`. */
   terminalHostDefault: () =>
