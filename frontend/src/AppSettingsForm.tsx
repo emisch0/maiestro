@@ -21,7 +21,7 @@ import {
 } from "@jsonforms/core";
 import { withJsonFormsControlProps } from "@jsonforms/react";
 import { vanillaRenderers, vanillaCells } from "@jsonforms/vanilla-renderers";
-import { Agent, Platform, ResolvedTool, TerminalHost, Theme, api } from "./api";
+import { Agent, Platform, ResolvedTool, TerminalHost, TerminalLayout, Theme, api } from "./api";
 import { AGENTS, AGENT_PRODUCTS, asAgent } from "./lib/agents";
 import { RevealButton, PathMissingHint, usePathExists } from "./PathField";
 import { ToggleSwitch } from "./components/ToggleSwitch";
@@ -35,6 +35,7 @@ export const appSettingsUISchema = {
     { type: "Control", scope: "#/properties/theme", label: "Theme" },
     { type: "Control", scope: "#/properties/agent", label: "Default Agentic Coding CLI" },
     { type: "Control", scope: "#/properties/terminal_host", label: "Default terminal host" },
+    { type: "Control", scope: "#/properties/terminal_layout", label: "Terminal layout" },
     { type: "Control", scope: "#/properties/terminal_font_family", label: "Terminal font" },
     { type: "Control", scope: "#/properties/launch_at_login", label: "Launch at login" },
     { type: "Control", scope: "#/properties/tool_paths", label: "Tool paths" },
@@ -52,6 +53,8 @@ export interface AppFormConfig {
   agentDefault: Agent;
   /** The `terminal_host` schema default, selected when the setting is null. */
   terminalHostDefault: TerminalHost;
+  /** The `terminal_layout` schema default, selected when the setting is null. */
+  terminalLayoutDefault: TerminalLayout;
   /** The OS the app runs on: the terminal-host select offers only its hosts. */
   platform: Platform;
 }
@@ -64,7 +67,11 @@ export interface AppFormDefaults {
   terminalFontDefault: string;
   agentDefault: Agent;
   terminalHostDefault: TerminalHost;
+  terminalLayoutDefault: TerminalLayout;
 }
+
+const TERMINAL_HOSTS: TerminalHost[] = ["vscode", "terminal_app", "cmux"];
+const TERMINAL_LAYOUTS: TerminalLayout[] = ["windows", "per-repo", "tabs"];
 
 export function extractAppFormDefaults(
   schema: Record<string, unknown>,
@@ -74,7 +81,8 @@ export function extractAppFormDefaults(
   return {
     terminalFontDefault: typeof def === "string" ? def : "",
     agentDefault: asAgent(props.agent?.default, "claude"),
-    terminalHostDefault: props.terminal_host?.default === "terminal_app" ? "terminal_app" : "vscode",
+    terminalHostDefault: TERMINAL_HOSTS.find((h) => h === props.terminal_host?.default) ?? "vscode",
+    terminalLayoutDefault: TERMINAL_LAYOUTS.find((l) => l === props.terminal_layout?.default) ?? "per-repo",
   };
 }
 
@@ -198,6 +206,48 @@ function TerminalHostControl(props: ControlProps) {
 
 export const terminalHostTester = rankWith(20, scopeEndsWith("terminal_host"));
 export const TerminalHostRenderer = withJsonFormsControlProps(TerminalHostControl);
+
+// ── Terminal layout ─────────────────────────────────────────────────────────
+// How cmux arranges new sessions; null shows as the schema default. Applies
+// to new sessions only, so it goes through the autosave like any field. Only
+// cmux groups sessions, so the field is macOS-only (unless the file sets it).
+
+const LAYOUT_LABELS: Record<TerminalLayout, string> = {
+  windows: "A window per session",
+  "per-repo": "A window per repo, sessions as tabs",
+  tabs: "One window, every session as a tab",
+};
+
+function TerminalLayoutControl(props: ControlProps) {
+  const { data, handleChange, path, label, description, config } = props;
+  const platform: Platform = config?.platform ?? "macos";
+  if (platform !== "macos" && !data) return null;
+  const value: TerminalLayout = TERMINAL_LAYOUTS.find((l) => l === data) ?? config?.terminalLayoutDefault ?? "per-repo";
+  return (
+    <div className="control jsf-control">
+      <label className="jsf-label">{label}</label>
+      {description && <div className="jsf-help">{description}</div>}
+      <select
+        className="text-input profile-select"
+        value={value}
+        aria-label={label}
+        onChange={(e) => handleChange(path, e.target.value)}
+      >
+        {TERMINAL_LAYOUTS.map((l) => (
+          <option key={l} value={l}>
+            {LAYOUT_LABELS[l]}
+          </option>
+        ))}
+      </select>
+      <p className="session-hint" style={{ paddingTop: 2 }}>
+        Applies to cmux sessions, from the next one you start.
+      </p>
+    </div>
+  );
+}
+
+export const terminalLayoutTester = rankWith(20, scopeEndsWith("terminal_layout"));
+export const TerminalLayoutRenderer = withJsonFormsControlProps(TerminalLayoutControl);
 
 // ── Launch at login (segmented on/off switch) ────────────────────────────────
 // Stored value is boolean | null; null is treated as false (issue #98).
@@ -385,6 +435,7 @@ export const appSettingsRenderers = [
   { tester: themeTester, renderer: ThemeRenderer },
   { tester: agentTester, renderer: AgentRenderer },
   { tester: terminalHostTester, renderer: TerminalHostRenderer },
+  { tester: terminalLayoutTester, renderer: TerminalLayoutRenderer },
   { tester: launchAtLoginTester, renderer: LaunchAtLoginRenderer },
   { tester: terminalFontTester, renderer: TerminalFontRenderer },
   { tester: toolPathsTester, renderer: ToolPathsRenderer },

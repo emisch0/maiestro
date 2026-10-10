@@ -800,6 +800,7 @@ async fn check_terminal_host(terminal_host: TerminalHost) -> HealthCheck {
     match terminal_host {
         TerminalHost::Vscode => check_editor(),
         TerminalHost::TerminalApp => check_terminal_app().await,
+        TerminalHost::Cmux => check_cmux().await,
     }
 }
 
@@ -877,6 +878,73 @@ fn automation_check(allowed: Result<Option<bool>, String>) -> HealthCheck {
             "Terminal isn't running. macOS asks you to allow mAIestro Code to control Terminal the first time a session opens there.",
         ),
         Err(e) => HealthCheck::new(id, label, HealthStatus::Warn, e),
+    }
+}
+
+/// cmux as the terminal host: its CLI resolves (the one inside cmux.app, or the
+/// `tool_paths` pin), and — as a sub-check — its socket admits mAIestro Code.
+/// The socket is only asked while cmux is running, so a health run never
+/// starts cmux. Never touches cmux's settings.
+async fn check_cmux() -> HealthCheck {
+    let id = "editor";
+    if !TerminalHost::Cmux.supported_here() {
+        return HealthCheck::new(id, TERMINAL_HOST_LABEL, HealthStatus::Fail, "cmux sessions are only available on macOS");
+    }
+    let Some(cli) = crate::tools::find_tool("cmux") else {
+        let detail = match crate::tools::stale_override("cmux") {
+            Some(_) => tool_not_found_detail("cmux"),
+            None => "cmux not found. Install it from cmux.com into /Applications.".to_string(),
+        };
+        return HealthCheck::new(id, TERMINAL_HOST_LABEL, HealthStatus::Fail, detail);
+    };
+    let sub = vec![cmux_access_check(crate::cmux::access_mode().await)];
+    HealthCheck {
+        id: id.into(),
+        label: TERMINAL_HOST_LABEL.into(),
+        status: rollup(&sub),
+        detail: cli.display().to_string(),
+        sub,
+        command: None,
+    }
+}
+
+/// The socket-access sub-check from cmux's reported `access_mode`, or the
+/// error the CLI hit asking for it. Claims no more than the modes give: both
+/// supported modes admit only processes of this Mac user.
+fn cmux_access_check(mode: Result<String, crate::cmux::CmuxError>) -> HealthCheck {
+    use crate::cmux::CmuxError;
+    let id = "cmux_socket";
+    let label = "Allowed to control cmux";
+    match mode.as_deref() {
+        Ok("automation") => HealthCheck::new(
+            id,
+            label,
+            HealthStatus::Pass,
+            "Socket Control Mode: Automation. Only processes running as your Mac user can control cmux.",
+        ),
+        Ok("password") => HealthCheck::new(
+            id,
+            label,
+            HealthStatus::Pass,
+            "Socket Control Mode: Password. Only processes running as your Mac user can control cmux; the cmux CLI \
+             presents the password saved in cmux, so mAIestro Code stores none.",
+        ),
+        Ok("allowAll") => HealthCheck::new(
+            id,
+            label,
+            HealthStatus::Warn,
+            "Socket Control Mode: Full open access, which cmux itself calls unsafe. Automation or Password is enough \
+             for mAIestro Code.",
+        ),
+        Ok(other) => HealthCheck::new(id, label, HealthStatus::Info, format!("Socket Control Mode: {other}")),
+        Err(CmuxError::NotRunning) => HealthCheck::new(
+            id,
+            label,
+            HealthStatus::Warn,
+            "cmux isn't running, or its socket is off, so access couldn't be checked. Start cmux and check again; \
+             Socket Control Mode must be Automation or Password.",
+        ),
+        Err(e) => HealthCheck::new(id, label, HealthStatus::Fail, e.message()),
     }
 }
 
@@ -1268,6 +1336,12 @@ const MIN_TOOL_VERSIONS: &[ToolMinimum] = &[
         min: "1.80.0",
         reason: "needed for --disable-workspace-trust",
     },
+    ToolMinimum {
+        tool: "cmux",
+        label: "cmux",
+        min: "0.65.0",
+        reason: "the version mAIestro Code's cmux sessions were verified on (`workspace create`, `--id-format uuids`, socket modes)",
+    },
 ];
 
 /// Extract the first run of `digits(.digits)*` from the first non-empty line of
@@ -1423,6 +1497,7 @@ fn tool_applies(tool: &str, agent: Agent, terminal_host: TerminalHost) -> bool {
     match tool {
         "claude" | "codex" | "agy" | "copilot" => tool == agent.tool(),
         "code" => terminal_host == TerminalHost::Vscode,
+        "cmux" => terminal_host == TerminalHost::Cmux,
         _ => true,
     }
 }
@@ -1680,6 +1755,7 @@ mod tests {
             parse_version("1.137.0\n645f29cc3176500b4b5762ba887cf2a7f0ffdf2c\narm64\n"),
             Some(vec![1, 137, 0])
         );
+        assert_eq!(parse_version("cmux 0.65.0 (108) [dda24fbd2]\n"), Some(vec![0, 65, 0]));
     }
 
     #[test]
@@ -1721,6 +1797,24 @@ mod tests {
         assert_eq!(for_agent(Agent::Antigravity), vec!["agy", "git", "code"]);
         assert_eq!(for_agent(Agent::Copilot), vec!["copilot", "git", "code"]);
         assert_eq!(applies(Agent::Claude, TerminalHost::TerminalApp), vec!["claude", "git"]);
+        assert_eq!(applies(Agent::Claude, TerminalHost::Cmux), vec!["claude", "git", "cmux"]);
+    }
+
+    /// The cmux socket sub-check: both supported modes pass, full open access
+    /// warns, a refused or failed password fails with its fix, and a cmux
+    /// that isn't running only warns.
+    #[test]
+    fn cmux_access_sub_check() {
+        use crate::cmux::CmuxError;
+        assert_eq!(cmux_access_check(Ok("automation".into())).status, HealthStatus::Pass);
+        assert_eq!(cmux_access_check(Ok("password".into())).status, HealthStatus::Pass);
+        assert_eq!(cmux_access_check(Ok("allowAll".into())).status, HealthStatus::Warn);
+        let denied = cmux_access_check(Err(CmuxError::AccessDenied));
+        assert_eq!(denied.status, HealthStatus::Fail);
+        assert!(denied.detail.contains("Automation or Password"), "{}", denied.detail);
+        assert_eq!(cmux_access_check(Err(CmuxError::PasswordRejected)).status, HealthStatus::Fail);
+        assert_eq!(cmux_access_check(Err(CmuxError::PasswordMissing)).status, HealthStatus::Fail);
+        assert_eq!(cmux_access_check(Err(CmuxError::NotRunning)).status, HealthStatus::Warn);
     }
 
     /// The Terminal Automation sub-check: a denial fails with the System

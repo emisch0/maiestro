@@ -316,6 +316,7 @@ async fn do_spawn(d: SpawnDecision<'_>) -> Result<SpawnResult, String> {
         editor_agent: None,
         terminal_host,
         terminal_app_window: None,
+        cmux_workspace: None,
         hidden: None,
         notice: None,
     };

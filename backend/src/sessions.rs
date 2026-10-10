@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::Agent;
 use crate::terminal_host::TerminalHost;
 use crate::repo_settings::HideState;
+use crate::cmux::CmuxWorkspace;
 use crate::terminal_app::TerminalAppWindow;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +61,11 @@ pub struct Session {
     /// window closes; `terminal::probe` tells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_app_window: Option<TerminalAppWindow>,
+    /// The cmux workspace the session last opened in (`terminal_host` = cmux),
+    /// so reopening can select it and teardown can close it. Stale once that
+    /// workspace closes; `cmux::probe` tells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmux_workspace: Option<CmuxWorkspace>,
     /// Hide/snooze state for this work item. `None` = visible. Snooze expiry is
     /// resolved on the frontend at render time.
     #[serde(default)]

@@ -37,6 +37,17 @@ describe("extractAppFormDefaults", () => {
       "terminal_app",
     );
     expect(extractAppFormDefaults({ properties: { terminal_host: { default: "vscode" } } }).terminalHostDefault).toBe("vscode");
+    expect(extractAppFormDefaults({ properties: { terminal_host: { default: "cmux" } } }).terminalHostDefault).toBe("cmux");
     expect(extractAppFormDefaults({}).terminalHostDefault).toBe("vscode");
+  });
+
+  // The Terminal layout control selects the schema default when the setting
+  // is null; anything unknown degrades to per-repo.
+  it("reads the terminal layout default, falling back to per-repo", () => {
+    expect(extractAppFormDefaults({ properties: { terminal_layout: { default: "tabs" } } }).terminalLayoutDefault).toBe("tabs");
+    expect(extractAppFormDefaults({ properties: { terminal_layout: { default: "grid" } } }).terminalLayoutDefault).toBe(
+      "per-repo",
+    );
+    expect(extractAppFormDefaults({}).terminalLayoutDefault).toBe("per-repo");
   });
 });

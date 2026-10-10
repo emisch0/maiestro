@@ -12,13 +12,14 @@ import { Platform, SetTerminalHostOutcome, TerminalHost, WindowPermission } from
 export const TERMINAL_HOST_PRODUCTS: Record<TerminalHost, string> = {
   vscode: "Visual Studio Code",
   terminal_app: "Terminal.app",
+  cmux: "cmux",
 };
 
 /** The terminal hosts to offer on `platform`. One the file already names stays
  *  listed even where it isn't available (a settings file synced from a Mac),
  *  so the select shows the real value rather than a blank. */
 export function terminalHostOptions(platform: Platform, current: TerminalHost | null | undefined): TerminalHost[] {
-  const hosts: TerminalHost[] = platform === "macos" ? ["vscode", "terminal_app"] : ["vscode"];
+  const hosts: TerminalHost[] = platform === "macos" ? ["vscode", "terminal_app", "cmux"] : ["vscode"];
   if (current && !hosts.includes(current)) hosts.push(current);
   return hosts;
 }
